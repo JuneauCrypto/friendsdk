@@ -1,5 +1,5 @@
 {
   "extends": "../tsconfig.json",
   "compilerOptions": { "rootDir": "..", "noEmit": true },
-  "include": ["**/*.tsx", "**/*.json", "../examples/styles.d.ts"]
+  "include": ["**/*.tsx", "**/*.ts", "**/*.json", "../examples/styles.d.ts"]
 }

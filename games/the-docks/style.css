@@ -1,0 +1,67 @@
+.docks{--ink:#1d1a2b;--card:#fffdf6;--accent:#ccff00;position:relative;width:100%;height:100%;overflow:hidden;color:var(--ink);background:#bfe9ff;
+  font:13px/1.35 ui-rounded,"Nunito","Segoe UI",system-ui,sans-serif;user-select:none;-webkit-user-select:none}
+.docks-stage{position:absolute;inset:0;touch-action:none}
+.docks-canvas{display:block;width:100%;height:100%}
+.docks-labels{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.docks-label{position:absolute;left:0;top:0;white-space:nowrap;font-weight:800;font-size:11px;padding:3px 8px;border-radius:999px;background:#ffffffe0;border:2px solid var(--ink)}
+.docks-label.mine{background:var(--accent)}
+
+.docks button{font:inherit;font-weight:800;cursor:pointer;padding:8px 11px;border:2px solid var(--ink);border-radius:12px;background:#fff;color:var(--ink);box-shadow:0 3px 0 var(--ink);touch-action:manipulation}
+.docks button:active:not(:disabled){transform:translateY(2px);box-shadow:0 1px 0 var(--ink)}
+.docks button:disabled{cursor:default;opacity:.45}
+.docks button:focus-visible{outline:3px solid #7a4dff;outline-offset:2px}
+.docks button.rf-frame-primary{background:var(--accent)}
+.docks button small{display:block;font-weight:600;font-size:10px;opacity:.75}
+
+.docks-hud{position:absolute;inset:10px 10px auto;display:flex;justify-content:space-between;align-items:flex-start;gap:8px;pointer-events:none}
+.docks-card{background:var(--card);border:2px solid var(--ink);border-radius:14px;padding:7px 10px;box-shadow:0 3px 0 #1d1a2b33}
+.docks-id{min-width:170px}.docks-id strong{display:block;font-size:14px;text-transform:capitalize}
+.docks-xp,.docks-meter{display:grid;grid-template-columns:44px 1fr;align-items:center;gap:6px;font-size:10px;font-weight:800;margin-top:3px}
+.docks-xp div,.docks-meter div{height:8px;border:2px solid var(--ink);border-radius:6px;overflow:hidden;background:#eee}
+.docks-xp i,.docks-meter i{display:block;height:100%;background:#7a4dff;transition:width .3s}.docks-meter i.t-food{background:#ff8a5b}.docks-meter i.t-joy{background:#ffc83d}
+.docks-wallet{display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-weight:700;font-size:11px}
+.docks-credits{font-size:16px;font-weight:900}.docks-sim{font-size:10px;opacity:.7}
+
+.docks-toast{position:absolute;left:50%;bottom:132px;transform:translateX(-50%);max-width:min(90%,520px);margin:0;padding:5px 12px;border-radius:999px;background:#1d1a2bd9;color:#fff;font-weight:700;font-size:12px;text-align:center;pointer-events:none}
+.docks-retry{position:absolute;top:120px;left:10px}
+.docks-bar{position:absolute;left:50%;bottom:50px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:6px;width:min(calc(100% - 20px),520px)}
+.docks .docks-act{width:100%;max-width:340px;background:#fff}
+.docks .docks-act.ready{background:var(--accent)}
+.docks-act kbd{font:inherit;font-size:10px;border:1.5px solid var(--ink);border-radius:5px;padding:0 5px;margin-left:4px}
+.docks-nav{display:flex;gap:6px}
+.docks-nav button{padding:5px 9px;display:flex;align-items:center;gap:5px}
+.docks-nav span{font-size:12px}
+
+.docks-loading{height:100%;display:flex;gap:14px;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center;font:700 15px system-ui,sans-serif;background:#bfe9ff}
+.docks-overlay{position:absolute;inset:0;z-index:5}
+.docks-boat{font-size:56px;animation:docks-bob 1.6s ease-in-out infinite}
+
+.docks h3{margin:14px 0 4px;font-size:14px}
+.docks table{width:100%;text-align:left;border-collapse:collapse;margin:8px 0;font-size:12px}.docks th,.docks td{padding:5px 4px;border-bottom:1px solid #ddd}
+.docks-row{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}.docks-row.tight{margin:0;flex-wrap:nowrap}
+.docks-note{font-size:11px;opacity:.8}
+.docks-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid #ddd}.docks-item small{display:block;margin-top:2px;font-size:11px}
+.docks-reveal{text-align:center}.docks-reveal>span{display:block;font-size:60px}.docks-reveal .docks-row{justify-content:center}
+.docks-help{padding-left:18px;margin:0}.docks-help li{margin:6px 0}
+.docks label{display:block;margin:12px 0}
+.docks-map{display:grid;gap:6px;margin:10px 0}.docks-map-row{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.docks-berth{min-height:64px;border:2px solid var(--ink);border-radius:12px;display:grid;place-items:center;text-align:center;font-weight:800;font-size:11px;padding:4px;background:#3fa7d6}
+.docks-berth.taken{background:#a8dd83}.docks-berth.mine{background:var(--accent)}
+.docks-berth.open button{width:100%;height:100%;font-size:11px;padding:4px;background:#e8f7ff}
+
+@keyframes docks-bob{50%{transform:translateY(-6px) rotate(-4deg)}}
+.docks.reduced *{animation:none!important;transition:none!important}
+@media (prefers-reduced-motion:reduce){.docks *{animation:none!important;transition:none!important}}
+
+@media (max-aspect-ratio:1/1){
+  .docks-hud{inset:6px 6px auto;gap:4px}
+  .docks-card{padding:5px 7px;border-radius:10px}
+  .docks-id{min-width:0;width:52%}.docks-id strong{font-size:11px}
+  .docks-xp,.docks-meter{grid-template-columns:34px 1fr;font-size:9px}
+  .docks-credits{font-size:13px}.docks-wallet{font-size:9px}
+  .docks-bar{bottom:46px;gap:4px}
+  .docks-nav{gap:4px}.docks-nav button{flex-direction:column;gap:0;padding:3px 6px;font-size:14px;border-radius:9px}.docks-nav span{font-size:9px}
+  .docks .docks-act{padding:6px;font-size:12px}
+  .docks-toast{bottom:124px;font-size:10px}
+  .docks-label{font-size:9px;padding:2px 6px}
+}

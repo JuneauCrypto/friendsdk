@@ -1,0 +1,22 @@
+{
+  "name": "The Docks",
+  "consumable": "Treat Bag",
+  "price": "1000000000000000000",
+  "outcomes": [
+    {
+      "name": "Clover Charm",
+      "chanceBps": 6000,
+      "reward": "500000000000000000"
+    },
+    {
+      "name": "Moon Charm",
+      "chanceBps": 3000,
+      "reward": "1000000000000000000"
+    },
+    {
+      "name": "Star Charm",
+      "chanceBps": 1000,
+      "reward": "3000000000000000000"
+    }
+  ]
+}
