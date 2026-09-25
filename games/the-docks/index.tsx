@@ -12,7 +12,7 @@ import { ChainMap } from "./chainmap.js";
 import { readChainLand, sampleLand, type Land } from "./land.js";
 import {
   ADJ_BONUS, BURN_SHARE_DOCK, BURN_SHARE_PURCHASE, CREDITS_PER_RF, ITEMS, MARKET_FEE, STATUS_TIERS,
-  attach, attachSlots, buyCredits, buyFromStall, createWorld, gainXp, landOrigin, setLand, statusOf, touching,
+  SHOP, attach, attachSlots, buyCredits, buyFromStall, createWorld, gainXp, landOrigin, placeItem, setLand, statusOf, touching,
   sellProduce, spotLabel, step, useSpot, xpForLevel, you, type ItemId, type Slot, type Spot, type World,
 } from "./model.js";
 import "@rarefriends/friendsdk/frame.css";
@@ -25,6 +25,8 @@ const CHARM_XP = [0.1, 0.2, 0.5];
 const TREAT = [{ snack: "Kibble Crumble", boost: 20 }, { snack: "Berry Moon Tart", boost: 35 }, { snack: "Golden Honeycake", boost: 60 }];
 const CREDIT_PACKS = [{ credits: 500, label: "$4.99" }, { credits: 1200, label: "$9.99" }];
 const KIBBLE_COOLDOWN = 30_000;
+const fmtW = (n: number) => n >= 1000 ? Math.round(n).toLocaleString() : String(Math.round(n * 100) / 100);
+
 
 export default function TheDocks({ friendId, client, paused }: GameComponentProps) {
   const definition = client.definition;
@@ -45,7 +47,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const [landError, setLandError] = useState("");
   const engine = useRef<Engine | null>(null);
   const stage = useRef<HTMLDivElement>(null);
-  const sound = useRef<FriendSoundKit | null>(null), locked = useRef(false), epoch = useRef(0), acc = useRef(0), level = useRef(1), tier = useRef(-1);
+  const sound = useRef<FriendSoundKit | null>(null), locked = useRef(false), epoch = useRef(0), acc = useRef(0), level = useRef(1), tier = useRef(-1), toastAt = useRef(0);
   const inventory = snapshot?.inventory ?? [0n, 0n, 0n];
   const uiBlocked = Boolean(menu) || paused;
 
@@ -99,7 +101,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           if (acc.current > 0.25) {
             acc.current = 0;
             const w = world.current;
-            if (w.log.length) setToast(w.log.splice(0).at(0)!);
+            if (w.log.length && Date.now() - toastAt.current > 3000) setToast(w.log.splice(0).at(0)!);
             if (w.level > level.current) { level.current = w.level; setToast(`Level up! Dock rep ${w.level}.`); cue("reveal-rare"); }
             const st = statusOf(w, you(w));
             if (st.tier !== tier.current) {
@@ -120,7 +122,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   useEffect(() => { world.current.charmBoost = inventory.reduce((s, n, i) => s + Number(n) * (CHARM_XP[i] ?? 0), 0); }, [inventory]);
 
   const cue = (c: FriendSoundCue) => { sound.current?.play(c); };
-  const say = (text: string, c: FriendSoundCue = "select") => { if (text) { setToast(text); cue(c); } setTick(x => x + 1); };
+  const say = (text: string, c: FriendSoundCue = "select") => { if (text) { setToast(text); toastAt.current = Date.now(); cue(c); } setTick(x => x + 1); };
 
   const activateRef = useRef<(s: Spot | null) => void>(() => {});
   activateRef.current = activate;
@@ -278,6 +280,11 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <div className="docks-row">{CREDIT_PACKS.map(p => <button type="button" key={p.credits} className="rf-frame-primary"
           onClick={() => { buyCredits(w, p.credits); say(`+${p.credits} credits · ${((p.credits / CREDITS_PER_RF) * BURN_SHARE_PURCHASE).toFixed(1)} RF burned (simulated)`, "purchase"); }}>
           🪙 {p.credits} · {p.label} <small>(simulated)</small></button>)}</div>
+        <h3>Docks shop</h3>
+        <p>Our own items, placed on top of your land (your Friend NFT is never changed). They add development and can later become on-chain Docks items, separate from Rare Friends NFTs. Simulated for this preview.</p>
+        {SHOP.map(id => <div className="docks-item" key={id}>
+          <span><strong>{ITEMS[id].icon} {ITEMS[id].name}</strong><small>{ITEMS[id].blurb}{ITEMS[id].dev ? ` · +${ITEMS[id].dev} development` : ""}{w.bag[id] ? ` · ${w.bag[id]} in bag` : ""}</small></span>
+          <button type="button" disabled={w.credits < ITEMS[id].price} onClick={() => say(buyFromStall(w, id), "purchase")}>🪙 {ITEMS[id].price}</button></div>)}
         <h3>Trading board</h3>
         <p>Listings from neighbours' stalls across the chain (sample data).</p>
         {w.plots.filter(p => p.owner === "neighbour").flatMap(p => p.stall.map(id => <div className="docks-item" key={`${p.id}-${id}`}>
@@ -288,7 +295,12 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         {(Object.keys(ITEMS) as ItemId[]).filter(id => w.bag[id] > 0).length === 0 && <p>Your bag is empty.</p>}
         {(Object.keys(ITEMS) as ItemId[]).filter(id => w.bag[id] > 0).map(id => <div className="docks-item" key={id}>
           <span><strong>{ITEMS[id].icon} {ITEMS[id].name} × {w.bag[id]}</strong><small>{ITEMS[id].blurb}</small></span>
-          {ITEMS[id].kind === "hat" ? <button type="button" onClick={() => { w.hat = w.hat === id ? null : id; engine.current?.refreshHat(); say(w.hat ? `Wearing the ${ITEMS[id].name}.` : "Hat off."); }}>{w.hat === id ? "Take off" : "Wear"}</button>
+          {ITEMS[id].kind === "structure" ? <button type="button" onClick={() => {
+              const pos = engine.current?.position; if (!pos) return;
+              const msg = placeItem(w, id, pos.x, pos.y); say(msg, msg.startsWith("Placed") ? "reward" : "select");
+              if (msg.startsWith("Placed")) { engine.current?.rebuild(); setMenu(null); }
+            }}>Place here</button>
+            : ITEMS[id].kind === "hat" ? <button type="button" onClick={() => { w.hat = w.hat === id ? null : id; engine.current?.refreshHat(); say(w.hat ? `Wearing the ${ITEMS[id].name}.` : "Hat off."); }}>{w.hat === id ? "Take off" : "Wear"}</button>
             : id === "fert" ? <button type="button" onClick={() => {
               const plant = me.plants.filter(p => p.stage < 3).sort((a, b) => a.stage - b.stage)[0];
               if (!plant) { say("Your plants are all ripe."); return; }
@@ -303,18 +315,21 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           say(msg, "reveal-rare");
         }} credits={w.credits} />
         <h3>Status</h3>
-        <p>Status = <strong>weight</strong> (your land's true on-chain size) + <strong>development</strong> (rep level, tools and hats, lands you touch, RF burned). Each tier adds +10% produce &amp; rep.</p>
-        <div className="docks-item"><span><strong>{status.name}</strong><small>Weight {status.weight} + development {status.development} = {status.score}{status.next ? ` · ${status.next} to ${STATUS_TIERS[status.tier + 1].name}` : " · top tier"}</small></span></div>
-        <h3>Chain leaderboard</h3>
+        <p>Rank follows the Rare Friends reward system: your land's <strong>on-chain reward weight</strong> (Generation × Activation tier). Development in The Docks adds up to <strong>+50%</strong> on top, so building moves you up within your rank. Each rank adds +10% produce &amp; rep.</p>
+        <div className="docks-item"><span><strong>{status.name}{status.gen ? ` · Gen ${status.gen} · Tier ${status.aTier}` : ""}</strong>
+          <small>Reward weight {fmtW(status.weight)} × (1 + {Math.round(status.devBonus * 100)}% development) = {fmtW(status.score)}{status.next ? ` · ${fmtW(status.next)} to ${STATUS_TIERS[status.tier + 1].name}` : " · top rank"}
+          {!status.weight && " · reward weight unknown until your land is imported"}</small></span></div>
+        <h3>Chain hierarchy</h3>
         {[...w.plots].map(p => ({ p, st: statusOf(w, p) })).sort((a, b) => b.st.score - a.st.score).map(({ p, st }, i) =>
-          <div className="docks-item" key={p.id}><span><strong>{i + 1}. {p.owner === "you" ? "You" : p.name}</strong>
-            <small>{st.name} · weight {st.weight} · development {st.development}{p.owner === "you" ? "" : " · sample"}</small></span></div>)}
+          <div className="docks-item" key={p.id}><span><strong>{i + 1}. {p.owner === "you" ? "You" : p.name} · {st.name}</strong>
+            <small>Gen {st.gen || "?"} · Tier {st.aTier} · weight {fmtW(st.weight)} · +{Math.round(st.devBonus * 100)}% dev{p.owner === "you" ? "" : " · sample"}</small></span></div>)}
         <p className="docks-note">Attach fees are simulated; {BURN_SHARE_DOCK * 100}% is burned as RF. Spots touching more lands cost more. Other lands are sample data in this preview.</p>
       </> : menu === "help" ? <ul className="docks-help">
         <li><strong>Move:</strong> WASD / arrows, or tap the ground. <strong>Interact:</strong> E or the action button (or tap the thing again when you're next to it).</li>
         <li><strong>Grow:</strong> water your 3 plants; ripe bushes give berries. Well-fed chickens lay eggs.</li>
         <li><strong>Attach:</strong> use your sign (or Chain) to attach your land edge-to-edge onto the chain. Every land you touch adds +25% produce and rep.</li>
-        <li><strong>Status:</strong> bigger lands (weight) and more development climb the tiers: Drifter → Settler → Merchant → Harbor Master → Admiral. Your flag grows with it.</li>
+        <li><strong>Status:</strong> your rank follows your Friend's on-chain reward weight (Generation × Activation tier): Speck → Hamlet → Village → Town → City → Capital. Docks items and development add up to +50%. Your flag grows with your rank.</li>
+        <li><strong>Build:</strong> buy Docks items in the Market, then stand on your land and choose Place here from your Bag.</li>
         <li><strong>Help neighbours:</strong> walk straight across onto their land, water their plants and feed their chickens for rep and tips.</li>
         <li><strong>Trade:</strong> sell produce at your stall, buy tools, feed and hats at neighbours' stalls or the Market.</li>
         <li><strong>Home:</strong> feed and pet your Friend, open Treat Bags (simulated RF) for Charms.</li>

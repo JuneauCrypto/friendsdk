@@ -16,8 +16,8 @@ export const ADJ_BONUS = 0.25;           // +25% produce & XP per land you touch
 export const SURF = { water: 0, land: 1, deck: 2, plank: 3 } as const;
 export type Plant = { stage: number; growth: number; water: number };
 export type Animal = { hunger: number; lay: number; x: number; y: number; tx: number; ty: number };
-export type ItemId = "feed" | "fert" | "can" | "cap" | "crown" | "berry" | "egg";
-export type Item = { name: string; icon: string; price: number; kind: "consumable" | "tool" | "hat" | "produce"; blurb: string };
+export type ItemId = "feed" | "fert" | "can" | "cap" | "crown" | "berry" | "egg" | "lantern" | "flowerbed" | "fountain" | "windmill" | "lighthouse";
+export type Item = { name: string; icon: string; price: number; kind: "consumable" | "tool" | "hat" | "produce" | "structure"; blurb: string; dev?: number };
 export const ITEMS: Readonly<Record<ItemId, Item>> = {
   feed: { name: "Feed Sack", icon: "🌾", price: 15, kind: "consumable", blurb: "Feeds an animal once (+50 food)" },
   fert: { name: "Fertilizer", icon: "🧪", price: 25, kind: "consumable", blurb: "Instantly grows a plant one stage" },
@@ -26,7 +26,14 @@ export const ITEMS: Readonly<Record<ItemId, Item>> = {
   crown: { name: "Flower Crown", icon: "🌼", price: 220, kind: "hat", blurb: "Cosmetic hat your Friend wears" },
   berry: { name: "Dock Berries", icon: "🫐", price: 6, kind: "produce", blurb: "Grown on your deck. Sell, feed your Friend or animals" },
   egg: { name: "Fresh Egg", icon: "🥚", price: 12, kind: "produce", blurb: "Laid by well-fed chickens. Sell at your stall" },
+  // Docks items: our own goods, placed on top of a Friend's land (the NFT itself is never changed)
+  lantern: { name: "Harbor Lantern", icon: "🏮", price: 60, kind: "structure", blurb: "Glows on your land", dev: 15 },
+  flowerbed: { name: "Flower Bed", icon: "🌷", price: 90, kind: "structure", blurb: "A splash of colour", dev: 25 },
+  fountain: { name: "Fountain", icon: "⛲", price: 250, kind: "structure", blurb: "A centrepiece for your land", dev: 70 },
+  windmill: { name: "Windmill", icon: "🌬️", price: 400, kind: "structure", blurb: "+10% berry harvests", dev: 110 },
+  lighthouse: { name: "Lighthouse", icon: "🗼", price: 900, kind: "structure", blurb: "Landmark of the chain", dev: 250 },
 };
+export const SHOP: ItemId[] = ["lantern", "flowerbed", "fountain", "windmill", "lighthouse", "can", "cap", "crown", "feed", "fert"];
 
 /** A land plus its deck, as one piece in piece-local tile coordinates. */
 export type Piece = {
@@ -40,6 +47,7 @@ export type PlotState = {
   attached: boolean;                     // false = adrift (yours, before attaching)
   plants: Plant[]; animals: Animal[]; stall: ItemId[];
   thanks: number; development: number;   // development points (samples: fixed; yours: computed)
+  decor: { item: ItemId; x: number; y: number }[];   // Docks items placed on the land (land-local tiles)
 };
 export type Pet = { hunger: number; joy: number; kibbleAt: number };
 export type World = {
@@ -89,25 +97,47 @@ export const deckOrigin = (p: PlotState) => ({ x: p.pos.x + p.piece.deck.x, y: p
 const mulberry = (seed: number) => () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 const newAnimals = (rand: () => number, n: number): Animal[] => Array.from({ length: n }, () => ({ hunger: 40 + rand() * 40, lay: rand() * 20, x: 7, y: 3, tx: 7, ty: 3 }));
 
-/* ── Status: weight (land size) + development ── */
+/* ── Status: official Rare Friends reward weight × in-app development ──
+ * Reward weight comes from the Friend's on-chain Generation and Activation tier,
+ * using the published table (rarefriends.com/docs/generations). Development can
+ * add up to +50% on top, so it moves you within a rank but never replaces the
+ * reward-system hierarchy. */
+export const REWARD_WEIGHT: Readonly<Record<number, readonly number[]>> = {
+  1: [175000, 270000, 416250, 641250, 987187.5],
+  2: [16000, 24375, 37125, 56531.25, 86062.5],
+  3: [1450, 2212.5, 3375, 5146.875, 7846.875],
+  4: [130, 198.75, 303.75, 464.0625, 708.75],
+  5: [12, 18.375, 28.125, 43.03125, 65.8125],
+  6: [1.1, 1.6875, 2.5875, 3.965625, 6.075],
+};
 export const STATUS_TIERS = [
-  { min: 0, name: "Drifter", color: 0xbfbfbf },
-  { min: 120, name: "Settler", color: 0x7db4db },
-  { min: 260, name: "Merchant", color: 0xccff00 },
-  { min: 450, name: "Harbor Master", color: 0xf2ce68 },
-  { min: 700, name: "Admiral", color: 0xed927e },
+  { min: 0, name: "Speck", color: 0xbfbfbf },
+  { min: 5, name: "Hamlet", color: 0x7db4db },
+  { min: 50, name: "Village", color: 0xb9d984 },
+  { min: 500, name: "Town", color: 0xccff00 },
+  { min: 5000, name: "City", color: 0xf2ce68 },
+  { min: 50000, name: "Capital", color: 0xed927e },
 ] as const;
-export const landWeight = (p: PlotState) => p.land.tiles.filter(Boolean).length;
-export function developmentOf(w: World, p: PlotState) {
-  if (p.owner !== "you") return p.development;
-  const kept = w.bag.can * 40 + (w.bag.cap + w.bag.crown) * 30;
-  return Math.round((w.level - 1) * 25 + kept + touching(w, p).length * 30 + Math.min(80, w.burnedRf * 10));
+export function rewardWeight(p: PlotState) {
+  const g = Number(p.land.traits.Generation), t = Number(p.land.traits["Activation tier"] ?? 0);
+  return REWARD_WEIGHT[g]?.[Math.max(0, Math.min(4, t))] ?? 0;
 }
+export function developmentOf(w: World, p: PlotState) {
+  const decor = p.decor.reduce((s, d) => s + (ITEMS[d.item].dev ?? 0), 0);
+  if (p.owner !== "you") return p.development + decor;
+  const kept = w.bag.can * 40 + (w.bag.cap + w.bag.crown) * 30;
+  return Math.round((w.level - 1) * 25 + kept + decor + touching(w, p).length * 30 + Math.min(80, w.burnedRf * 10));
+}
+export const MAX_DEV_BONUS = 0.5;
 export function statusOf(w: World, p: PlotState) {
-  const weight = landWeight(p), development = developmentOf(w, p), score = weight + development;
+  const weight = rewardWeight(p), development = developmentOf(w, p);
+  const devBonus = Math.min(MAX_DEV_BONUS, development / 1000);
+  const score = weight * (1 + devBonus);
   let tier = 0; STATUS_TIERS.forEach((t, i) => { if (score >= t.min) tier = i; });
   const next = STATUS_TIERS[tier + 1];
-  return { weight, development, score, tier, name: STATUS_TIERS[tier].name, color: STATUS_TIERS[tier].color, next: next ? next.min - score : 0 };
+  const gen = Number(p.land.traits.Generation) || 0, aTier = Number(p.land.traits["Activation tier"] ?? 0);
+  return { weight, development, devBonus, score, tier, name: STATUS_TIERS[tier].name, color: STATUS_TIERS[tier].color,
+    next: next ? next.min - score : 0, gen, aTier };
 }
 export const statusBonus = (w: World) => 0.1 * statusOf(w, you(w)).tier;
 
@@ -185,26 +215,38 @@ export function chainBounds(w: World) {
 export function createWorld(friendId: bigint, land: Land): World {
   const rand = mulberry(Number(friendId % 2147483647n) || 1);
   // sample lands at true size, from a big generation-2-style land down to a tiny gen-6 one
-  const samples: [string, string, string, number, number, number, number][] = [
-    ["Harbor Heights", "Garden", "Dither", 13, 11, 0xccff00, 260],
-    ["Pip's Orchard", "Garden", "Plain", 9, 8, 0xb9d984, 120],
-    ["Juniper Wharf", "Coastal", "Plain", 6, 6, 0x7db4db, 60],
-    ["Rook's Roost", "Rooftop", "Cross Grid", 9, 8, 0xb3a0d8, 200],
-    ["Moss Landing", "Mineral", "Hatch", 4, 4, 0xf2ce68, 40],
-    ["Quill Quay", "Reading", "Plain", 6, 6, 0xed927e, 90],
-    ["Tinker Pier", "Industrial", "Dither", 9, 8, 0xd9d9d9, 150],
-    ["Buoy Nook", "Coastal", "Hatch", 2, 2, 0x7db4db, 10],
+  // name, scenery, floor, chunks w × h (true size), accent, development, generation, activation tier, Docks items
+  const samples: [string, string, string, number, number, number, number, number, number, ItemId[]][] = [
+    ["Harbor Heights", "Garden", "Dither", 13, 11, 0xccff00, 420, 2, 1, ["lighthouse", "fountain", "lantern"]],
+    ["Pip's Orchard", "Garden", "Plain", 9, 8, 0xb9d984, 120, 3, 0, ["flowerbed"]],
+    ["Juniper Wharf", "Coastal", "Plain", 6, 6, 0x7db4db, 60, 4, 2, ["lantern"]],
+    ["Rook's Roost", "Rooftop", "Cross Grid", 9, 8, 0xb3a0d8, 300, 3, 2, ["windmill", "lantern"]],
+    ["Moss Landing", "Mineral", "Hatch", 4, 4, 0xf2ce68, 40, 5, 1, []],
+    ["Quill Quay", "Reading", "Plain", 6, 6, 0xed927e, 90, 4, 0, ["flowerbed"]],
+    ["Tinker Pier", "Industrial", "Dither", 9, 8, 0xd9d9d9, 150, 3, 1, ["fountain"]],
+    ["Buoy Nook", "Coastal", "Hatch", 2, 2, 0x7db4db, 10, 6, 3, []],
   ];
   const world: World = { plots: [], credits: 300, burnedRf: 0, xp: 0, level: 1,
-    bag: { feed: 2, fert: 1, can: 0, cap: 0, crown: 0, berry: 2, egg: 0 }, hat: null,
+    bag: { feed: 2, fert: 1, can: 0, cap: 0, crown: 0, berry: 2, egg: 0, lantern: 1, flowerbed: 0, fountain: 0, windmill: 0, lighthouse: 0 }, hat: null,
     pet: { hunger: 70, joy: 65, kibbleAt: 0 }, log: [], charmBoost: 0, version: 0 };
-  samples.forEach(([name, scenery, floor, cw, ch, accent, dev], i) => {
+  samples.forEach(([name, scenery, floor, cw, ch, accent, dev, gen, tier, decor], i) => {
     const l = sampleLand(1000 + i * 77, scenery, floor, cw, ch);
+    l.traits = { ...l.traits, Generation: gen, "Activation tier": tier };
     const p: PlotState = { id: `n${i}`, name, owner: "neighbour", accent, land: l, piece: buildPiece(l), pos: { x: 0, y: 0 }, attached: false,
       plants: DECK.beds.map(() => ({ stage: Math.floor(rand() * 3), growth: rand(), water: 5 + rand() * 30 })),
       animals: newAnimals(rand, 1 + (i % 2)),
       stall: [(["feed", "fert", "can"] as ItemId[])[i % 3], (["cap", "crown", "feed", "fert"] as ItemId[])[i % 4]],
-      thanks: 0, development: dev };
+      thanks: 0, development: dev, decor: [] };
+    // put the sample's Docks items on free tiles, spiralling out from the land's centre
+    for (const item of decor) {
+      let best: { x: number; y: number } | null = null, bd = Infinity;
+      for (let y = 0; y < l.h; y++) for (let x = 0; x < l.w; x++) {
+        if (!l.tiles[y * l.w + x] || p.piece.blocked[(p.piece.land.y + y) * p.piece.w + p.piece.land.x + x]) continue;
+        const d = Math.hypot(x - l.w / 2 + (p.decor.length % 2 ? 2 : -2), y - l.h / 2 + p.decor.length);
+        if (d < bd) { bd = d; best = { x, y }; }
+      }
+      if (best) { p.decor.push({ item, ...best }); p.piece.blocked[(p.piece.land.y + best.y) * p.piece.w + p.piece.land.x + best.x] = 1; }
+    }
     if (i > 0) {
       // grow the sample chain deterministically: pick a slot that keeps it compact
       world.plots.push(p);
@@ -217,7 +259,7 @@ export function createWorld(friendId: bigint, land: Land): World {
     p.attached = true; world.plots.push(p);
   });
   const mine: PlotState = { id: "you", name: "Your land", owner: "you", accent: 0xccff00, land, piece: buildPiece(land), pos: { x: 0, y: 0 }, attached: false,
-    plants: DECK.beds.map(() => ({ stage: 1, growth: 0, water: 60 })), animals: newAnimals(rand, 1), stall: [], thanks: 0, development: 0 };
+    plants: DECK.beds.map(() => ({ stage: 1, growth: 0, water: 60 })), animals: newAnimals(rand, 1), stall: [], thanks: 0, development: 0, decor: [] };
   world.plots.unshift(mine);
   placeAdrift(world);
   return world;
@@ -320,7 +362,7 @@ export function useSpot(w: World, s: Spot): string {
   if (s.kind === "bed") {
     const plant = s.plot.plants[s.index];
     if (mine && plant.stage >= 3) {
-      const n = Math.round(3 * bonus(w)); w.bag.berry += n; plant.stage = 0; plant.growth = 0; gainXp(w, 6);
+      const n = Math.round(3 * bonus(w) * (s.plot.decor.some(d => d.item === "windmill") ? 1.1 : 1)); w.bag.berry += n; plant.stage = 0; plant.growth = 0; gainXp(w, 6);
       return `Harvested ${n} berries 🫐`;
     }
     const targets = w.bag.can && mine ? s.plot.plants : [plant];
@@ -345,6 +387,8 @@ export function buyFromStall(w: World, item: ItemId): string {
   const it = ITEMS[item];
   if (w.credits < it.price) return "Not enough credits.";
   if ((it.kind === "tool" || it.kind === "hat") && w.bag[item] > 0) return "You already own that.";
+  if (it.kind === "structure") { w.credits -= it.price; w.bag[item]++; w.burnedRf += (it.price * MARKET_FEE) / CREDITS_PER_RF;
+    return `Bought ${it.name}. Open your Bag and place it on your land.`; }
   w.credits -= it.price; w.bag[item]++;
   w.burnedRf += (it.price * MARKET_FEE) / CREDITS_PER_RF;
   if (it.kind === "hat" && !w.hat) w.hat = item;
@@ -373,7 +417,9 @@ export function attach(w: World, slot: Slot): string {
 export function detach(w: World) { placeAdrift(w); w.version++; }
 /** Swap in a freshly imported land (e.g. after the on-chain read finishes). */
 export function setLand(w: World, land: Land) {
-  const me = you(w); me.land = land; me.piece = buildPiece(land);
+  const me = you(w);
+  for (const d of me.decor) w.bag[d.item]++;          // the land changed shape: items go back to the bag
+  me.decor = []; me.land = land; me.piece = buildPiece(land);
   if (me.attached) {
     // the real land may be a different size: re-seat it at the nearest free slot
     const slots = attachSlots(w, me), here = me.pos;
@@ -383,4 +429,22 @@ export function setLand(w: World, land: Land) {
     }
   } else placeAdrift(w);
   w.version++;
+}
+
+/** Place a Docks item from the bag on the player's own land, on a free tile near (x, y). */
+export function placeItem(w: World, item: ItemId, x: number, y: number): string {
+  const me = you(w), lo = landOrigin(me);
+  if (ITEMS[item].kind !== "structure" || w.bag[item] < 1) return "Nothing to place.";
+  let best: { x: number; y: number } | null = null, bd = Infinity;
+  for (let ly = 0; ly < me.land.h; ly++) for (let lx = 0; lx < me.land.w; lx++) {
+    if (!me.land.tiles[ly * me.land.w + lx]) continue;
+    const pi = (me.piece.land.y + ly) * me.piece.w + me.piece.land.x + lx;
+    if (me.piece.blocked[pi]) continue;
+    const d = Math.hypot(lo.x + lx + 0.5 - x, lo.y + ly + 0.5 - y);
+    if (d > 0.9 && d < bd) { bd = d; best = { x: lx, y: ly }; }   // next to you, not under you
+  }
+  if (!best || bd > 3) return "Stand on your own land, next to an open spot.";
+  w.bag[item]--; me.decor.push({ item, x: best.x, y: best.y });
+  me.piece.blocked[(me.piece.land.y + best.y) * me.piece.w + me.piece.land.x + best.x] = 1;
+  return `Placed ${ITEMS[item].name} on your land (+${ITEMS[item].dev} development).`;
 }

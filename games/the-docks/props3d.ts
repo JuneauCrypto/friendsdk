@@ -107,3 +107,37 @@ export function floorTexture(floor: string) {
   t.colorSpace = THREE.SRGBColorSpace;
   return t;
 }
+
+/** Docks items: our own goods, drawn in colour so they read as add-ons on top of the monochrome land. */
+const c = (hex: number) => new THREE.MeshLambertMaterial({ color: hex });
+const WOOD = c(0xb9844f), RED = c(0xe2574c), STONE = c(0xe8e4dc), WATER = c(0x5fb3e6), GLOW = new THREE.MeshBasicMaterial({ color: 0xfff2a8 });
+export function makeDecor(item: string): THREE.Group {
+  const g = new THREE.Group();
+  const add = (...p: THREE.Object3D[]) => p.forEach(o => g.add(o));
+  switch (item) {
+    case "lantern":
+      add(part("box", [0.08, 1.1, 0.08], [0, 0.55, 0], black), part("box", [0.26, 0.3, 0.26], [0, 1.2, 0], GLOW), part("box", [0.32, 0.06, 0.32], [0, 1.38, 0], black));
+      break;
+    case "flowerbed":
+      add(part("box", [0.9, 0.2, 0.9], [0, 0.1, 0], WOOD));
+      for (let i = 0; i < 5; i++) g.add(part("box", [0.16, 0.16, 0.16], [-0.3 + (i % 3) * 0.3, 0.3, -0.2 + Math.floor(i / 3) * 0.4], [RED, signal, c(0xff7eb6)][i % 3]));
+      break;
+    case "fountain":
+      add(part("cyl", [0.48, 0.28, 0], [0, 0.14, 0], STONE), part("cyl", [0.38, 0.06, 0], [0, 0.3, 0], WATER), part("cyl", [0.08, 0.7, 0], [0, 0.55, 0], STONE), part("cyl", [0.22, 0.08, 0], [0, 0.88, 0], WATER));
+      break;
+    case "windmill": {
+      add(part("box", [0.7, 1.5, 0.7], [0, 0.75, 0], STONE), part("cone", [0.55, 0.5, 0], [0, 1.75, 0], RED));
+      const blades = new THREE.Group(); blades.position.set(0, 1.3, 0.4); blades.userData.spin = true;
+      blades.add(part("box", [1.8, 0.14, 0.04], [0, 0, 0], WOOD), part("box", [0.14, 1.8, 0.04], [0, 0, 0], WOOD));
+      g.add(blades);
+      break;
+    }
+    case "lighthouse":
+      for (let i = 0; i < 5; i++) g.add(part("cyl", [0.42 - i * 0.04, 0.5, 0], [0, 0.25 + i * 0.5, 0], i % 2 ? RED : STONE));
+      add(part("box", [0.4, 0.35, 0.4], [0, 2.7, 0], GLOW), part("cone", [0.34, 0.4, 0], [0, 3.08, 0], RED));
+      break;
+    default:
+      add(part("box", [0.5, 0.5, 0.5], [0, 0.25, 0], signal));
+  }
+  return g;
+}

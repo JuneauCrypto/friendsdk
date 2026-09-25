@@ -71,6 +71,9 @@ try {
   await page.keyboard.down("s"); await page.waitForTimeout(2200); await page.keyboard.up("s");
   await page.waitForTimeout(400);
   await shot("walk");
+  await btn("Bag").click();
+  await game.getByRole("button", { name: "Place here" }).first().click();
+  await game.getByText(/Placed Harbor Lantern/).waitFor();
   await btn("Market").click(); await btn("500").click(); await game.getByText(/\+500 credits/).waitFor();
   await page.keyboard.press("Escape");
   await btn("Home").click(); await btn("Buy 1").click(); await confirm();

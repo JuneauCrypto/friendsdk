@@ -67,24 +67,53 @@ land is 4 × 4 tiles) still play the same.
 - The preview seeds a chain of 8 sample lands of mixed sizes (one large
   generation-2-style land down to a 2 × 2 speck), clearly labelled as samples.
 
-## Status
+## Status and hierarchy
 
-`status score = weight + development`
+The chain's hierarchy follows the **Rare Friends reward system**. Each land's rank
+starts from its official **reward weight**, read from its on-chain Generation and
+Activation tier traits and the published table
+([rarefriends.com/docs/generations](https://rarefriends.com/docs/generations)):
 
-- **Weight** = land tiles (true on-chain land size).
-- **Development** (yours) = 25 per rep level above 1 + 40 for the Golden Can +
-  30 per hat + 30 per land touched + up to 80 for RF burned (10 per RF).
+| Gen | Tier 0 | Tier 1 | Tier 2 | Tier 3 | Tier 4 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 175,000 | 270,000 | 416,250 | 641,250 | 987,187.5 |
+| 2 | 16,000 | 24,375 | 37,125 | 56,531.25 | 86,062.5 |
+| 3 | 1,450 | 2,212.5 | 3,375 | 5,146.875 | 7,846.875 |
+| 4 | 130 | 198.75 | 303.75 | 464.0625 | 708.75 |
+| 5 | 12 | 18.375 | 28.125 | 43.03125 | 65.8125 |
+| 6 | 1.1 | 1.6875 | 2.5875 | 3.965625 | 6.075 |
 
-| Tier | Score | Perk |
+`score = reward weight × (1 + development bonus)`, with the development bonus
+capped at **+50%** (development points ÷ 1,000). Developing moves a land up
+within the reward-system hierarchy but never replaces it.
+
+Development (yours) = Docks items placed (lantern 15 · flower bed 25 · fountain 70
+· windmill 110 · lighthouse 250) + 25 per rep level above 1 + 40 Golden Can +
+30 per hat + 30 per land touched + up to 80 for RF burned.
+
+| Rank | Score | Perk |
 | --- | --- | --- |
-| Drifter | 0+ | — |
-| Settler | 120+ | +10% produce & rep |
-| Merchant | 260+ | +20% |
-| Harbor Master | 450+ | +30% |
-| Admiral | 700+ | +40% |
+| Speck | 0+ | — |
+| Hamlet | 5+ | +10% produce & rep |
+| Village | 50+ | +20% |
+| Town | 500+ | +30% |
+| City | 5,000+ | +40% |
+| Capital | 50,000+ | +50% |
 
-Each land flies a flag in its tier colour; the pole grows with the tier. The
-Chain screen shows your score breakdown and a leaderboard of every land.
+(Roughly: a gen-6 land is a Speck, gen-5 a Hamlet, gen-4 a Village, gen-3 a Town,
+gen-2 a City, gen-1 a Capital; tier upgrades and development push lands up.)
+Each land flies a flag in its rank colour, taller as it ranks up. The Chain screen
+shows your breakdown and the whole chain's hierarchy.
+
+## Docks items (our economy layer)
+
+The land is the Rare Friend and is never modified. On top of it, The Docks sells
+its own items (Market → Docks shop) that you place on your land from the Bag:
+Harbor Lantern 🪙60, Flower Bed 🪙90, Fountain 🪙250, Windmill 🪙400 (+10% berry
+harvests), Lighthouse 🪙900, plus tools, hats, feed and fertilizer. Items add
+development. In this preview they are simulated and session-only; later they can
+become on-chain Docks items (a separate collection that interacts with Friends,
+not Rare Friends NFTs).
 
 ## How to play
 
@@ -141,6 +170,7 @@ chance-game client. **Neighbouring lands are fictional sample data.**
 
 - Shared chain server: persistent positions, real neighbours, presence, and a spatial index so the chain can grow to thousands of lands.
 - Card checkout → treasury buys RF → verifiable on-chain burns shown in-game.
+- Docks items as on-chain tokens (e.g. an ERC-1155 collection on Robinhood Chain) owned by the Friend's wallet and verifiable in the app.
 - Player-to-player stall trading and wearable items (not in SDK v0.1.2).
 - Embedded wallets so players never see a seed phrase.
 

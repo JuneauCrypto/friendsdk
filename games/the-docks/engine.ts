@@ -5,7 +5,7 @@ import {
   DECK, SURF, deckOrigin, landOrigin, nearestSpot, spawnPoint, statusOf, walkable, you,
   type Spot, type World,
 } from "./model.js";
-import { floorTexture, makeProp } from "./props3d.js";
+import { floorTexture, makeDecor, makeProp } from "./props3d.js";
 
 type Options = {
   onNear: (spot: Spot | null) => void;
@@ -57,13 +57,14 @@ export function createEngine(container: HTMLElement, world: World, opts: Options
   type Dyn = { plants: THREE.Group[][]; chickens: THREE.Group[][]; needs: THREE.Mesh[][]; hungry: THREE.Mesh[][] };
   let dyn: Dyn = { plants: [], chickens: [], needs: [], hungry: [] };
   let labelEls: { el: HTMLDivElement; pos: THREE.Vector3 }[] = [];
+  let spinners: THREE.Object3D[] = [];
 
   function buildStatics() {
     scene.remove(statics);
     statics.traverse(o => { if ((o instanceof THREE.Mesh || o instanceof THREE.InstancedMesh) && o.geometry !== box && !o.userData.shared) o.geometry.dispose(); });
     statics = new THREE.Group(); scene.add(statics);
     dyn = { plants: [], chickens: [], needs: [], hungry: [] };
-    labels.replaceChildren(); labelEls = [];
+    labels.replaceChildren(); labelEls = []; spinners = [];
     const tmpM = new THREE.Object3D();
     const instanced = (material: THREE.Material, cells: [number, number][], h: number, y: number, jitter = 0) => {
       if (!cells.length) return;
@@ -109,6 +110,11 @@ export function createEngine(container: HTMLElement, world: World, opts: Options
         statics.add(m);
       }
 
+      for (const d of p.decor) {
+        const m = makeDecor(d.item); m.position.set(lo.x + d.x + 0.5, 0.02, lo.y + d.y + 0.5);
+        m.traverse(o => { o.userData.shared = true; if (o.userData.spin) spinners.push(o); });
+        statics.add(m);
+      }
       // deck with the game's farm
       const d = deckOrigin(p);
       const g = new THREE.Group(); g.position.set(d.x, 0, d.y); statics.add(g);
@@ -286,6 +292,7 @@ export function createEngine(container: HTMLElement, world: World, opts: Options
     const bob = reducedMotion || !player.walking ? 0 : Math.abs(Math.sin(t * 10)) * 0.06;
     friend.position.set(player.x, bob, player.y);
     drawFriend(player.facing, player.walking, reducedMotion ? 0 : Math.floor(t * (player.walking ? 10 : 5)) % 8);
+    if (!reducedMotion) for (const sp of spinners) sp.rotation.z += dt * 1.2;
     // dynamic props
     world.plots.forEach((p, pi) => {
       p.plants.forEach((pl, i) => {
@@ -340,6 +347,7 @@ export function createEngine(container: HTMLElement, world: World, opts: Options
     },
     refreshHat() { frameKey = ""; },
     get near() { return near; },
+    get position() { return { x: player.x, y: player.y }; },
     dispose() {
       cancelAnimationFrame(raf); ro.disconnect();
       window.removeEventListener("keydown", onKeyDown); window.removeEventListener("keyup", onKeyUp);
