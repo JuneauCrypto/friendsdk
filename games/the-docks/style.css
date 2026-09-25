@@ -65,3 +65,8 @@
   .docks-toast{bottom:124px;font-size:10px}
   .docks-label{font-size:9px;padding:2px 6px}
 }
+.docks-landcard{display:flex;gap:10px;align-items:center;border:2px solid var(--ink);border-radius:12px;padding:8px;margin-bottom:8px;background:#000;color:#fff}
+.docks-landcard img{width:120px;height:90px;flex:none;border-radius:6px;object-fit:cover;object-position:50% 52%;transform:scale(1);background:#000}
+.docks-landcard .crop{width:120px;height:90px;flex:none;overflow:hidden;border-radius:6px}.docks-landcard .crop img{transform:scale(2.2)}
+.docks-landcard small{display:block;margin-top:3px;font-size:11px;opacity:.9}
+.docks-landcard button{margin-top:6px;padding:4px 8px;font-size:11px}

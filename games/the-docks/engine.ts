@@ -2,9 +2,10 @@
 import * as THREE from "three";
 import { spriteFrame, type GenerationSprites, type SpriteFacing } from "@rarefriends/friendsdk/sprites";
 import {
-  LAYOUT, PLOT, WORLD_H, WORLD_W, nearestSpot, plotOrigin, walkable,
+  DECK, DECK_H, DECK_W, SURF, WORLD_H, WORLD_W, deckOrigin, landOrigin, nearestSpot, spawnPoint, walkable, you,
   type Spot, type World,
 } from "./model.js";
+import { floorTexture, makeProp } from "./props3d.js";
 
 type Options = {
   onNear: (spot: Spot | null) => void;
@@ -17,13 +18,15 @@ const SPEED = 3.4, RADIUS = 0.28, VOXEL = 0.085;
 const box = new THREE.BoxGeometry(1, 1, 1);
 const mat = (color: number) => new THREE.MeshLambertMaterial({ color });
 const MATS = {
-  water: mat(0x3fa7d6), dirt: mat(0x8a5a3b), dirtDark: mat(0x5e3b25), plank: mat(0xb9844f), post: mat(0x7a5230),
+  water: mat(0x2f86bd), slab: mat(0x111111), deck: mat(0xc0894f), dirt: mat(0x8a5a3b), dirtDark: mat(0x5e3b25), plank: mat(0xb9844f), post: mat(0x7a5230),
   wall: mat(0xfff1d6), door: mat(0x6b3f23), fence: mat(0xd8b47a), stem: mat(0x3f9b3a), berry: mat(0x4b4bd6),
   chicken: mat(0xfafafa), comb: mat(0xe23b3b), beak: mat(0xffb020), awning2: mat(0xffffff), board: mat(0xfff6e0),
   ink: mat(0x16131f), halo: mat(0xffffff), drop: mat(0x2f8cff), hungry: mat(0xff9f1c), shadow: new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.18 }),
   cap: mat(0x1f3a8a), capBrim: mat(0xffffff), crown: mat(0xffd84a), petal: mat(0xff7eb6),
 };
 
+const LINE_MAT = new THREE.LineBasicMaterial({ color: 0x000000 });
+const floorMats = new Map<string, THREE.Material>();
 function cube(material: THREE.Material, w: number, h: number, d: number, x: number, y: number, z: number) {
   const m = new THREE.Mesh(box, material); m.scale.set(w, h, d); m.position.set(x, y, z); return m;
 }
@@ -37,7 +40,7 @@ export function createEngine(container: HTMLElement, world: World, opts: Options
   const labels = document.createElement("div"); labels.className = "docks-labels"; container.appendChild(labels);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xbfe9ff);
+  scene.background = new THREE.Color(0x2f86bd);
   scene.add(new THREE.HemisphereLight(0xffffff, 0x6b8fa3, 1.6));
   const sun = new THREE.DirectionalLight(0xffffff, 1.4); sun.position.set(-6, 14, 4); scene.add(sun);
 
@@ -56,36 +59,64 @@ export function createEngine(container: HTMLElement, world: World, opts: Options
 
   function buildStatics() {
     scene.remove(statics);
-    statics.traverse(o => { if (o instanceof THREE.Mesh && o.geometry !== box) o.geometry.dispose(); });
+    statics.traverse(o => { if ((o instanceof THREE.Mesh || o instanceof THREE.InstancedMesh) && o.geometry !== box && !o.userData.shared) o.geometry.dispose(); });
     statics = new THREE.Group(); scene.add(statics);
     dyn = { plants: [], chickens: [], needs: [], hungry: [] };
     labels.replaceChildren(); labelEls = [];
+    const tmpM = new THREE.Object3D();
+    const instanced = (material: THREE.Material, cells: [number, number][], h: number, y: number, jitter = 0) => {
+      if (!cells.length) return;
+      const im = new THREE.InstancedMesh(box, material, cells.length);
+      cells.forEach(([x, z], i) => { tmpM.position.set(x + 0.5, y, z + 0.5); tmpM.scale.set(1, h + (jitter ? ((x * 13 + z * 7) % 3) * jitter : 0), 1); tmpM.updateMatrix(); im.setMatrixAt(i, tmpM.matrix); });
+      statics.add(im);
+    };
 
-    // planks
-    for (let y = 0; y < WORLD_H; y++) for (let x = 0; x < WORLD_W; x++) if (world.tiles[y * WORLD_W + x] === 3) {
-      statics.add(cube(MATS.plank, 1.02, 0.14, 0.9, x + 0.5, -0.12, y + 0.5));
-      if ((x + y) % 2 === 0) statics.add(cube(MATS.post, 0.14, 0.9, 0.14, x + 0.5, -0.5, y + 0.5));
-    }
+    // planks (gangways & bridges)
+    const planks: [number, number][] = [];
+    for (let y = 0; y < WORLD_H; y++) for (let x = 0; x < WORLD_W; x++) if (world.surface[y * WORLD_W + x] === SURF.plank) planks.push([x, y]);
+    instanced(MATS.plank, planks, 0.14, -0.12);
+    planks.forEach(([x, y], i) => { if (i % 3 === 0) statics.add(cube(MATS.post, 0.14, 0.9, 0.14, x + 0.15, -0.5, y + 0.15)); });
 
     for (const p of world.plots) {
-      const o = plotOrigin(p);
-      const g = new THREE.Group(); g.position.set(o.x, 0, o.y); statics.add(g);
-      const grass = mat(p.color);
-      g.add(cube(MATS.dirt, PLOT, 1, PLOT, PLOT / 2, -0.7, PLOT / 2));
-      g.add(cube(grass, PLOT, 0.3, PLOT, PLOT / 2, -0.15, PLOT / 2));
-      // checker tufts
-      const tuft = mat(new THREE.Color(p.color).multiplyScalar(0.9).getHex());
-      for (let y = 0; y < PLOT; y++) for (let x = 0; x < PLOT; x++) if ((x * 7 + y * 3) % 5 === 0) g.add(cube(tuft, 0.9, 0.04, 0.9, x + 0.5, 0.01, y + 0.5));
-      // house
-      const h = LAYOUT.house;
-      g.add(cube(MATS.wall, h.w - 0.2, 1.8, h.h - 0.2, h.x + h.w / 2, 0.9, h.y + h.h / 2));
-      const roof = new THREE.Mesh(new THREE.ConeGeometry(2.4, 1.3, 4), mat(p.roof));
-      roof.rotation.y = Math.PI / 4; roof.position.set(h.x + h.w / 2, 2.45, h.y + h.h / 2); g.add(roof);
-      g.add(cube(MATS.door, 0.7, 1.1, 0.1, LAYOUT.door.x + 0.5, 0.55, h.y + h.h - 0.08));
-      g.add(cube(MATS.board, 0.5, 0.5, 0.1, h.x + 0.6, 1.2, h.y + h.h - 0.08));
-      // beds + plants
+      // imported land: black slab sides, white patterned top (like the on-chain renderer)
+      const lo = landOrigin(p);
+      const cells: [number, number][] = [];
+      p.land.tiles.forEach((t, i) => { if (t) cells.push([lo.x + (i % p.land.w), lo.y + Math.floor(i / p.land.w)]); });
+      instanced(MATS.slab, cells, 0.9, -0.55);
+      let top = floorMats.get(p.land.floor);
+      if (!top) { top = new THREE.MeshLambertMaterial({ map: floorTexture(p.land.floor) }); floorMats.set(p.land.floor, top); }
+      instanced(top, cells, 0.12, -0.04);
+      // outline the land's top edge
+      const seg: number[] = [];
+      const has = (x: number, y: number) => x >= 0 && y >= 0 && x < p.land.w && y < p.land.h && p.land.tiles[y * p.land.w + x];
+      for (let y = 0; y < p.land.h; y++) for (let x = 0; x < p.land.w; x++) {
+        if (!has(x, y)) continue;
+        const X = lo.x + x, Z = lo.y + y;
+        if (!has(x, y - 1)) seg.push(X, 0.03, Z, X + 1, 0.03, Z);
+        if (!has(x, y + 1)) seg.push(X, 0.03, Z + 1, X + 1, 0.03, Z + 1, X, -0.99, Z + 1, X + 1, -0.99, Z + 1);
+        if (!has(x - 1, y)) seg.push(X, 0.03, Z, X, 0.03, Z + 1);
+        if (!has(x + 1, y)) seg.push(X + 1, 0.03, Z, X + 1, 0.03, Z + 1, X + 1, -0.99, Z, X + 1, -0.99, Z + 1);
+      }
+      const lg = new THREE.BufferGeometry(); lg.setAttribute("position", new THREE.Float32BufferAttribute(seg, 3));
+      statics.add(new THREE.LineSegments(lg, LINE_MAT));
+      for (const pr of p.land.props) {
+        const m = makeProp(pr.name);
+        m.position.set(lo.x + pr.x, 0.02, lo.y + pr.y);
+        m.scale.multiplyScalar(Math.min(1.3, Math.max(0.6, pr.scale)));
+        if (pr.flip) m.rotation.y = Math.PI / 2;
+        m.traverse(o => { o.userData.shared = true; });
+        statics.add(m);
+      }
+
+      // deck with the game's farm
+      const d = deckOrigin(p);
+      const g = new THREE.Group(); g.position.set(d.x, 0, d.y); statics.add(g);
+      const deckCells: [number, number][] = [];
+      for (let y = 0; y < DECK_H; y++) for (let x = 0; x < DECK_W; x++) deckCells.push([d.x + x, d.y + y]);
+      instanced(MATS.deck, deckCells, 0.3, -0.15, 0.02);
+      for (const [x, z] of [[0.2, 0.2], [DECK_W - 0.2, 0.2], [0.2, DECK_H - 0.2], [DECK_W - 0.2, DECK_H - 0.2]]) g.add(cube(MATS.post, 0.3, 1.4, 0.3, x, -0.5, z));
       const plants: THREE.Group[] = [], needs: THREE.Mesh[] = [];
-      LAYOUT.beds.forEach(b => {
+      DECK.beds.forEach(b => {
         g.add(cube(MATS.dirtDark, 0.9, 0.25, 0.9, b.x + 0.5, 0.1, b.y + 0.5));
         const plant = new THREE.Group(); plant.position.set(b.x + 0.5, 0.22, b.y + 0.5);
         plant.add(cube(MATS.stem, 0.14, 1, 0.14, 0, 0.5, 0));
@@ -95,8 +126,7 @@ export function createEngine(container: HTMLElement, world: World, opts: Options
         const need = cube(MATS.drop, 0.22, 0.3, 0.22, b.x + 0.5, 1.9, b.y + 0.5); g.add(need); needs.push(need);
       });
       dyn.plants.push(plants); dyn.needs.push(needs);
-      // pen
-      const pen = LAYOUT.pen;
+      const pen = DECK.pen;
       for (let i = 0; i < pen.w; i++) for (let j = 0; j < pen.h; j++) {
         if (i !== 0 && j !== 0 && i !== pen.w - 1 && j !== pen.h - 1) continue;
         g.add(cube(MATS.fence, 0.16, 0.7, 0.16, pen.x + i + 0.5, 0.35, pen.y + j + 0.5));
@@ -113,20 +143,18 @@ export function createEngine(container: HTMLElement, world: World, opts: Options
         g.add(c); chickens.push(c);
       }
       dyn.chickens.push(chickens); dyn.hungry.push(hungry);
-      // stall
-      const s = LAYOUT.stall;
-      g.add(cube(MATS.plank, 0.95, 0.8, 0.8, s.x + 0.5, 0.4, s.y + 0.5));
+      const s = DECK.stall, accent = mat(p.accent);
+      g.add(cube(MATS.board, 0.95, 0.8, 0.8, s.x + 0.5, 0.4, s.y + 0.5));
       g.add(cube(MATS.post, 0.08, 1.5, 0.08, s.x + 0.1, 0.75, s.y + 0.15));
       g.add(cube(MATS.post, 0.08, 1.5, 0.08, s.x + 0.9, 0.75, s.y + 0.15));
-      for (let i = 0; i < 4; i++) g.add(cube(i % 2 ? MATS.awning2 : mat(p.roof), 0.26, 0.1, 1, s.x + 0.12 + i * 0.25, 1.5, s.y + 0.4));
-      // your harbor sign
+      for (let i = 0; i < 4; i++) g.add(cube(i % 2 ? MATS.awning2 : accent, 0.26, 0.1, 1, s.x + 0.12 + i * 0.25, 1.5, s.y + 0.4));
       if (p.owner === "you") {
-        g.add(cube(MATS.post, 0.1, 1.1, 0.1, 4.5, 0.55, 9.4));
-        g.add(cube(MATS.board, 0.9, 0.45, 0.08, 4.5, 1.05, 9.45));
+        g.add(cube(MATS.post, 0.1, 1.1, 0.1, DECK.sign.x, 0.55, DECK.sign.y));
+        g.add(cube(MATS.board, 0.9, 0.45, 0.08, DECK.sign.x, 1.05, DECK.sign.y + 0.05));
       }
       const el = document.createElement("div"); el.className = `docks-label ${p.owner === "you" ? "mine" : ""}`;
       el.textContent = p.owner === "you" ? (p.berth ? "Your land" : "Your land · adrift") : `${p.name} · sample`;
-      labels.appendChild(el); labelEls.push({ el, pos: new THREE.Vector3(o.x + 2.5, 3.6, o.y + 2.5) });
+      labels.appendChild(el); labelEls.push({ el, pos: new THREE.Vector3(lo.x + p.land.w / 2, 2.4, lo.y + 0.5) });
     }
   }
   buildStatics();
@@ -168,8 +196,8 @@ export function createEngine(container: HTMLElement, world: World, opts: Options
   }
 
   /* ── player state & input ── */
-  const start = plotOrigin(world.plots[0]);
-  const player = { x: start.x + 4.5, y: start.y + 6, facing: "down" as SpriteFacing, walking: false, target: null as null | { x: number; y: number } };
+  const start = spawnPoint(world, you(world));
+  const player = { x: start.x, y: start.y, facing: "down" as SpriteFacing, walking: false, target: null as null | { x: number; y: number } };
   const keys = new Set<string>();
   let paused = false, reducedMotion = false, near: Spot | null = null, raf = 0, last = performance.now(), t = 0;
 
@@ -212,7 +240,7 @@ export function createEngine(container: HTMLElement, world: World, opts: Options
   function resize() {
     const w = container.clientWidth || 1, h = container.clientHeight || 1;
     renderer.setSize(w, h, false);
-    const viewH = w < h ? 13 : 11, aspect = w / h;
+    const viewH = w < h ? 19 : 15, aspect = w / h;
     camera.left = -viewH * aspect / 2; camera.right = viewH * aspect / 2; camera.top = viewH / 2; camera.bottom = -viewH / 2;
     camera.updateProjectionMatrix();
   }
@@ -292,7 +320,13 @@ export function createEngine(container: HTMLElement, world: World, opts: Options
     /** Rebuild scenery after docking; move the player with their land. */
     relocate(from: { x: number; y: number }, to: { x: number; y: number }) {
       player.x += to.x - from.x; player.y += to.y - from.y; player.target = null;
+      if (!walkable(world, player.x, player.y)) { const s = spawnPoint(world, you(world)); player.x = s.x; player.y = s.y; }
       focus.set(player.x, 0, player.y); buildStatics(); near = null; opts.onNear(null);
+    },
+    /** Rebuild after the player's land changes (e.g. the on-chain import finished). */
+    rebuild(respawn = false) {
+      if (respawn || !walkable(world, player.x, player.y)) { const s = spawnPoint(world, you(world)); player.x = s.x; player.y = s.y; focus.set(player.x, 0, player.y); }
+      buildStatics(); near = null; opts.onNear(null);
     },
     refreshHat() { frameKey = ""; },
     get near() { return near; },

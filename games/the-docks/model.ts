@@ -1,13 +1,19 @@
 /* The Docks — world layout and game rules. Pure logic, no rendering.
  * Everything here is simulated and session-only (the SDK sandbox has no storage). */
+import { MAX_H, MAX_W, sampleLand, type Land } from "./land.js";
 
-export const PLOT = 10;          // plot is PLOT × PLOT tiles
-export const GAP = 3;            // water channel between berths
-export const GRID = 3;           // 3 × 3 berths
+// A berth = the Friend's imported land (up to MAX_W × MAX_H tiles) + a short gangway + a wooden deck.
+export const BERTH_W = MAX_W + 2;              // 22
+export const LAND_H = MAX_H;                   // 18
+export const LINK = 2;
+export const DECK_W = 10, DECK_H = 6;
+export const BERTH_H = LAND_H + LINK + DECK_H; // 26
+export const GAP = 3;
+export const GRID = 3;
 export const MARGIN = 2;
-export const HARBOR_Y = MARGIN + GRID * PLOT + (GRID - 1) * GAP + 4; // where an undocked plot drifts
-export const WORLD_W = MARGIN * 2 + GRID * PLOT + (GRID - 1) * GAP;
-export const WORLD_H = HARBOR_Y + PLOT + MARGIN;
+export const HARBOR_Y = MARGIN + GRID * BERTH_H + (GRID - 1) * GAP + 4;
+export const WORLD_W = MARGIN * 2 + GRID * BERTH_W + (GRID - 1) * GAP;
+export const WORLD_H = HARBOR_Y + BERTH_H + MARGIN;
 
 export const CREDITS_PER_RF = 100;       // simulated: 100 credits = 1 RF of purchase value
 export const BURN_SHARE_PURCHASE = 0.5;  // share of credit purchases that buys & burns RF
@@ -15,7 +21,7 @@ export const BURN_SHARE_DOCK = 0.5;      // share of docking fees burned
 export const MARKET_FEE = 0.05;          // stall-sale fee, burned
 export const ADJ_BONUS = 0.25;           // +25% produce & XP per adjacent docked neighbour
 
-export type Tile = 0 | 1 | 2 | 3;        // water, ground, blocked, plank
+export const SURF = { water: 0, land: 1, deck: 2, plank: 3 } as const;
 export type Berth = { bx: number; by: number };
 export type Plant = { stage: number; growth: number; water: number };
 export type Animal = { hunger: number; lay: number; x: number; y: number; tx: number; ty: number };
@@ -27,64 +33,65 @@ export const ITEMS: Readonly<Record<ItemId, Item>> = {
   can: { name: "Golden Can", icon: "🚿", price: 120, kind: "tool", blurb: "Watering fills to 100 and waters the whole garden" },
   cap: { name: "Sailor Cap", icon: "⚓", price: 150, kind: "hat", blurb: "Cosmetic hat your Friend wears" },
   crown: { name: "Flower Crown", icon: "🌼", price: 220, kind: "hat", blurb: "Cosmetic hat your Friend wears" },
-  berry: { name: "Dock Berries", icon: "🫐", price: 6, kind: "produce", blurb: "Grown in gardens. Sell, feed your Friend or animals" },
+  berry: { name: "Dock Berries", icon: "🫐", price: 6, kind: "produce", blurb: "Grown on your deck. Sell, feed your Friend or animals" },
   egg: { name: "Fresh Egg", icon: "🥚", price: 12, kind: "produce", blurb: "Laid by well-fed chickens. Sell at your stall" },
 };
 
 export type PlotState = {
-  id: string; name: string; owner: "you" | "neighbour"; color: number; roof: number;
+  id: string; name: string; owner: "you" | "neighbour"; accent: number;
   berth: Berth | null;                  // null = adrift in the harbor (yours, before docking)
+  land: Land;
   plants: Plant[]; animals: Animal[]; stall: ItemId[];
-  thanks: number;                       // times you helped this neighbour
+  thanks: number;
 };
-
 export type Pet = { hunger: number; joy: number; kibbleAt: number };
-
 export type World = {
-  plots: PlotState[]; tiles: Tile[]; credits: number; burnedRf: number; xp: number; level: number;
+  plots: PlotState[]; surface: Uint8Array; blocked: Uint8Array;
+  credits: number; burnedRf: number; xp: number; level: number;
   bag: Record<ItemId, number>; hat: ItemId | null; pet: Pet; log: string[]; charmBoost: number;
 };
 
-/** Plot-local layout (tile coordinates inside a 10 × 10 plot). */
-export const LAYOUT = {
-  house: { x: 1, y: 1, w: 3, h: 3 }, door: { x: 2, y: 4 },
-  beds: [{ x: 6, y: 1 }, { x: 7, y: 1 }, { x: 8, y: 1 }],
-  pen: { x: 5, y: 5, w: 4, h: 4 },           // fence ring; inside 6..7
-  stall: { x: 1, y: 7 },
+/** Deck-local layout (tiles inside the 10 × 6 deck). */
+export const DECK = {
+  beds: [{ x: 1, y: 1 }, { x: 2, y: 1 }, { x: 3, y: 1 }],
+  pen: { x: 5, y: 1, w: 4, h: 4 },           // fence ring; interior x 6..7, y 2..3
+  stall: { x: 1, y: 4 },
+  sign: { x: 4.5, y: 5.4 },
 };
 
-export const berthOrigin = (b: Berth) => ({ x: MARGIN + b.bx * (PLOT + GAP), y: MARGIN + b.by * (PLOT + GAP) });
-export const plotOrigin = (p: PlotState) => p.berth ? berthOrigin(p.berth) : { x: Math.floor((WORLD_W - PLOT) / 2), y: HARBOR_Y };
+export const berthOrigin = (b: Berth | null) => b
+  ? { x: MARGIN + b.bx * (BERTH_W + GAP), y: MARGIN + b.by * (BERTH_H + GAP) }
+  : { x: MARGIN + BERTH_W + GAP, y: HARBOR_Y };
+export const landOrigin = (p: PlotState) => { const o = berthOrigin(p.berth); return { x: o.x + Math.floor((BERTH_W - p.land.w) / 2), y: o.y + Math.floor((LAND_H - p.land.h) / 2) }; };
+export const deckOrigin = (p: PlotState) => { const o = berthOrigin(p.berth); return { x: o.x + (BERTH_W - DECK_W) / 2, y: o.y + LAND_H + LINK }; };
 export const berthKey = (b: Berth) => `${b.bx},${b.by}`;
 export const berthPrice = (b: Berth) => (b.bx === 1 && b.by === 1 ? 250 : 100);
 
 const mulberry = (seed: number) => () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+const newAnimals = (rand: () => number, n: number): Animal[] => Array.from({ length: n }, () => ({ hunger: 40 + rand() * 40, lay: rand() * 20, x: 7, y: 3, tx: 7, ty: 3 }));
 
-function newAnimals(rand: () => number, count: number): Animal[] {
-  return Array.from({ length: count }, () => ({ hunger: 40 + rand() * 40, lay: rand() * 20, x: 6.5, y: 6.5, tx: 6.5, ty: 6.5 }));
-}
-
-/** Sample neighbours are fictional and clearly labelled in the UI. */
-export function createWorld(friendId: bigint): World {
+/** `land` is the player's imported on-chain land (or a fallback). Neighbours are fictional samples. */
+export function createWorld(friendId: bigint, land: Land): World {
   const rand = mulberry(Number(friendId % 2147483647n) || 1);
-  const neighbours: [string, Berth, number, number][] = [
-    ["Pip's Orchard", { bx: 1, by: 0 }, 0x9bd17a, 0xd9544f],
-    ["Juniper Wharf", { bx: 0, by: 1 }, 0x8fcf8a, 0x4f7dd9],
-    ["Rook's Roost", { bx: 2, by: 1 }, 0xa6d58c, 0x8a5bd6],
-    ["Moss Landing", { bx: 0, by: 2 }, 0x93c97f, 0xe0a13b],
+  const neighbours: [string, Berth, string, string, number][] = [
+    ["Pip's Orchard", { bx: 1, by: 0 }, "Garden", "Dither", 0xccff00],
+    ["Juniper Wharf", { bx: 0, by: 1 }, "Coastal", "Plain", 0x7db4db],
+    ["Rook's Roost", { bx: 2, by: 1 }, "Rooftop", "Cross Grid", 0xb3a0d8],
+    ["Moss Landing", { bx: 0, by: 2 }, "Mineral", "Hatch", 0xf2ce68],
   ];
   const plots: PlotState[] = [
-    { id: "you", name: "Your land", owner: "you", color: 0xa8dd83, roof: 0xff7a59, berth: null,
-      plants: LAYOUT.beds.map(() => ({ stage: 1, growth: 0, water: 60 })), animals: newAnimals(rand, 1), stall: [], thanks: 0 },
-    ...neighbours.map(([name, berth, color, roof], i) => ({
-      id: `n${i}`, name, owner: "neighbour" as const, color, roof, berth,
-      plants: LAYOUT.beds.map(() => ({ stage: Math.floor(rand() * 3), growth: rand(), water: 5 + rand() * 30 })),
+    { id: "you", name: "Your land", owner: "you", accent: 0xccff00, berth: null, land,
+      plants: DECK.beds.map(() => ({ stage: 1, growth: 0, water: 60 })), animals: newAnimals(rand, 1), stall: [], thanks: 0 },
+    ...neighbours.map(([name, berth, scenery, floor, accent], i) => ({
+      id: `n${i}`, name, owner: "neighbour" as const, accent, berth,
+      land: sampleLand(1000 + i * 77, scenery, floor, 6 + (i % 3), 5 + ((i + 1) % 3)),
+      plants: DECK.beds.map(() => ({ stage: Math.floor(rand() * 3), growth: rand(), water: 5 + rand() * 30 })),
       animals: newAnimals(rand, 1 + (i % 2)),
       stall: [(["feed", "fert", "can"] as ItemId[])[i % 3], (["cap", "crown", "feed", "fert"] as ItemId[])[i]],
       thanks: 0,
     })),
   ];
-  const world: World = { plots, tiles: [], credits: 300, burnedRf: 0, xp: 0, level: 1,
+  const world: World = { plots, surface: new Uint8Array(0), blocked: new Uint8Array(0), credits: 300, burnedRf: 0, xp: 0, level: 1,
     bag: { feed: 2, fert: 1, can: 0, cap: 0, crown: 0, berry: 2, egg: 0 }, hat: null,
     pet: { hunger: 70, joy: 65, kibbleAt: 0 }, log: [], charmBoost: 0 };
   rebuildTiles(world);
@@ -92,9 +99,13 @@ export function createWorld(friendId: bigint): World {
 }
 
 export const you = (w: World) => w.plots[0];
-export const tileAt = (w: World, x: number, y: number): Tile =>
-  x < 0 || y < 0 || x >= WORLD_W || y >= WORLD_H ? 0 : w.tiles[Math.floor(y) * WORLD_W + Math.floor(x)];
-export const walkable = (w: World, x: number, y: number) => { const t = tileAt(w, x, y); return t === 1 || t === 3; };
+const idx = (x: number, y: number) => y * WORLD_W + x;
+const inWorld = (x: number, y: number) => x >= 0 && y >= 0 && x < WORLD_W && y < WORLD_H;
+export const surfaceAt = (w: World, x: number, y: number) => inWorld(Math.floor(x), Math.floor(y)) ? w.surface[idx(Math.floor(x), Math.floor(y))] : 0;
+export const walkable = (w: World, x: number, y: number) => {
+  const tx = Math.floor(x), ty = Math.floor(y);
+  return inWorld(tx, ty) && w.surface[idx(tx, ty)] !== SURF.water && !w.blocked[idx(tx, ty)];
+};
 
 export function adjacentBerths(b: Berth): Berth[] {
   return [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) => ({ bx: b.bx + dx, by: b.by + dy }))
@@ -107,31 +118,79 @@ export function neighboursOf(w: World, p: PlotState) {
 }
 export const bonus = (w: World) => 1 + ADJ_BONUS * neighboursOf(w, you(w)).length;
 
-/** Tile map: plots are ground; house, fence and beds block; planks bridge adjacent docked plots. */
-export function rebuildTiles(w: World) {
-  const t: Tile[] = new Array(WORLD_W * WORLD_H).fill(0);
-  const set = (x: number, y: number, v: Tile) => { if (x >= 0 && y >= 0 && x < WORLD_W && y < WORLD_H) t[y * WORLD_W + x] = v; };
-  for (const p of w.plots) {
-    const o = plotOrigin(p);
-    for (let y = 0; y < PLOT; y++) for (let x = 0; x < PLOT; x++) set(o.x + x, o.y + y, 1);
-    const h = LAYOUT.house;
-    for (let y = 0; y < h.h; y++) for (let x = 0; x < h.w; x++) set(o.x + h.x + x, o.y + h.y + y, 2);
-    for (const b of LAYOUT.beds) set(o.x + b.x, o.y + b.y, 2);
-    const pen = LAYOUT.pen;
-    for (let i = 0; i < pen.w; i++) { set(o.x + pen.x + i, o.y + pen.y, 2); set(o.x + pen.x + i, o.y + pen.y + pen.h - 1, 2); }
-    for (let i = 0; i < pen.h; i++) { set(o.x + pen.x, o.y + pen.y + i, 2); set(o.x + pen.x + pen.w - 1, o.y + pen.y + i, 2); }
-    set(o.x + LAYOUT.stall.x, o.y + LAYOUT.stall.y, 2);
+const TINY = /tiny|sprout|flower|reeds/;
+/** BFS over water from any `from` tile to any `to` tile inside a box; lay a 2-wide plank path. */
+function bridge(w: World, from: Set<number>, to: Set<number>, box: { x0: number; y0: number; x1: number; y1: number }) {
+  const prev = new Map<number, number>(); const queue: number[] = [];
+  for (const s of from) { prev.set(s, -1); queue.push(s); }
+  let found = -1;
+  while (queue.length && found < 0) {
+    const cur = queue.shift()!; const cx = cur % WORLD_W, cy = Math.floor(cur / WORLD_W);
+    for (const [dx, dy] of [[0, 1], [1, 0], [0, -1], [-1, 0]]) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < box.x0 || ny < box.y0 || nx > box.x1 || ny > box.y1) continue;
+      const n = idx(nx, ny); if (prev.has(n)) continue;
+      if (to.has(n)) { prev.set(n, cur); found = cur; break; }
+      if (w.surface[n] !== SURF.water) continue;
+      prev.set(n, cur); queue.push(n);
+    }
   }
-  // bridges between horizontally / vertically adjacent docked plots
+  for (let c = found; c >= 0 && !from.has(c); c = prev.get(c)!) {
+    w.surface[c] = SURF.plank;
+    const cx = c % WORLD_W, cy = Math.floor(c / WORLD_W), p = prev.get(c)!;
+    // widen perpendicular to travel
+    const vertical = p >= 0 && p % WORLD_W === cx;
+    const side = vertical ? idx(cx + 1, cy) : idx(cx, cy + 1);
+    if (inWorld(vertical ? cx + 1 : cx, vertical ? cy : cy + 1) && w.surface[side] === SURF.water) w.surface[side] = SURF.plank;
+  }
+}
+
+function tilesOf(w: World, p: PlotState, which: "land" | "deck") {
+  const s = new Set<number>();
+  if (which === "land") { const o = landOrigin(p); p.land.tiles.forEach((t, i) => { if (t) s.add(idx(o.x + (i % p.land.w), o.y + Math.floor(i / p.land.w))); }); }
+  else { const o = deckOrigin(p); for (let y = 0; y < DECK_H; y++) for (let x = 0; x < DECK_W; x++) s.add(idx(o.x + x, o.y + y)); }
+  return s;
+}
+
+/** Surfaces: imported land, decks, gangways and bridges between adjacent docked berths. */
+export function rebuildTiles(w: World) {
+  w.surface = new Uint8Array(WORLD_W * WORLD_H); w.blocked = new Uint8Array(WORLD_W * WORLD_H);
+  const block = (x: number, y: number) => { if (inWorld(x, y)) w.blocked[idx(x, y)] = 1; };
+  for (const p of w.plots) {
+    const lo = landOrigin(p), d = deckOrigin(p);
+    for (const i of tilesOf(w, p, "land")) w.surface[i] = SURF.land;
+    for (const i of tilesOf(w, p, "deck")) w.surface[i] = SURF.deck;
+    for (const pr of p.land.props) if (!TINY.test(pr.name)) block(lo.x + Math.floor(pr.x), lo.y + Math.floor(pr.y));
+    for (const b of DECK.beds) block(d.x + b.x, d.y + b.y);
+    const pen = DECK.pen;
+    for (let i = 0; i < pen.w; i++) { block(d.x + pen.x + i, d.y + pen.y); block(d.x + pen.x + i, d.y + pen.y + pen.h - 1); }
+    for (let i = 0; i < pen.h; i++) { block(d.x + pen.x, d.y + pen.y + i); block(d.x + pen.x + pen.w - 1, d.y + pen.y + i); }
+    block(d.x + DECK.stall.x, d.y + DECK.stall.y);
+    // gangway from deck to land
+    const o = berthOrigin(p.berth);
+    bridge(w, tilesOf(w, p, "deck"), tilesOf(w, p, "land"), { x0: o.x, y0: o.y, x1: o.x + BERTH_W - 1, y1: o.y + BERTH_H - 1 });
+  }
   for (const a of w.plots) for (const b of w.plots) {
     if (!a.berth || !b.berth) continue;
-    const oa = berthOrigin(a.berth);
+    const oa = berthOrigin(a.berth), ob = berthOrigin(b.berth);
     if (b.berth.bx === a.berth.bx + 1 && b.berth.by === a.berth.by)
-      for (let x = PLOT; x < PLOT + GAP; x++) for (const y of [4, 5]) set(oa.x + x, oa.y + y, 3);
+      bridge(w, tilesOf(w, a, "land"), tilesOf(w, b, "land"), { x0: oa.x, y0: oa.y, x1: ob.x + BERTH_W - 1, y1: oa.y + LAND_H - 1 });
     if (b.berth.by === a.berth.by + 1 && b.berth.bx === a.berth.bx)
-      for (let y = PLOT; y < PLOT + GAP; y++) for (const x of [4, 5]) set(oa.x + x, oa.y + y, 3);
+      bridge(w, tilesOf(w, a, "deck"), tilesOf(w, b, "land"), { x0: oa.x, y0: oa.y, x1: oa.x + BERTH_W - 1, y1: ob.y + BERTH_H - 1 });
   }
-  w.tiles = t;
+}
+
+/** A walkable spawn point near the middle of a plot's land. */
+export function spawnPoint(w: World, p: PlotState) {
+  const o = landOrigin(p), cx = o.x + p.land.w / 2, cy = o.y + p.land.h / 2;
+  let best = { x: cx, y: cy }, bd = Infinity;
+  for (let y = 0; y < p.land.h; y++) for (let x = 0; x < p.land.w; x++) {
+    const tx = o.x + x, ty = o.y + y;
+    if (!walkable(w, tx + 0.5, ty + 0.5)) continue;
+    const d = Math.hypot(tx + 0.5 - cx, ty + 0.5 - cy);
+    if (d < bd) { bd = d; best = { x: tx + 0.5, y: ty + 0.5 }; }
+  }
+  return best;
 }
 
 export function xpForLevel(level: number) { return 60 + level * 40; }
@@ -143,7 +202,7 @@ export function gainXp(w: World, amount: number) {
   return levelled;
 }
 
-/** Advance simulation by dt seconds. */
+/** Advance simulation by dt seconds. Animal positions are deck-local. */
 export function step(w: World, dt: number) {
   w.pet.hunger = Math.max(0, w.pet.hunger - 0.25 * dt);
   w.pet.joy = Math.max(0, w.pet.joy - 0.2 * dt);
@@ -161,30 +220,28 @@ export function step(w: World, dt: number) {
         a.lay += dt;
         if (a.lay >= 30) { a.lay = 0; w.bag.egg += Math.round(1 * bonus(w)); w.log.unshift("Your chicken laid an egg 🥚"); }
       }
-      // wander inside the pen interior (6..8 exclusive)
       const dx = a.tx - a.x, dy = a.ty - a.y, d = Math.hypot(dx, dy);
-      if (d < 0.05) { a.tx = 6.1 + Math.random() * 1.8; a.ty = 6.1 + Math.random() * 1.8; }
+      if (d < 0.05) { a.tx = 6.2 + Math.random() * 1.6; a.ty = 2.2 + Math.random() * 1.6; }
       else { const s = Math.min(d, 0.8 * dt); a.x += (dx / d) * s; a.y += (dy / d) * s; }
     }
   }
 }
 
 /* ── Interactions ── */
-export type Spot = { kind: "door" | "bed" | "pen" | "stall" | "sign"; plot: PlotState; index: number; x: number; y: number };
+export type Spot = { kind: "bed" | "pen" | "stall" | "sign"; plot: PlotState; index: number; x: number; y: number };
 
 export function spots(w: World): Spot[] {
   const out: Spot[] = [];
   for (const p of w.plots) {
-    const o = plotOrigin(p);
-    if (p.owner === "you") out.push({ kind: "door", plot: p, index: 0, x: o.x + LAYOUT.door.x + 0.5, y: o.y + LAYOUT.door.y + 0.5 });
-    LAYOUT.beds.forEach((b, i) => out.push({ kind: "bed", plot: p, index: i, x: o.x + b.x + 0.5, y: o.y + b.y + 0.5 }));
-    out.push({ kind: "pen", plot: p, index: 0, x: o.x + LAYOUT.pen.x + 2, y: o.y + LAYOUT.pen.y + 2 });
-    out.push({ kind: "stall", plot: p, index: 0, x: o.x + LAYOUT.stall.x + 0.5, y: o.y + LAYOUT.stall.y + 0.5 });
-    if (p.owner === "you") out.push({ kind: "sign", plot: p, index: 0, x: o.x + 4.5, y: o.y + 9.2 });
+    const d = deckOrigin(p);
+    DECK.beds.forEach((b, i) => out.push({ kind: "bed", plot: p, index: i, x: d.x + b.x + 0.5, y: d.y + b.y + 0.5 }));
+    out.push({ kind: "pen", plot: p, index: 0, x: d.x + DECK.pen.x + 2, y: d.y + DECK.pen.y + 2 });
+    out.push({ kind: "stall", plot: p, index: 0, x: d.x + DECK.stall.x + 0.5, y: d.y + DECK.stall.y + 0.5 });
+    if (p.owner === "you") out.push({ kind: "sign", plot: p, index: 0, x: d.x + DECK.sign.x, y: d.y + DECK.sign.y });
   }
   return out;
 }
-const REACH: Record<Spot["kind"], number> = { door: 1.3, bed: 1.5, pen: 2.9, stall: 1.6, sign: 1.4 };
+const REACH: Record<Spot["kind"], number> = { bed: 1.5, pen: 2.9, stall: 1.6, sign: 1.4 };
 export function nearestSpot(w: World, x: number, y: number) {
   let best: Spot | null = null, bd = Infinity;
   for (const s of spots(w)) { const d = Math.hypot(s.x - x, s.y - y); if (d <= REACH[s.kind] && d < bd) { bd = d; best = s; } }
@@ -192,7 +249,6 @@ export function nearestSpot(w: World, x: number, y: number) {
 }
 export function spotLabel(w: World, s: Spot): string {
   const mine = s.plot.owner === "you";
-  if (s.kind === "door") return "Go inside";
   if (s.kind === "sign") return you(w).berth ? "Harbor map" : "Dock your land";
   if (s.kind === "stall") return mine ? "Your stall · sell" : `${s.plot.name} stall`;
   if (s.kind === "pen") return mine ? "Feed your chickens" : "Feed their chickens";
@@ -257,3 +313,5 @@ export function dock(w: World, b: Berth): string {
   const n = neighboursOf(w, mine).length;
   return `Docked! ${n} neighbour${n === 1 ? "" : "s"} next door · +${Math.round(n * ADJ_BONUS * 100)}% produce & XP.`;
 }
+/** Swap in a freshly imported land (e.g. after a retry). */
+export function setLand(w: World, land: Land) { you(w).land = land; rebuildTiles(w); }

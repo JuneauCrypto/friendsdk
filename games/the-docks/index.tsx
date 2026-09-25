@@ -8,9 +8,10 @@ import { maximumPrize, type GamePlay, type GameSnapshot } from "@rarefriends/fri
 import { createFriendReader, type GenerationSprites } from "@rarefriends/friendsdk/sprites";
 import { createFriendSoundKit, type FriendSoundCue, type FriendSoundKit } from "@rarefriends/friendsdk/sounds";
 import { createEngine, type Engine } from "./engine.js";
+import { readChainLand, sampleLand, type Land } from "./land.js";
 import {
   ADJ_BONUS, BURN_SHARE_DOCK, BURN_SHARE_PURCHASE, CREDITS_PER_RF, GRID, ITEMS, MARKET_FEE,
-  berthKey, berthPrice, buyCredits, buyFromStall, createWorld, dock, gainXp, neighboursOf, plotOrigin,
+  berthKey, berthPrice, buyCredits, buyFromStall, createWorld, dock, gainXp, landOrigin, neighboursOf, setLand,
   sellProduce, spotLabel, step, useSpot, xpForLevel, you, type Berth, type ItemId, type Spot, type World,
 } from "./model.js";
 import "@rarefriends/friendsdk/frame.css";
@@ -37,7 +38,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [toast, setToast] = useState("Walk with WASD / arrows or tap the ground.");
   const [muted, setMuted] = useState(true), [reducedMotion, setReducedMotion] = useState(false);
   const [, setTick] = useState(0);
-  const world = useRef<World>(createWorld(friendId));
+  const fallbackLand = () => sampleLand(Number(friendId % 100000n) + 7, "Garden", "Plain", 6, 5);
+  const world = useRef<World>(createWorld(friendId, fallbackLand()));
+  const [landState, setLandState] = useState<"loading" | "chain" | "failed">("loading");
+  const [landError, setLandError] = useState("");
   const engine = useRef<Engine | null>(null);
   const stage = useRef<HTMLDivElement>(null);
   const sound = useRef<FriendSoundKit | null>(null), locked = useRef(false), epoch = useRef(0), acc = useRef(0), level = useRef(1);
@@ -47,17 +51,31 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   /* session reset per verified Friend */
   useEffect(() => {
     const version = ++epoch.current;
-    world.current = createWorld(friendId); level.current = 1;
+    world.current = createWorld(friendId, fallbackLand()); level.current = 1;
+    setLandState("loading"); setLandError("");
     sound.current = createFriendSoundKit({ muted: true });
     setSnapshot(null); setMenu(null); setResult(null); setError(""); setBusy(false); setMuted(true); setSprites(null); setSpriteError(false);
     locked.current = false;
     void client.read().then(v => { if (version === epoch.current) setSnapshot(v); })
       .catch(c => { if (version === epoch.current) setError(c instanceof Error ? c.message : "Could not load the preview."); });
     loadSprites(version);
+    importLand(version);
     const pref = window.matchMedia("(prefers-reduced-motion: reduce)");
     const update = () => setReducedMotion(pref.matches); update(); pref.addEventListener("change", update);
     return () => { epoch.current++; sound.current?.dispose(); sound.current = null; pref.removeEventListener("change", update); };
   }, [client, friendId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function importLand(version = epoch.current) {
+    setLandState("loading"); setLandError("");
+    void readChainLand(friendId).then((land: Land) => {
+      if (version !== epoch.current) return;
+      setLand(world.current, land); engine.current?.rebuild(true);
+      setLandState("chain"); setToast("Your Friend's on-chain land has been imported.");
+    }).catch(cause => {
+      if (version !== epoch.current) return;
+      setToast("Couldn't read your on-chain land, so a stand-in is shown. Retry from Home."); setLandState("failed"); setLandError(cause instanceof Error ? cause.message.split("\n")[0] : "Could not read your land.");
+    });
+  }
 
   function loadSprites(version = epoch.current) {
     setSpriteError(false);
@@ -66,7 +84,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   }
 
   /* 3D engine lifecycle */
-  const ready = snapshot !== null;
+  const ready = snapshot !== null && landState !== "loading";
   useEffect(() => {
     if (!ready || !stage.current) return;
     let e: Engine;
@@ -104,7 +122,6 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     if (!s || paused || menu) return;
     void sound.current?.unlock();
     const w = world.current;
-    if (s.kind === "door") { setMenu("home"); return; }
     if (s.kind === "sign") { setMenu("map"); return; }
     if (s.kind === "stall") { setStallPlot(s.plot.id); setMenu("stall"); return; }
     say(useSpot(w, s), s.plot.owner === "you" ? "select" : "reward");
@@ -130,8 +147,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     finally { if (version === epoch.current) { locked.current = false; setBusy(false); } }
   }
 
-  if (!snapshot) return <div className="docks-loading" role={error ? "alert" : "status"}>
-    <div className="docks-boat" aria-hidden="true">⛵</div>{error || "Sailing into the harbor…"}
+  if (!snapshot || landState === "loading") return <div className="docks-loading" role={error ? "alert" : "status"}>
+    <div className="docks-boat" aria-hidden="true">⛵</div>{error || (landState === "loading" && snapshot ? "Importing your Friend's land from chain…" : "Sailing into the harbor…")}
     {error && <button type="button" disabled={busy || paused} onClick={() => void act(async () => {})}>Retry</button>}
   </div>;
   if (snapshot.friendId !== friendId) return <p role="alert">This game session does not match the selected Friend.</p>;
@@ -196,6 +213,13 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         : menu === "market" ? "Market" : menu === "bag" ? "Bag" : menu === "map" ? "The Docks" : menu === "help" ? "How to play" : "Settings"}>
 
       {menu === "home" ? <>
+        <div className="docks-landcard">
+          {me.land.image && <div className="crop"><img src={me.land.image} alt={`${label}'s on-chain land`} /></div>}
+          <div><strong>{landState === "chain" ? "Imported from chain" : "Stand-in land"}</strong>
+            {landState === "chain" ? <small>{["Generation", "Character", "Scenery", "Floor", "Activation tier"].filter(k => me.land.traits[k] !== undefined).map(k => `${k}: ${me.land.traits[k]}`).join(" · ")}
+              <br />{me.land.props.length} object{me.land.props.length === 1 ? "" : "s"} placed as they appear on your Friend.</small>
+              : <small>{landError || "Your land couldn't be read."} <button type="button" onClick={() => importLand()}>Retry import</button></small>}</div>
+        </div>
         <p>Look after your Friend. A fed, happy Friend earns more rep from everything you do.</p>
         <div className="docks-row">
           <button type="button" disabled={kibbleWait > 0} onClick={() => { w.pet.hunger = Math.min(100, w.pet.hunger + 25); w.pet.kibbleAt = Date.now() + KIBBLE_COOLDOWN; gainXp(w, 2); say("Nom. Free kibble served."); }}>
@@ -273,8 +297,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
               if (owner) return <div role="gridcell" key={bx} className={`docks-berth ${owner === me ? "mine" : "taken"}`}>{owner === me ? "🏡 You" : owner.name}</div>;
               return <div role="gridcell" key={bx} className="docks-berth open">
                 <button type="button" disabled={w.credits < berthPrice(b)} onClick={() => {
-                  const from = plotOrigin(me); const msg = dock(w, b);
-                  if (me.berth && berthKey(me.berth) === berthKey(b)) { engine.current?.relocate(from, plotOrigin(me)); setMenu(null); }
+                  const from = landOrigin(me); const msg = dock(w, b);
+                  if (me.berth && berthKey(me.berth) === berthKey(b)) { engine.current?.relocate(from, landOrigin(me)); setMenu(null); }
                   say(msg, "reveal-rare");
                 }}>Dock here<small>🪙 {berthPrice(b)} · {adj} neighbour{adj === 1 ? "" : "s"}</small></button></div>;
             })}</div>)}
