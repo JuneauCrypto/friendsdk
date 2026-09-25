@@ -60,9 +60,11 @@ try {
   await shot("home");
   await page.keyboard.press("Escape");
 
-  await btn("Docks").click();
-  await game.locator(".docks-map-row").nth(1).getByRole("button", { name: /Dock here/ }).click();
-  await game.getByText(/Docked! 3 neighbours/).waitFor();
+  await btn("Chain").click();
+  await game.getByRole("img", { name: /Map of the chain/ }).waitFor();
+  await shot("map");
+  await game.locator(".docks-slots button").first().click();
+  await game.locator(".docks-id strong").filter({ hasNotText: "adrift" }).waitFor();
   await page.waitForTimeout(800);
   await shot("docked");
   // walk down the gangway to the deck and use the nearest thing

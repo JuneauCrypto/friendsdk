@@ -8,11 +8,12 @@ import { maximumPrize, type GamePlay, type GameSnapshot } from "@rarefriends/fri
 import { createFriendReader, type GenerationSprites } from "@rarefriends/friendsdk/sprites";
 import { createFriendSoundKit, type FriendSoundCue, type FriendSoundKit } from "@rarefriends/friendsdk/sounds";
 import { createEngine, type Engine } from "./engine.js";
+import { ChainMap } from "./chainmap.js";
 import { readChainLand, sampleLand, type Land } from "./land.js";
 import {
-  ADJ_BONUS, BURN_SHARE_DOCK, BURN_SHARE_PURCHASE, CREDITS_PER_RF, GRID, ITEMS, MARKET_FEE,
-  berthKey, berthPrice, buyCredits, buyFromStall, createWorld, dock, gainXp, landOrigin, neighboursOf, setLand,
-  sellProduce, spotLabel, step, useSpot, xpForLevel, you, type Berth, type ItemId, type Spot, type World,
+  ADJ_BONUS, BURN_SHARE_DOCK, BURN_SHARE_PURCHASE, CREDITS_PER_RF, ITEMS, MARKET_FEE, STATUS_TIERS,
+  attach, attachSlots, buyCredits, buyFromStall, createWorld, gainXp, landOrigin, setLand, statusOf, touching,
+  sellProduce, spotLabel, step, useSpot, xpForLevel, you, type ItemId, type Slot, type Spot, type World,
 } from "./model.js";
 import "@rarefriends/friendsdk/frame.css";
 import "./style.css";
@@ -44,7 +45,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const [landError, setLandError] = useState("");
   const engine = useRef<Engine | null>(null);
   const stage = useRef<HTMLDivElement>(null);
-  const sound = useRef<FriendSoundKit | null>(null), locked = useRef(false), epoch = useRef(0), acc = useRef(0), level = useRef(1);
+  const sound = useRef<FriendSoundKit | null>(null), locked = useRef(false), epoch = useRef(0), acc = useRef(0), level = useRef(1), tier = useRef(-1);
   const inventory = snapshot?.inventory ?? [0n, 0n, 0n];
   const uiBlocked = Boolean(menu) || paused;
 
@@ -100,6 +101,11 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
             const w = world.current;
             if (w.log.length) setToast(w.log.splice(0).at(0)!);
             if (w.level > level.current) { level.current = w.level; setToast(`Level up! Dock rep ${w.level}.`); cue("reveal-rare"); }
+            const st = statusOf(w, you(w));
+            if (st.tier !== tier.current) {
+              const up = st.tier > tier.current; tier.current = st.tier; engine.current?.rebuild();
+              if (up) { setToast(`Status up: ${st.name}! Your flag grows.`); cue("reveal-legendary"); }
+            }
             setTick(x => x + 1);
           }
         },
@@ -158,7 +164,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const canBuy = snapshot.rfBalance >= definition.price && snapshot.freeStake >= maxPrize && snapshot.freeStake + definition.price >= maxPrize;
   const pending = snapshot.plays.find(p => p.outcomeId === null);
   const outcome = result?.outcomeId ? definition.outcomes[result.outcomeId - 1] : null;
-  const neighbours = neighboursOf(w, me);
+  const neighbours = touching(w, me);
+  const status = statusOf(w, me);
   const label = sprites ? `${sprites.familyName} #${friendId}` : `Friend #${friendId}`;
   const kibbleWait = Math.max(0, Math.ceil((w.pet.kibbleAt - Date.now()) / 1000));
   const stall = w.plots.find(p => p.id === stallPlot) ?? me;
@@ -182,7 +189,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
 
     <div className="docks-hud" inert={uiBlocked || undefined}>
       <div className="docks-card docks-id">
-        <strong>{label}{me.berth ? "" : " · adrift"}</strong>
+        <strong>{label}{me.attached ? "" : " · adrift"}</strong>
+        <span className="docks-status" style={{ background: `#${status.color.toString(16).padStart(6, "0")}` }}>{status.name}</span>
         <div className="docks-xp"><span>Rep {w.level}</span><div><i style={{ width: `${(w.xp / xpForLevel(w.level)) * 100}%` }} /></div></div>
         <Meter name="Food" value={w.pet.hunger} tone="t-food" /><Meter name="Joy" value={w.pet.joy} tone="t-joy" />
       </div>
@@ -201,7 +209,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         {near ? <>{spotLabel(w, near)} <kbd>E</kbd></> : "Walk up to something"}</button>
       <div className="docks-nav">
         <button type="button" onClick={() => setMenu("home")} disabled={uiBlocked}>🏠<span>Home</span></button>
-        <button type="button" onClick={() => setMenu("map")} disabled={uiBlocked}>🗺️<span>Docks</span></button>
+        <button type="button" onClick={() => setMenu("map")} disabled={uiBlocked}>🗺️<span>Chain</span></button>
         <button type="button" onClick={() => setMenu("market")} disabled={uiBlocked}>🛒<span>Market</span></button>
         <button type="button" onClick={() => setMenu("bag")} disabled={uiBlocked}>🎒<span>Bag</span></button>
         <button type="button" onClick={() => setMenu("settings")} disabled={uiBlocked}>⚙️<span>More</span></button>
@@ -210,7 +218,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
 
     {menu && <GameMenu onClose={busy ? undefined : () => { setMenu(null); setError(""); }}
       title={menu === "home" ? "Home" : menu === "reveal" ? "Treat time!" : menu === "stall" ? (stall.owner === "you" ? "Your stall" : `${stall.name} stall`)
-        : menu === "market" ? "Market" : menu === "bag" ? "Bag" : menu === "map" ? "The Docks" : menu === "help" ? "How to play" : "Settings"}>
+        : menu === "market" ? "Market" : menu === "bag" ? "Bag" : menu === "map" ? "The Chain" : menu === "help" ? "How to play" : "Settings"}>
 
       {menu === "home" ? <>
         <div className="docks-landcard">
@@ -271,7 +279,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           onClick={() => { buyCredits(w, p.credits); say(`+${p.credits} credits · ${((p.credits / CREDITS_PER_RF) * BURN_SHARE_PURCHASE).toFixed(1)} RF burned (simulated)`, "purchase"); }}>
           🪙 {p.credits} · {p.label} <small>(simulated)</small></button>)}</div>
         <h3>Trading board</h3>
-        <p>Listings from docked neighbours' stalls (sample data).</p>
+        <p>Listings from neighbours' stalls across the chain (sample data).</p>
         {w.plots.filter(p => p.owner === "neighbour").flatMap(p => p.stall.map(id => <div className="docks-item" key={`${p.id}-${id}`}>
           <span><strong>{ITEMS[id].icon} {ITEMS[id].name}</strong><small>Sold by {p.name} · {ITEMS[id].blurb}</small></span>
           <button type="button" disabled={w.credits < ITEMS[id].price} onClick={() => say(buyFromStall(w, id), "purchase")}>🪙 {ITEMS[id].price}</button></div>))}
@@ -287,28 +295,27 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
               w.bag.fert--; plant.stage++; plant.growth = 0; say("Fertilized: a plant grew one stage 🌱");
             }}>Use on garden</button> : null}</div>)}
       </> : menu === "map" ? <>
-        <p>{me.berth ? `Docked. ${neighbours.length} neighbour${neighbours.length === 1 ? "" : "s"} next door: +${neighbours.length * ADJ_BONUS * 100}% produce & rep.`
-          : "Your land is adrift in the harbor. Dock it at an open berth to connect with neighbours: planks join your land to theirs."}</p>
-        <div className="docks-map" role="grid" aria-label="Harbor berths">
-          {Array.from({ length: GRID }, (_, by) => <div role="row" key={by} className="docks-map-row">
-            {Array.from({ length: GRID }, (_, bx) => {
-              const b: Berth = { bx, by }, owner = w.plots.find(p => p.berth && berthKey(p.berth) === berthKey(b));
-              const adj = w.plots.filter(p => p !== me && p.berth && Math.abs(p.berth.bx - bx) + Math.abs(p.berth.by - by) === 1).length;
-              if (owner) return <div role="gridcell" key={bx} className={`docks-berth ${owner === me ? "mine" : "taken"}`}>{owner === me ? "🏡 You" : owner.name}</div>;
-              return <div role="gridcell" key={bx} className="docks-berth open">
-                <button type="button" disabled={w.credits < berthPrice(b)} onClick={() => {
-                  const from = landOrigin(me); const msg = dock(w, b);
-                  if (me.berth && berthKey(me.berth) === berthKey(b)) { engine.current?.relocate(from, landOrigin(me)); setMenu(null); }
-                  say(msg, "reveal-rare");
-                }}>Dock here<small>🪙 {berthPrice(b)} · {adj} neighbour{adj === 1 ? "" : "s"}</small></button></div>;
-            })}</div>)}
-        </div>
-        <p className="docks-note">Docking fees are simulated; {BURN_SHARE_DOCK * 100}% is burned as RF. Neighbouring lands are sample data in this preview.</p>
+        <p>{me.attached ? `Attached. Touching ${neighbours.length} land${neighbours.length === 1 ? "" : "s"}: +${neighbours.length * ADJ_BONUS * 100}% produce & rep.`
+          : "Your land is adrift. Lands keep their true on-chain size and attach edge to edge, so the chain keeps growing. Pick a glowing spot to attach."}</p>
+        <ChainMap world={w} slots={me.attached ? [] : attachSlots(w, me)} onPick={(slot: Slot) => {
+          const from = landOrigin(me); const msg = attach(w, slot);
+          if (me.attached) { engine.current?.relocate(from, landOrigin(me)); setMenu(null); }
+          say(msg, "reveal-rare");
+        }} credits={w.credits} />
+        <h3>Status</h3>
+        <p>Status = <strong>weight</strong> (your land's true on-chain size) + <strong>development</strong> (rep level, tools and hats, lands you touch, RF burned). Each tier adds +10% produce &amp; rep.</p>
+        <div className="docks-item"><span><strong>{status.name}</strong><small>Weight {status.weight} + development {status.development} = {status.score}{status.next ? ` · ${status.next} to ${STATUS_TIERS[status.tier + 1].name}` : " · top tier"}</small></span></div>
+        <h3>Chain leaderboard</h3>
+        {[...w.plots].map(p => ({ p, st: statusOf(w, p) })).sort((a, b) => b.st.score - a.st.score).map(({ p, st }, i) =>
+          <div className="docks-item" key={p.id}><span><strong>{i + 1}. {p.owner === "you" ? "You" : p.name}</strong>
+            <small>{st.name} · weight {st.weight} · development {st.development}{p.owner === "you" ? "" : " · sample"}</small></span></div>)}
+        <p className="docks-note">Attach fees are simulated; {BURN_SHARE_DOCK * 100}% is burned as RF. Spots touching more lands cost more. Other lands are sample data in this preview.</p>
       </> : menu === "help" ? <ul className="docks-help">
         <li><strong>Move:</strong> WASD / arrows, or tap the ground. <strong>Interact:</strong> E or the action button (or tap the thing again when you're next to it).</li>
         <li><strong>Grow:</strong> water your 3 plants; ripe bushes give berries. Well-fed chickens lay eggs.</li>
-        <li><strong>Dock:</strong> use your sign (or Docks) to dock your land beside neighbours. Each adjacent neighbour adds +25% produce and rep.</li>
-        <li><strong>Help neighbours:</strong> walk across the planks, water their plants and feed their chickens for rep and tips.</li>
+        <li><strong>Attach:</strong> use your sign (or Chain) to attach your land edge-to-edge onto the chain. Every land you touch adds +25% produce and rep.</li>
+        <li><strong>Status:</strong> bigger lands (weight) and more development climb the tiers: Drifter → Settler → Merchant → Harbor Master → Admiral. Your flag grows with it.</li>
+        <li><strong>Help neighbours:</strong> walk straight across onto their land, water their plants and feed their chickens for rep and tips.</li>
         <li><strong>Trade:</strong> sell produce at your stall, buy tools, feed and hats at neighbours' stalls or the Market.</li>
         <li><strong>Home:</strong> feed and pet your Friend, open Treat Bags (simulated RF) for Charms.</li>
         <li>Everything is simulated and resets when you reload.</li>

@@ -70,3 +70,10 @@
 .docks-landcard .crop{width:120px;height:90px;flex:none;overflow:hidden;border-radius:6px}.docks-landcard .crop img{transform:scale(2.2)}
 .docks-landcard small{display:block;margin-top:3px;font-size:11px;opacity:.9}
 .docks-landcard button{margin-top:6px;padding:4px 8px;font-size:11px}
+.docks-status{display:inline-block;margin:2px 0 1px;font-size:10px;font-weight:900;padding:1px 7px;border:1.5px solid var(--ink);border-radius:999px}
+.docks-chainmap svg{display:block;width:100%;height:auto;max-height:46vh;background:#2f86bd;border:2px solid var(--ink);border-radius:12px}
+.docks-chainmap .slot rect{fill:#ccff0055;stroke:#1d1a2b;stroke-width:.15;cursor:pointer}
+.docks-chainmap .slot.hot rect{fill:#ccff00}
+.docks-chainmap .slot-num{font:900 3px ui-rounded,system-ui,sans-serif;fill:#1d1a2b;pointer-events:none}
+.docks-slots{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:6px;margin-top:8px}
+.docks-slots button{font-size:12px;padding:6px}

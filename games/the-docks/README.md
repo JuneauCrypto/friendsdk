@@ -1,10 +1,12 @@
 # The Docks
 
 An activated Rare Friend already *is* a little plot of land, rendered fully on
-chain. The Docks **imports that land, with everything already on it**, and lets
-you walk it in 3D. **Dock** it into the harbor next to other Friends' lands and
-planks connect them: walk across, water your neighbours' plants, feed their
-chickens, buy from their stalls and sell what you grow on your deck. Every credit purchase, docking fee and market sale burns
+chain. The Docks **imports that land at its true size, with everything already
+on it**, and lets you walk it in 3D. **Attach** it edge to edge onto a growing
+chain of other Friends' lands (no grid, no limit), walk straight across, water
+your neighbours' plants, feed their chickens, buy from their stalls and sell what
+you grow on your deck. The heavier and more developed a land, the higher its
+**status**. Every credit purchase, docking fee and market sale burns
 $RAREFRIENDS (simulated in this preview).
 
 Built with **FriendSDK v0.1.2** (CLI game layout), viem (read-only tokenURI) and
@@ -38,7 +40,8 @@ land outline (`<path fill="url(#rf-floor)">`) and every object as
 `<g data-prop="bookcase" transform="translate(x y) scale(s)">`. We parse those
 strings (the SVG is never inserted into the page), unproject them with the
 renderer's isometric projection (a = 0.866, b = 0.28) onto a 2-units-per-tile
-grid, and rebuild the same footprint and props in 3D. Generation, Character,
+grid (a 4-unit chunk is always 2 × 2 tiles; lands are never scaled), and rebuild
+the same footprint and props in 3D. Generation, Character,
 Scenery, Floor and Activation tier come from the metadata traits; the Floor
 trait picks the tile texture. The original artwork is shown on the Home screen
 in an `<img>` next to the import.
@@ -47,9 +50,41 @@ If the read fails, a clearly labelled stand-in land is used and Home offers
 **Retry import**. Non-activated Friends have no land (the SDK only admits
 hardwired Friends anyway).
 
-Each berth = imported land + gangway + a 10 × 6 wooden **deck** holding the game
-layer (garden beds, chicken pen, stall, harbor sign), so small lands (a gen-6
+Each piece = imported land + a 10 × 6 wooden **deck** directly under it holding
+the game layer (garden beds, chicken pen, stall, sign), so small lands (a gen-6
 land is 4 × 4 tiles) still play the same.
+
+## The chain
+
+- Lands keep their real size (gen 3 ≈ 18 × 16 tiles, gen 4 12 × 12, gen 5 8 × 8,
+  gen 6 4 × 4; bigger generations are bigger still).
+- **Attaching:** `attachSlots()` slides your piece along every side of every land
+  already in the chain until it touches without overlapping, then offers the best
+  spread-out spots. The chain has no fixed grid or size: it grows as lands attach.
+- Attached lands share edges, so you walk straight from one to the next.
+- Every land you touch: **+25% produce and rep**. Spots touching more lands cost
+  more (🪙60 + 60 per land touched + a small contact bonus); 50% of the fee burns.
+- The preview seeds a chain of 8 sample lands of mixed sizes (one large
+  generation-2-style land down to a 2 × 2 speck), clearly labelled as samples.
+
+## Status
+
+`status score = weight + development`
+
+- **Weight** = land tiles (true on-chain land size).
+- **Development** (yours) = 25 per rep level above 1 + 40 for the Golden Can +
+  30 per hat + 30 per land touched + up to 80 for RF burned (10 per RF).
+
+| Tier | Score | Perk |
+| --- | --- | --- |
+| Drifter | 0+ | — |
+| Settler | 120+ | +10% produce & rep |
+| Merchant | 260+ | +20% |
+| Harbor Master | 450+ | +30% |
+| Admiral | 700+ | +40% |
+
+Each land flies a flag in its tier colour; the pole grows with the tier. The
+Chain screen shows your score breakdown and a leaderboard of every land.
 
 ## How to play
 
@@ -58,13 +93,13 @@ land is 4 × 4 tiles) still play the same.
 | WASD / arrows, or tap the ground | Walk |
 | E, the action button, or tap the thing again | Interact with what you're standing next to |
 | 🏠 Home (H) | Feed and pet your Friend; buy/open Treat Bags; view Charms |
-| 🗺️ Docks | Harbor map: dock your land at an open berth |
+| 🗺️ Chain | Chain map: attach your land, see your status and the leaderboard |
 | 🛒 Market (M) | Buy credits (simulated) and items from the trading board |
 | 🎒 Bag (B) | Items, wear hats, use fertilizer |
 | ⚙️ More | Sound, reduced motion, how to play |
 
-- **Your land** (imported) starts adrift. Docking costs 🪙100 (edge berth) or 🪙250 (centre
-  berth). Each adjacent docked neighbour adds **+25% produce and rep**.
+- **Your land** (imported) starts adrift beside the chain. Attach it from the
+  Chain screen or your deck sign.
 - **Garden:** 3 plants lose water over time; watered plants grow a stage every
   18 s; ripe bushes give 3 berries (× docking bonus).
 - **Chickens** lose food over time; a chicken with food > 40 lays an egg every 30 s.
@@ -89,7 +124,7 @@ land is 4 × 4 tiles) still play the same.
 | Flow | Rule |
 | --- | --- |
 | Credits | Bought by card in the live app (🪙500 ≈ $4.99, 🪙1,200 ≈ $9.99). 100 credits = 1 RF of value. **50%** of each purchase buys and burns RF. |
-| Docking | 🪙100 / 🪙250; **50%** burned |
+| Attaching | 🪙60 + 🪙60 per land touched (+ contact bonus); **50%** burned |
 | Stall sales & produce | **5%** market fee burned; rest to the seller |
 | Treat Bag (SDK chance game) | 1 RF (`1000000000000000000` base units) |
 | · Clover Charm | 60% / 6,000 bps · 0.5 RF · kept perk +10% rep |
@@ -104,7 +139,7 @@ chance-game client. **Neighbouring lands are fictional sample data.**
 
 ## Production roadmap / capability gaps
 
-- Shared harbor server: persistent plots, berth ownership, real neighbours, presence.
+- Shared chain server: persistent positions, real neighbours, presence, and a spatial index so the chain can grow to thousands of lands.
 - Card checkout → treasury buys RF → verifiable on-chain burns shown in-game.
 - Player-to-player stall trading and wearable items (not in SDK v0.1.2).
 - Embedded wallets so players never see a seed phrase.

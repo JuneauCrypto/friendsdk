@@ -2,7 +2,7 @@
 import * as THREE from "three";
 import { spriteFrame, type GenerationSprites, type SpriteFacing } from "@rarefriends/friendsdk/sprites";
 import {
-  DECK, DECK_H, DECK_W, SURF, WORLD_H, WORLD_W, deckOrigin, landOrigin, nearestSpot, spawnPoint, walkable, you,
+  DECK, SURF, deckOrigin, landOrigin, nearestSpot, spawnPoint, statusOf, walkable, you,
   type Spot, type World,
 } from "./model.js";
 import { floorTexture, makeProp } from "./props3d.js";
@@ -48,8 +48,9 @@ export function createEngine(container: HTMLElement, world: World, opts: Options
   const OFFSET = new THREE.Vector3(14, 17, 14);
   const focus = new THREE.Vector3();
 
-  const water = new THREE.Mesh(new THREE.PlaneGeometry(WORLD_W + 80, WORLD_H + 80), MATS.water);
-  water.rotation.x = -Math.PI / 2; water.position.set(WORLD_W / 2, -0.75, WORLD_H / 2); scene.add(water);
+  // endless sea: a large plane that follows the camera
+  const water = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), MATS.water);
+  water.rotation.x = -Math.PI / 2; water.position.y = -0.75; scene.add(water);
 
   /* ── statics (rebuilt after docking) ── */
   let statics = new THREE.Group(); scene.add(statics);
@@ -71,9 +72,9 @@ export function createEngine(container: HTMLElement, world: World, opts: Options
       statics.add(im);
     };
 
-    // planks (gangways & bridges)
+    // planks (gangways) from each piece
     const planks: [number, number][] = [];
-    for (let y = 0; y < WORLD_H; y++) for (let x = 0; x < WORLD_W; x++) if (world.surface[y * WORLD_W + x] === SURF.plank) planks.push([x, y]);
+    for (const p of world.plots) p.piece.surface.forEach((v, i) => { if (v === SURF.plank) planks.push([p.pos.x + (i % p.piece.w), p.pos.y + Math.floor(i / p.piece.w)]); });
     instanced(MATS.plank, planks, 0.14, -0.12);
     planks.forEach(([x, y], i) => { if (i % 3 === 0) statics.add(cube(MATS.post, 0.14, 0.9, 0.14, x + 0.15, -0.5, y + 0.15)); });
 
@@ -112,9 +113,16 @@ export function createEngine(container: HTMLElement, world: World, opts: Options
       const d = deckOrigin(p);
       const g = new THREE.Group(); g.position.set(d.x, 0, d.y); statics.add(g);
       const deckCells: [number, number][] = [];
-      for (let y = 0; y < DECK_H; y++) for (let x = 0; x < DECK_W; x++) deckCells.push([d.x + x, d.y + y]);
+      p.piece.surface.forEach((v, i) => { if (v === SURF.deck) deckCells.push([p.pos.x + (i % p.piece.w), p.pos.y + Math.floor(i / p.piece.w)]); });
       instanced(MATS.deck, deckCells, 0.3, -0.15, 0.02);
-      for (const [x, z] of [[0.2, 0.2], [DECK_W - 0.2, 0.2], [0.2, DECK_H - 0.2], [DECK_W - 0.2, DECK_H - 0.2]]) g.add(cube(MATS.post, 0.3, 1.4, 0.3, x, -0.5, z));
+      // status flag: taller pole and tier colour as the land gains weight and development
+      const st = statusOf(world, p);
+      let fx = lo.x + p.land.w / 2, fz = lo.y + 1;
+      for (let i = 0; i < p.land.tiles.length; i++) if (p.land.tiles[i] && !p.piece.blocked[(p.piece.land.y + Math.floor(i / p.land.w)) * p.piece.w + p.piece.land.x + (i % p.land.w)]) { fx = lo.x + (i % p.land.w) + 0.5; fz = lo.y + Math.floor(i / p.land.w) + 0.5; break; }
+      const poleH = 1.6 + st.tier * 0.7;
+      statics.add(cube(MATS.post, 0.08, poleH, 0.08, fx, poleH / 2, fz));
+      const flag = cube(mat(st.color), 0.06, 0.45 + st.tier * 0.08, 0.7 + st.tier * 0.12, fx, poleH - 0.3, fz + 0.4);
+      statics.add(flag);
       const plants: THREE.Group[] = [], needs: THREE.Mesh[] = [];
       DECK.beds.forEach(b => {
         g.add(cube(MATS.dirtDark, 0.9, 0.25, 0.9, b.x + 0.5, 0.1, b.y + 0.5));
@@ -153,8 +161,9 @@ export function createEngine(container: HTMLElement, world: World, opts: Options
         g.add(cube(MATS.board, 0.9, 0.45, 0.08, DECK.sign.x, 1.05, DECK.sign.y + 0.05));
       }
       const el = document.createElement("div"); el.className = `docks-label ${p.owner === "you" ? "mine" : ""}`;
-      el.textContent = p.owner === "you" ? (p.berth ? "Your land" : "Your land · adrift") : `${p.name} · sample`;
-      labels.appendChild(el); labelEls.push({ el, pos: new THREE.Vector3(lo.x + p.land.w / 2, 2.4, lo.y + 0.5) });
+      el.textContent = p.owner === "you" ? `Your land · ${st.name}${p.attached ? "" : " · adrift"}` : `${p.name} · ${st.name} · sample`;
+      el.style.borderColor = "#000"; el.style.background = `#${st.color.toString(16).padStart(6, "0")}`;
+      labels.appendChild(el); labelEls.push({ el, pos: new THREE.Vector3(fx, poleH + 0.6, fz) });
     }
   }
   buildStatics();
@@ -299,6 +308,7 @@ export function createEngine(container: HTMLElement, world: World, opts: Options
     const k = reducedMotion ? 1 : 1 - Math.pow(0.001, dt);
     focus.lerp(new THREE.Vector3(player.x, 0, player.y), k);
     camera.position.copy(focus).add(OFFSET); camera.lookAt(focus);
+    water.position.x = focus.x; water.position.z = focus.z;
     renderer.render(scene, camera);
     // labels
     const w = container.clientWidth, h = container.clientHeight;

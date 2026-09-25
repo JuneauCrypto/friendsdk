@@ -22,7 +22,8 @@ const unproject = (X: number, Y: number): [number, number] => {
   const u = X / (A * UNIT), v = Y / (B * UNIT);
   return [(u + v) / 2, (v - u) / 2];
 };
-export const MAX_W = 20, MAX_H = 18;          // tiles available for a land inside a berth
+/** Renderer units per tile. Lands are never scaled: a 4-unit chunk is always 2 × 2 tiles. */
+export const UNITS_PER_TILE = 2;
 
 function pointInRings(x: number, y: number, rings: [number, number][][]) {
   let inside = false;                           // even-odd rule, matching fill-rule="evenodd"
@@ -45,9 +46,8 @@ export function parseLandSvg(svg: string, traits: Record<string, string | number
   const all = rings.flat();
   const minX = Math.min(...all.map(p => p[0])), minY = Math.min(...all.map(p => p[1]));
   const spanX = Math.max(...all.map(p => p[0])) - minX, spanY = Math.max(...all.map(p => p[1])) - minY;
-  // 2 renderer units per tile (a 4-unit chunk = 2 × 2 tiles); larger lands are scaled to fit a berth.
-  const upt = Math.max(2, spanX / MAX_W, spanY / MAX_H);
-  const w = Math.max(1, Math.round(spanX / upt)), h = Math.max(1, Math.round(spanY / upt));
+  const upt = UNITS_PER_TILE;                  // true scale, whatever the land's size
+  const w = Math.max(1, Math.ceil(spanX / upt - 0.01)), h = Math.max(1, Math.ceil(spanY / upt - 0.01));
   const local = rings.map(r => r.map(([x, y]) => [x - minX, y - minY] as [number, number]));
   const tiles = Array.from({ length: w * h }, (_, i) => pointInRings(((i % w) + 0.5) * upt, (Math.floor(i / w) + 0.5) * upt, local));
   if (!tiles.some(Boolean)) tiles.fill(true);
