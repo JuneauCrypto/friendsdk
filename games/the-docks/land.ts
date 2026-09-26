@@ -1,32 +1,48 @@
-/* Importing an activated Friend's on-chain land.
+/* Reading an activated Friend straight from the Generations contract.
  *
- * An activated Rare Friends Generations token renders its world fully on chain:
- * tokenURI() returns JSON whose `image` is an isometric SVG. That SVG carries the
- * land outline (`<path fill="url(#rf-floor)">`) and every placed object as
- * `<g data-prop="…" transform="translate(x y) scale(…)">`. We parse those — never
- * insert the SVG into the DOM — and unproject them onto a tile grid so the same
- * land, with everything already on it, can be walked in 3D. */
-import { createPublicClient, http, parseAbi } from "viem";
+ * tokenURI() returns JSON whose `image` is the Friend's fully on-chain isometric
+ * SVG. We keep that artwork exactly as rendered and only derive geometry from it:
+ * the land outline (`<path fill="url(#rf-floor)">`) and each object
+ * (`<g data-prop="…" transform="translate(x y)">`), unprojected onto a tile grid so
+ * lands can dock edge to edge and be walked. The SVG is shown through <img>
+ * (scripts never run there) and is never inserted into the page DOM. */
+import { createPublicClient, http, parseAbi, type PublicClient } from "viem";
 import { GENERATION_SPRITE_MANIFEST } from "@rarefriends/friendsdk/sprites";
 
-export type LandProp = { name: string; x: number; y: number; scale: number; flip: boolean };
-export type Land = {
-  w: number; h: number; tiles: boolean[]; props: LandProp[];
-  floor: string; scenery: string; source: "chain" | "sample" | "fallback";
-  traits: Record<string, string | number>; image?: string;
+export type LandProp = { name: string; x: number; y: number };
+export type Friend = {
+  tokenId: bigint;
+  w: number; h: number; tiles: boolean[];      // footprint in tiles (1 tile = 2 renderer units)
+  blocked: boolean[];                            // tiles holding solid objects
+  props: LandProp[];
+  traits: Record<string, string | number>;
+  /** Screen offset of the footprint's (0,0) tile corner inside the 512 × 512 artwork. */
+  anchor: { x: number; y: number };
+  art: string;                                   // data:image/svg+xml URL of the on-chain artwork (background removed)
+  artWithoutPortrait: string;                    // same, with the standing Friend removed (used when it walks)
+  signature: string;                             // changes whenever the on-chain art or traits change
+  active: boolean;
 };
 
-// Isometric projection used by the on-chain renderer (same shallow projection as the SDK world renderer).
-const A = 0.8660254038, B = 0.28, UNIT = 6;
-const unproject = (X: number, Y: number): [number, number] => {
+// The on-chain renderer's isometric projection (same shallow projection as the SDK world renderer).
+export const A = 0.8660254038, B = 0.28, UNIT = 6, UNITS_PER_TILE = 2;
+/** Screen pixels (artwork scale) for a ground point in tiles. */
+export const toScreen = (tx: number, ty: number) => {
+  const ux = tx * UNITS_PER_TILE, uy = ty * UNITS_PER_TILE;
+  return { x: A * UNIT * (ux - uy), y: B * UNIT * (ux + uy) };
+};
+export const fromScreen = (sx: number, sy: number) => {
+  const u = sx / (A * UNIT), v = sy / (B * UNIT);
+  return { x: (u + v) / 2 / UNITS_PER_TILE, y: (v - u) / 2 / UNITS_PER_TILE };
+};
+const unprojectUnits = (X: number, Y: number): [number, number] => {
   const u = X / (A * UNIT), v = Y / (B * UNIT);
   return [(u + v) / 2, (v - u) / 2];
 };
-/** Renderer units per tile. Lands are never scaled: a 4-unit chunk is always 2 × 2 tiles. */
-export const UNITS_PER_TILE = 2;
+const SOLID_EXEMPT = /tiny|sprout|flower|reeds/;
 
 function pointInRings(x: number, y: number, rings: [number, number][][]) {
-  let inside = false;                           // even-odd rule, matching fill-rule="evenodd"
+  let inside = false;                           // even-odd, matching fill-rule="evenodd"
   for (const ring of rings) for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
     const [xi, yi] = ring[i], [xj, yj] = ring[j];
     if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
@@ -34,83 +50,93 @@ function pointInRings(x: number, y: number, rings: [number, number][][]) {
   return inside;
 }
 
-/** Parse the on-chain land SVG into a tile footprint and prop list. */
-export function parseLandSvg(svg: string, traits: Record<string, string | number> = {}): Land {
+/** Tiny stable hash for change detection. */
+function hash(s: string) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); }
+
+const toDataUrl = (svg: string) => `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}`;
+
+/** Remove the black backdrop (so lands can sit side by side) and, optionally, the standing Friend. */
+function displaySvg(svg: string, withoutPortrait: boolean) {
+  let out = svg.replace(/<rect width="512" height="512" fill="#000"\/>/, "");
+  if (withoutPortrait && typeof DOMParser !== "undefined") {
+    const doc = new DOMParser().parseFromString(out, "image/svg+xml");
+    doc.getElementById("portrait")?.remove();
+    out = new XMLSerializer().serializeToString(doc);
+  }
+  return out;
+}
+
+/** Derive the walkable footprint and objects from the on-chain SVG. */
+export function parseFriendSvg(tokenId: bigint, svg: string, traits: Record<string, string | number>): Friend {
   const floorPath = /<path d="([^"]+)"[^>]*fill="url\(#rf-floor\)"/.exec(svg)?.[1];
-  if (!floorPath) throw new Error("No land outline in this Friend's artwork.");
+  if (!floorPath) throw new Error(`Friend #${tokenId} has no land in its artwork.`);
+  const scene = /<g transform="translate\(([-\d.]+)[ ,]([-\d.]+)\)"><g id="scene">/.exec(svg);
+  const offX = scene ? Number(scene[1]) : 6, offY = scene ? Number(scene[2]) : 6;
   const rings: [number, number][][] = [];
   for (const sub of floorPath.split(/(?=M)/)) {
-    const pts = [...sub.matchAll(/([\d.]+)[ ,]([\d.]+)/g)].map(m => unproject(Number(m[1]), Number(m[2])));
+    const pts = [...sub.matchAll(/([\d.]+)[ ,]([\d.]+)/g)].map(m => unprojectUnits(Number(m[1]), Number(m[2])));
     if (pts.length >= 3) rings.push(pts);
   }
   const all = rings.flat();
   const minX = Math.min(...all.map(p => p[0])), minY = Math.min(...all.map(p => p[1]));
   const spanX = Math.max(...all.map(p => p[0])) - minX, spanY = Math.max(...all.map(p => p[1])) - minY;
-  const upt = UNITS_PER_TILE;                  // true scale, whatever the land's size
+  const upt = UNITS_PER_TILE;
   const w = Math.max(1, Math.ceil(spanX / upt - 0.01)), h = Math.max(1, Math.ceil(spanY / upt - 0.01));
   const local = rings.map(r => r.map(([x, y]) => [x - minX, y - minY] as [number, number]));
   const tiles = Array.from({ length: w * h }, (_, i) => pointInRings(((i % w) + 0.5) * upt, (Math.floor(i / w) + 0.5) * upt, local));
   if (!tiles.some(Boolean)) tiles.fill(true);
+  const blocked = new Array(w * h).fill(false);
   const props: LandProp[] = [];
-  for (const m of svg.matchAll(/data-prop="([^"]+)"[^>]*?transform="translate\(([-\d.]+)[ ,]([-\d.]+)\)(?: scale\(([-\d.]+)(?:[ ,]([-\d.]+))?\))?"/g)) {
-    const [gx, gy] = unproject(Number(m[2]), Number(m[3]));
-    const sx = Number(m[4] ?? 1);
-    props.push({ name: m[1], x: Math.min(w - 0.3, Math.max(0.3, (gx - minX) / upt)), y: Math.min(h - 0.3, Math.max(0.3, (gy - minY) / upt)),
-      scale: Math.abs(sx) || 1, flip: sx < 0 });
+  for (const m of svg.matchAll(/data-prop="([^"]+)"[^>]*?transform="translate\(([-\d.]+)[ ,]([-\d.]+)\)/g)) {
+    const [gx, gy] = unprojectUnits(Number(m[2]), Number(m[3]));
+    const x = (gx - minX) / upt, y = (gy - minY) / upt;
+    props.push({ name: m[1], x, y });
+    const tx = Math.min(w - 1, Math.max(0, Math.floor(x))), ty = Math.min(h - 1, Math.max(0, Math.floor(y)));
+    if (!SOLID_EXEMPT.test(m[1])) blocked[ty * w + tx] = true;
   }
-  return { w, h, tiles, props, floor: String(traits.Floor ?? "Plain"), scenery: String(traits.Scenery ?? ""), source: "chain", traits };
+  // screen position of the footprint origin inside the artwork = projected (minX, minY) + scene translate
+  const anchor = { x: A * UNIT * (minX - minY) + offX, y: B * UNIT * (minX + minY) + offY };
+  const sig = hash(`${traits.Generation}|${traits["Activation tier"]}|${traits.State}|${svg.length}|${hash(svg)}`);
+  return { tokenId, w, h, tiles, blocked, props, traits, anchor,
+    art: toDataUrl(displaySvg(svg, false)), artWithoutPortrait: toDataUrl(displaySvg(svg, true)),
+    signature: sig, active: traits.State === "Active" };
 }
 
-const TOKEN_URI_ABI = parseAbi(["function tokenURI(uint256 tokenId) view returns (string)"]);
+const ABI = parseAbi(["function tokenURI(uint256 tokenId) view returns (string)", "function ownerOf(uint256 tokenId) view returns (address)"]);
+let client: Pick<PublicClient, "readContract"> | null = null;
+const rpc = () => client ??= createPublicClient({ transport: http(GENERATION_SPRITE_MANIFEST.rpcUrl, { retryCount: 1, timeout: 15_000 }) });
+const b64 = (s: string) => new TextDecoder().decode(Uint8Array.from(atob(s), c => c.charCodeAt(0)));
 
-/** Read the selected Friend's land from the Generations contract (read-only public RPC). */
-export async function readChainLand(friendId: bigint, signal?: AbortSignal): Promise<Land> {
-  const client = createPublicClient({ transport: http(GENERATION_SPRITE_MANIFEST.rpcUrl, { retryCount: 1, timeout: 15_000 }) });
-  const uri = await client.readContract({ address: GENERATION_SPRITE_MANIFEST.generations, abi: TOKEN_URI_ABI, functionName: "tokenURI", args: [friendId] });
-  if (signal?.aborted) throw new Error("aborted");
-  const b64 = (s: string) => new TextDecoder().decode(Uint8Array.from(atob(s), c => c.charCodeAt(0)));
+/** Read one Friend's metadata and artwork from the Generations contract (public, read-only). */
+export async function readFriend(tokenId: bigint): Promise<Friend> {
+  const uri = await rpc().readContract({ address: GENERATION_SPRITE_MANIFEST.generations, abi: ABI, functionName: "tokenURI", args: [tokenId] }) as string;
   const comma = uri.indexOf(",");
   const meta = JSON.parse(uri.startsWith("data:application/json;base64,") ? b64(uri.slice(comma + 1)) : decodeURIComponent(uri.slice(comma + 1)));
   const traits: Record<string, string | number> = Object.fromEntries((meta.attributes ?? []).map((a: { trait_type: string; value: string | number }) => [a.trait_type, a.value]));
   const image: string = meta.image ?? "";
   const ic = image.indexOf(",");
   const svg = image.startsWith("data:image/svg+xml;base64,") ? b64(image.slice(ic + 1)) : decodeURIComponent(image.slice(ic + 1));
-  if (traits.State && traits.State !== "Active") throw new Error("This Friend isn't activated yet, so it has no land.");
-  const land = parseLandSvg(svg, traits);
-  // Only a data: SVG from the collection contract is kept, for display in an <img> (scripts never run there).
-  if (image.startsWith("data:image/svg+xml")) land.image = image;
-  return land;
+  if (traits.State !== "Active") {
+    // Inactive Friends render as a still character, not a land: nothing to dock.
+    throw Object.assign(new Error(`Friend #${tokenId} is not activated (state: ${traits.State ?? "unknown"}).`), { inactive: true });
+  }
+  return parseFriendSvg(tokenId, svg, traits);
+}
+export async function readOwner(tokenId: bigint): Promise<string> {
+  const o = await rpc().readContract({ address: GENERATION_SPRITE_MANIFEST.generations, abi: ABI, functionName: "ownerOf", args: [tokenId] }) as string;
+  return o.toLowerCase();
 }
 
-/* ── Sample lands for fictional neighbours (same chunk style as real lands) ── */
-const SCENERY_PROPS: Record<string, string[]> = {
-  Garden: ["tree", "tree", "sprout", "bench", "rock", "flower"],
-  Coastal: ["buoy", "buoy-tiny", "reeds", "crate-tiny", "reeds"],
-  Rooftop: ["tank", "vent", "vent-tiny", "antenna", "flower", "bench"],
-  Mineral: ["crystal", "crystal-tiny", "rock", "crystal", "rock"],
-  Reading: ["bookcase", "book-stack", "book-stack-tiny", "bench"],
-  Industrial: ["tank", "terminal", "pipe", "crate-tiny"],
+/* ── Official reward weight (rarefriends.com/docs/generations) ── */
+export const REWARD_WEIGHT: Readonly<Record<number, readonly number[]>> = {
+  1: [175000, 270000, 416250, 641250, 987187.5],
+  2: [16000, 24375, 37125, 56531.25, 86062.5],
+  3: [1450, 2212.5, 3375, 5146.875, 7846.875],
+  4: [130, 198.75, 303.75, 464.0625, 708.75],
+  5: [12, 18.375, 28.125, 43.03125, 65.8125],
+  6: [1.1, 1.6875, 2.5875, 3.965625, 6.075],
 };
-export function sampleLand(seed: number, scenery: string, floor: string, chunksW = 7, chunksH = 6): Land {
-  let s = seed | 0 || 1;
-  const rand = () => { s = (s * 1664525 + 1013904223) | 0; return ((s >>> 8) & 0xffffff) / 0x1000000; };
-  const cw = chunksW, ch = chunksH, grid = new Array(cw * ch).fill(false);
-  // grow a connected blob of 2 × 2-tile chunks from the centre
-  const start = Math.floor(ch / 2) * cw + Math.floor(cw / 2); grid[start] = true;
-  const target = Math.floor(cw * ch * 0.62);
-  for (let n = 1, guard = 0; n < target && guard < 5000; guard++) {
-    const i = Math.floor(rand() * grid.length); if (grid[i]) continue;
-    const x = i % cw, y = Math.floor(i / cw);
-    if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => grid[(y + dy) * cw + x + dx] && x + dx >= 0 && x + dx < cw && y + dy >= 0 && y + dy < ch)) { grid[i] = true; n++; }
-  }
-  const w = cw * 2, h = ch * 2, tiles = Array.from({ length: w * h }, (_, i) => grid[Math.floor(Math.floor(i / w) / 2) * cw + Math.floor((i % w) / 2)]);
-  const vocab = SCENERY_PROPS[scenery] ?? SCENERY_PROPS.Garden;
-  const props: LandProp[] = [];
-  const cells = grid.map((g, i) => g ? i : -1).filter(i => i >= 0 && i !== start);
-  for (let k = 0; k < Math.min(5, cells.length); k++) {
-    const c = cells.splice(Math.floor(rand() * cells.length), 1)[0];
-    const name = vocab[k % vocab.length];
-    props.push({ name, x: (c % cw) * 2 + 1, y: Math.floor(c / cw) * 2 + 1, scale: 0.9, flip: rand() > 0.5 });
-  }
-  return { w, h, tiles, props, floor, scenery, source: "sample", traits: { Scenery: scenery, Floor: floor } };
+export function rewardWeight(f: Friend) {
+  const g = Number(f.traits.Generation), t = Number(f.traits["Activation tier"] ?? 0);
+  return REWARD_WEIGHT[g]?.[Math.max(0, Math.min(4, t))] ?? 0;
 }
