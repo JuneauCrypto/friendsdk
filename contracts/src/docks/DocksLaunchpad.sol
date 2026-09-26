@@ -5,7 +5,7 @@ import { IERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.
 import { ERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
 import { SafeERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import { ReentrancyGuard } from "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
-import { DocksRegistry, IDocksGenerations } from "./DocksRegistry.sol";
+import { DocksPlots, IDocksGenerations } from "./DocksPlots.sol";
 
 /// @notice Fixed-supply token launched from a plot. No owner, no minting after launch.
 contract DocksToken is ERC20 {
@@ -16,7 +16,7 @@ contract DocksToken is ERC20 {
     }
 }
 
-/// @notice Launch a token from your plot for 1,000 RF (half burned, half to the treasury),
+/// @notice Launch a token from your plot (an NFT on DocksPlots) for 1,000 RF (half burned, half to the treasury),
 /// airdrop it into Friend wallets and/or open a claim pool. Every claim costs the launch's
 /// RF claim price, which is burned. Tokens always land in the Friend's own wallet.
 /// @dev Airdrops and claims are sent in batches (`airdrop`, `claimMany`) so they scale to
@@ -35,6 +35,7 @@ contract DocksLaunchpad is ReentrancyGuard {
         DocksToken token;
         address creator;
         uint256 creatorFriendId;
+        uint256 creatorPlotId;
         Scope scope;
         uint256 claimEach;
         uint256 claimPrice;
@@ -84,7 +85,7 @@ contract DocksLaunchpad is ReentrancyGuard {
     event Claimed(uint256 indexed launchId, uint256 indexed friendId, uint256 amount, uint256 rfBurned);
 
     IERC20 public immutable rf;
-    DocksRegistry public immutable registry;
+    DocksPlots public immutable registry;
     IDocksGenerations public immutable generations;
     address public immutable treasury;
 
@@ -92,7 +93,7 @@ contract DocksLaunchpad is ReentrancyGuard {
     mapping(uint256 launchId => mapping(uint256 friendId => bool)) public claimed;
     mapping(uint256 launchId => mapping(uint256 friendId => bool)) public airdropped;
 
-    constructor(IERC20 rf_, DocksRegistry registry_, address treasury_) {
+    constructor(IERC20 rf_, DocksPlots registry_, address treasury_) {
         rf = rf_;
         registry = registry_;
         generations = registry_.generations();
@@ -121,6 +122,7 @@ contract DocksLaunchpad is ReentrancyGuard {
                 token,
                 creator,
                 p.creatorFriendId,
+                registry.plotOf(p.creatorFriendId),
                 p.scope,
                 p.claimEach,
                 p.claimPrice,
@@ -227,13 +229,14 @@ contract DocksLaunchpad is ReentrancyGuard {
         if (!registry.isValid(friendId)) return false;
         address holder = generations.ownerOf(friendId);
         if (scope == Scope.AnyDocked) return true;
-        if (scope == Scope.HolderPlot) return holder == l.creator;
+        bool onPlot = registry.plotOf(friendId) == l.creatorPlotId;
+        if (scope == Scope.HolderPlot) return onPlot;
         if (scope == Scope.PlotAndNeighbours) {
-            if (holder == l.creator) return true;
-            return registry.isValid(via) && generations.ownerOf(via) == l.creator
+            if (onPlot) return true;
+            return registry.isValid(via) && registry.plotOf(via) == l.creatorPlotId
                 && registry.adjacent(friendId, via);
         }
-        return registry.canVisit(l.creator, holder);
+        return onPlot || registry.canVisit(l.creatorPlotId, holder);
     }
 
     function launchCount() external view returns (uint256) {

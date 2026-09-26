@@ -9,6 +9,12 @@ one plot and arrange them however they like (gaps are fine). The game keeps
 re-checking the chain, so **upgrades show up** and deactivated or transferred
 Friends leave.
 
+**Arranging is the game, and every plot is an NFT.** Move your Friends freely as a
+draft; when you like it, **Save on chain**. The first save mints your plot NFT. Every save
+burns RF for each Friend whose spot changed (Gen 1: 100 · Gen 2: 50 · Gen 3: 20 · Gen 4: 10 ·
+Gen 5: 5 · Gen 6: 1 RF) plus gas; Friends that stay put cost nothing. **Undo** returns to
+the last save. (Simulated in this preview; contract below.)
+
 **Your Friends appear automatically.** Every activated Friend in the same wallet as the
 Friend you pick joins your plot, auto-arranged as one connected block, from 1 Friend to
 10,000+. Arrange them however you like; each Friend just has to touch another along part of
@@ -84,6 +90,8 @@ pushes changes to connected players instead of polling.
 
 | Action | Cost | Where the RF goes |
 | --- | --- | --- |
+| Save an arrangement (the core loop) | per Friend moved: Gen 1 100 · Gen 2 50 · Gen 3 20 · Gen 4 10 · Gen 5 5 · Gen 6 1 RF, plus gas | 100 % burned (`0x…dEaD`) |
+| Mint a plot NFT | gas only (happens on your first save) | — |
 | Launch a token | 1,000 RF | 500 burned (`0x…dEaD`), 500 to the treasury |
 | Claim from a launch | launch's claim price (set by launcher) | 100 % burned |
 
@@ -94,22 +102,29 @@ launching Friend's wallet. No RF payout is promised, so nothing needs backing.
 
 **On-chain phase (written and tested, not deployed)** in `contracts/src/docks/`:
 
-- `DocksRegistry.sol` — shared world grid. `place` (batch, so a crew moves in one
-  transaction) checks `ownerOf` and activation through the live activation manager
-  (`positions(generations, id)`); true-size footprints by generation; `adjacent`
-  = docked; open / invite-only plots with approved visitors; stale placements
-  (sold or deactivated) can be cleared by anyone; `placedPage` for discovery.
-- `DocksLaunchpad.sol` — `LAUNCH_FEE = 1000 RF` split burn/treasury; `DocksToken`
+- `DocksPlots.sol` — **every plot is an ERC-721** ("The Docks Plot", `PLOT`) with fully
+  on-chain metadata (a map of its Friends). `mint(name)`; `arrange(plotId, ids, xs, ys)`
+  saves positions for Friends you hold on a plot you own and **burns RF per Friend moved,
+  by generation** (`FEE_GEN1…6` = 100/50/20/10/5/1 RF; unchanged Friends free; batches so a
+  whole crew moves in one call); `arrangeCost` previews it; `remove` is free. Ownership and
+  activation are checked through the live activation manager (`positions(generations, id)`);
+  true-size footprints by generation on a 4 × 4-tile cell grid; `adjacent` = docked (any
+  shared edge segment); open / invite-only plots with approved visitors, set by the plot
+  NFT's owner; `members` / `placedPage` for discovery. A Friend counts only while it is
+  activated and held by the plot NFT's owner, so selling a Friend or the deed alone leaves
+  stale spots anyone can `clear`. Friends are never escrowed: in Rare Friends a transfer
+  clears activation, so a plot NFT can't carry its Friends with it.
+- `DocksLaunchpad.sol` — launches come from a Friend on a saved plot; `LAUNCH_FEE = 1000 RF` split burn/treasury; `DocksToken`
   fixed-supply ERC-20; an airdrop pool sent in batches by the creator (`airdrop`,
   `endAirdrop`) and a claim pool claimed per Friend or in batches (`claimMany`, RF
   charged only for claims made); everything paid to `tokenBoundAccount`; one airdrop
   and one claim per Friend per launch; claim price burned; scopes as above. Batches
   keep 10,000-Friend plots practical (a client sends ~100 placements or claims per
   transaction).
-- Tests: `forge test --match-contract DocksTest` (20 unit tests, incl. 300 Friends placed and claimed in one transaction each) and
+- Tests: `forge test --match-contract DocksTest` (28 unit tests: plot NFTs, per-generation burn, only moved Friends charged, deed transfer, 300 Friends arranged and claimed in one transaction each) and
   `FRIENDSDK_FORK_RPC=https://rpc.mainnet.chain.robinhood.com forge test --match-contract DocksForkTest`
-  (real Generations, activation manager and RF on a local fork: places #67111 and
-  #7153 edge to edge, launches, claims).
+  (real Generations, activation manager and RF on a local fork: mints two plots, arranges
+  #67111 (burns 50 RF) and #7153 edge to edge, launches, claims).
 
 Deployment, funding and production publication wait for Rare Friends review. The
 SDK's chance-game definition in `game.json` (Treat Bag) is required by the

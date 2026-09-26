@@ -1,6 +1,6 @@
 /* The Docks — pure logic, no rendering. Built to scale from 1 to 10,000+ Friends per plot.
  *
- * - Everything lives on the on-chain grid (DocksRegistry): 4 × 4-tile cells. A Friend covers
+ * - Everything lives on the on-chain grid (DocksPlots): 4 × 4-tile cells. A Friend covers
  *   whole cells at true size by generation, so layout needs no artwork; art loads lazily.
  * - A plot is one holder's Friends. Its Friends must form one connected shape: each touches
  *   another along at least part of a side. Holes are fine.
@@ -11,6 +11,17 @@ import { REWARD_WEIGHT, type Friend } from "./land.js";
 export const CELL = 4;                                             // tiles per cell side
 /** Footprint in cells by generation: lands are 30, 20, 18×16, 12, 8 and 4 tiles across. */
 export const FOOTPRINT: Readonly<Record<number, readonly [number, number]>> = { 1: [8, 8], 2: [5, 5], 3: [5, 4], 4: [3, 3], 5: [2, 2], 6: [1, 1] };
+
+/** RF burned per Friend moved when an arrangement is saved on chain (DocksPlots.FEE_GEN1…6). */
+export const ARRANGE_FEE: Readonly<Record<number, number>> = { 1: 100, 2: 50, 3: 20, 4: 10, 5: 5, 6: 1 };
+export const feeOf = (m: { gen: number }) => ARRANGE_FEE[m.gen] ?? 1;
+/** Friends whose spot differs from the last saved (on-chain) arrangement, and the RF that saving burns. */
+export function pendingChanges(p: Plot, saved: ReadonlyMap<bigint, { x: number; y: number }>) {
+  let rf = 0; const moved: Placed[] = [];
+  for (const pl of p.friends) { const s = saved.get(pl.m.id); if (!s || s.x !== pl.x || s.y !== pl.y) { moved.push(pl); rf += feeOf(pl.m); } }
+  const gone = [...saved.keys()].filter(id => !p.friends.some(pl => pl.m.id === id));
+  return { moved, rf, gone };
+}
 
 export type Member = {
   id: bigint; gen: number; tier: number; cw: number; ch: number;

@@ -130,8 +130,36 @@
       "sha256": "c2394cb2a327f234711da34884947f4aa0f6dd2791d1d6303a0c7acfaf81bca3"
     },
     {
+      "path": "openzeppelin-contracts/contracts/token/ERC721/ERC721.sol",
+      "sha256": "ef8e2398c78851bd2ec12bc48d923058c557889d5a3d5ee4919c17ff0fb3517e"
+    },
+    {
+      "path": "openzeppelin-contracts/contracts/token/ERC721/IERC721.sol",
+      "sha256": "ff0eb9902bf0ac099205615fac90eacf34fae637571b05aab3ea35dea53d5f17"
+    },
+    {
+      "path": "openzeppelin-contracts/contracts/token/ERC721/IERC721Receiver.sol",
+      "sha256": "eafee3ffdc7cb2fba4bf6bd16fb28f8e5b4679742e81c2ad42a1b1df5c179feb"
+    },
+    {
+      "path": "openzeppelin-contracts/contracts/token/ERC721/extensions/IERC721Metadata.sol",
+      "sha256": "33223782ea652dca413702ce92f9f59d91d758a035065b24bbedb7dc60c63a78"
+    },
+    {
+      "path": "openzeppelin-contracts/contracts/token/ERC721/utils/ERC721Utils.sol",
+      "sha256": "b48e95db8c85866c1d88af8e82f346e0d22d24b5aac5b936079d958c72e13b9f"
+    },
+    {
       "path": "openzeppelin-contracts/contracts/utils/Arrays.sol",
       "sha256": "8e47307eebdf6607015101a2940cc7bf762e1037b55866176c6032d31263ddfc"
+    },
+    {
+      "path": "openzeppelin-contracts/contracts/utils/Base64.sol",
+      "sha256": "1c143572893f50f04fe8e507d89f9997cd3242102ba4200c8de0803ecbaf8cec"
+    },
+    {
+      "path": "openzeppelin-contracts/contracts/utils/Bytes.sol",
+      "sha256": "78b01e1da6f6e6aaa8ef97b5d5ed885f638520bfdafb65e813b900a14c9d4eac"
     },
     {
       "path": "openzeppelin-contracts/contracts/utils/Comparators.sol",
@@ -158,6 +186,10 @@
       "sha256": "75704538dcb223239280c6726d9a31cf769a7816718517c997fc7d63bdb70778"
     },
     {
+      "path": "openzeppelin-contracts/contracts/utils/Strings.sol",
+      "sha256": "e318709bbe73a7831d64c1351e8bdc43780b245f25191234e361e6ab9b98c67b"
+    },
+    {
       "path": "openzeppelin-contracts/contracts/utils/introspection/ERC165.sol",
       "sha256": "61a2b12c96857aaa35f48aeda67a4281637a42494c0b3795be0ae976aa7b3793"
     },
@@ -172,6 +204,10 @@
     {
       "path": "openzeppelin-contracts/contracts/utils/math/SafeCast.sol",
       "sha256": "5779bc848bde39f1ad7bc02b4f708a0040888e0083b1a33f119cd94639350134"
+    },
+    {
+      "path": "openzeppelin-contracts/contracts/utils/math/SignedMath.sol",
+      "sha256": "1ed50b1056af886752f0fb48a0165d381e69bb4a4b18b893b066dc144a7e08d7"
     }
   ]
 }

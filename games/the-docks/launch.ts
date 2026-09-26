@@ -52,7 +52,7 @@ export function launch(e: Economy, w: World, input: LaunchInput, canVisit: (p: P
   const name = input.name.trim(), symbol = input.symbol.trim().toUpperCase();
   if (!name || !/^[A-Z0-9]{2,8}$/.test(symbol)) throw new Error("Give it a name and a 2–8 letter ticker.");
   if (e.launches.some(l => l.symbol === symbol)) throw new Error(`$${symbol} already exists here.`);
-  if (!input.creator.docked) throw new Error("Dock your plot first: launches come from a docked Friend.");
+  if (!input.creator.docked) throw new Error("Dock and save your plot first: launches come from a Friend on a saved, docked plot.");
   if (e.rf < LAUNCH_FEE) throw new Error(`Launching costs ${LAUNCH_FEE.toLocaleString()} RF; you have ${e.rf.toLocaleString()}.`);
   const drop = input.airdropScope === "none" ? [] : eligibleFriends(w, { scope: input.airdropScope, creator: input.creator }, canVisit);
   const dropTotal = drop.length * input.airdropEach;

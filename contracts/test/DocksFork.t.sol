@@ -3,7 +3,7 @@ pragma solidity ^0.8.36;
 
 import { Test } from "forge-std/Test.sol";
 import { IERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
-import { DocksRegistry, IDocksGenerations } from "../src/docks/DocksRegistry.sol";
+import { DocksPlots, IDocksGenerations } from "../src/docks/DocksPlots.sol";
 import { DocksLaunchpad } from "../src/docks/DocksLaunchpad.sol";
 
 /// @notice Local mainnet-fork check of The Docks against the real Generations, activation
@@ -17,7 +17,7 @@ contract DocksForkTest is Test {
         vm.skip(bytes(rpc).length == 0);
         vm.createSelectFork(rpc);
         IDocksGenerations gen = IDocksGenerations(GENERATIONS);
-        DocksRegistry reg = new DocksRegistry(gen);
+        DocksPlots reg = new DocksPlots(gen, IERC20(RF));
         DocksLaunchpad pad = new DocksLaunchpad(IERC20(RF), reg, address(0x7EA));
 
         assertTrue(reg.isActive(67111));
@@ -26,25 +26,7 @@ contract DocksForkTest is Test {
 
         address a = gen.ownerOf(67111);
         address b = gen.ownerOf(7153);
-        uint256[] memory ids = new uint256[](1);
-        int32[] memory xs = new int32[](1);
-        int32[] memory ys = new int32[](1);
-        ids[0] = 67111;
-        vm.prank(a);
-        reg.place(ids, xs, ys);
-        ids[0] = 7153;
-        xs[0] = 5; // #67111 is Gen 2: 5 cells wide
-        vm.prank(b);
-        reg.place(ids, xs, ys);
-        assertTrue(reg.adjacent(67111, 7153));
-
-        deal(RF, a, 2000 ether);
-        deal(RF, b, 10 ether);
-        vm.prank(a);
-        IERC20(RF).approve(address(pad), type(uint256).max);
-        vm.prank(b);
-        IERC20(RF).approve(address(pad), type(uint256).max);
-
+        _dock(reg, pad, a, b);
         DocksLaunchpad.LaunchParams memory p;
         p.name = "Market Coin";
         p.symbol = "MKT";
@@ -61,5 +43,32 @@ contract DocksForkTest is Test {
         IERC20 t = IERC20(address(pad.launches(id).token));
         assertEq(t.balanceOf(gen.tokenBoundAccount(7153)), 100 ether);
         assertEq(t.balanceOf(gen.tokenBoundAccount(67111)), 990_000 ether);
+    }
+
+    function _dock(DocksPlots reg, DocksLaunchpad pad, address a, address b) private {
+        deal(RF, a, 2000 ether);
+        deal(RF, b, 100 ether);
+        uint256[] memory ids = new uint256[](1);
+        int32[] memory xs = new int32[](1);
+        int32[] memory ys = new int32[](1);
+        ids[0] = 67111;
+        vm.startPrank(a);
+        IERC20(RF).approve(address(reg), type(uint256).max);
+        IERC20(RF).approve(address(pad), type(uint256).max);
+        uint256 plotA = reg.mint("Market");
+        uint256 burnBefore = IERC20(RF).balanceOf(reg.BURN());
+        reg.arrange(plotA, ids, xs, ys); // Gen 2: burns 50 RF
+        vm.stopPrank();
+        assertEq(IERC20(RF).balanceOf(reg.BURN()) - burnBefore, 50 ether);
+        ids[0] = 7153;
+        xs[0] = 5; // #67111 is Gen 2: 5 cells wide
+        vm.startPrank(b);
+        IERC20(RF).approve(address(reg), type(uint256).max);
+        IERC20(RF).approve(address(pad), type(uint256).max);
+        uint256 plotB = reg.mint("Reading Row");
+        reg.arrange(plotB, ids, xs, ys); // Gen 3: burns 20 RF
+        vm.stopPrank();
+        assertTrue(reg.adjacent(67111, 7153));
+        assertEq(reg.ownerOf(plotA), a);
     }
 }

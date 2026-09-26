@@ -137,7 +137,7 @@ try {
   await game.getByText(/isn't held by the same wallet/).waitFor();
   await shot("my-plot");
   // arrange: move my Friend away so it no longer touches, Done refuses, Auto-arrange fixes it
-  await game.getByRole("button", { name: "✥ Arrange" }).click();
+  await game.locator(".rf-frame-menu").getByRole("button", { name: "✥ Arrange" }).click();
   await game.getByRole("toolbar", { name: "Arrange your Friends" }).waitFor();
   if (many) {                                     // packed plot: stepping onto a same-size neighbour swaps them
     await game.getByRole("button", { name: "Move down-right" }).click();
@@ -151,6 +151,26 @@ try {
   await game.getByRole("button", { name: "Auto-arrange" }).click();
   await btn("Done").click();
   await game.getByRole("toolbar", { name: "Arrange your Friends" }).waitFor({ state: "detached" });
+  // save on chain (simulated): mints the plot NFT and burns RF per Friend moved (2 × Gen 3 = 40 RF)
+  if (many) {
+    await game.getByRole("button", { name: /Mint plot \+ save · 10,002 moved · 55k RF/ }).click();
+    await game.getByText(/Saving burns 55k RF; you have 5,000/).waitFor();
+  } else {
+    await game.getByRole("button", { name: /Mint plot \+ save · 2 moved · 40 RF/ }).click();
+    await game.getByText(/Saved on chain \(simulated\): Plot #\d+ · 2 Friends moved · 40 RF burned/).waitFor();
+    await shot("saved");
+    // one more move is a new draft: only that Friend is charged; Undo returns to the save
+    await game.locator(".docks-arrange-btn").click();
+    for (const dir of ["Move down-right", "Move up-left", "Move up-right", "Move down-left"]) {
+      await game.getByRole("button", { name: dir }).click();
+      if (await game.getByText(/1 moved · burns 20 RF \+ gas/).count()) break;
+    }
+    await game.getByText(/1 moved · burns 20 RF \+ gas/).waitFor();
+    await btn("Done").click();
+    await game.getByText(/touch the rest|Arranged/).first().waitFor().catch(() => {});
+    if (await game.getByRole("toolbar", { name: "Arrange your Friends" }).count()) await game.getByRole("button", { name: "Auto-arrange" }).click(), await btn("Done").click();
+    if (await game.getByRole("button", { name: "Undo" }).count()) { await game.getByRole("button", { name: "Undo" }).click(); await game.getByText("Back to your saved arrangement.").waitFor(); }
+  }
   // walk toward neighbours for a bit
   for (const k of ["d", "w", "a", "s"]) { await page.keyboard.down(k); await page.waitForTimeout(900); await page.keyboard.up(k); }
   await shot("walk");
@@ -170,16 +190,16 @@ try {
   await game.getByText(/claimed 500 \$MKT each \(simulated\)/).waitFor();
   await game.getByLabel("Name").fill("Dock Coin");
   await game.getByLabel("Ticker").fill("DOCK");
-  if (many) {                                    // 10,000 wallets × 1,000 would exceed the supply: the form says so
+  if (many) {                                    // the 10k plot couldn't afford its first save, so it can't launch
     await game.getByRole("button", { name: /Launch for 1,000 RF/ }).click();
-    await game.getByText("Airdrop + claim pool can't exceed the supply.").waitFor();
-    await game.getByLabel("Airdrop per Friend").fill("10");
+    await game.getByText(/Save your plot on chain first/).waitFor();
+  } else {
+    await game.getByRole("button", { name: /Launch for 1,000 RF/ }).click();
+    await game.getByText(/\$DOCK launched \(simulated\)/).waitFor();
   }
-  await game.getByRole("button", { name: /Launch for 1,000 RF/ }).click();
-  await game.getByText(/\$DOCK launched \(simulated\)/).waitFor();
   await shot("tokens");
   const rfText = await game.locator(".docks-rf").textContent();
-  if (!many) { assert.match(rfText, /Your RF\s*3,990/, "5,000 − 2×5 claims − 1,000 launch"); assert.match(rfText, /Burned\s*510/); }
+  if (!many) { assert.match(rfText, /Your RF\s*3,950/, "5,000 − 40 save − 2×5 claims − 1,000 launch"); assert.match(rfText, /Burned\s*550/); }
   await game.getByRole("button", { name: "Close Tokens" }).click();
   const alerts = await game.locator("[role=alert]").allTextContents();
   assert.deepEqual(alerts, [], "No in-game alerts");

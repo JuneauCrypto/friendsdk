@@ -86,3 +86,6 @@
 .docks-crewcount{position:absolute;transform:translate(-50%,-100%);font-size:6px;padding:0 3px;background:#ccff00;color:#000;pointer-events:none}
 .docks-list{max-height:40vh;overflow:auto;border-top:1px solid #ddd}
 .docks-arrange-info{display:flex;flex-direction:column;min-width:120px}.docks-arrange-info small{font-size:10px;color:#bbb}
+.docks-save{display:flex;flex-direction:column;gap:4px;align-items:flex-end}.docks-save small{font-size:10px;color:var(--signal)}
+.docks .docks-nav .docks-arrange-btn{background:var(--signal);color:#000;border-color:var(--signal)}
+.docks-unsaved{width:100%;max-width:420px}.docks-unsaved .docks-act{flex:1}

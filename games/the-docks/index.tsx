@@ -8,7 +8,7 @@ import { readFriend, readOwner, type Friend } from "./land.js";
 import { readOwnedLands } from "./roster.js";
 import {
   CELL, RANKS, addToPlot, autoArrange, canEnter, communityBounds, createWorld, disconnected, dock, dockSlots, member, memberOf, mine,
-  moveGroup, neighboursOf, swapInto, placeAdrift, plotBounds, rankOf, rebuild, refreshMember, removeFromPlot, undock, weightOf,
+  moveGroup, neighboursOf, swapInto, pendingChanges, feeOf, ARRANGE_FEE, placeAdrift, plotBounds, rankOf, rebuild, refreshMember, removeFromPlot, undock, weightOf,
   type Access, type Member, type Placed, type Plot, type Slot, type World,
 } from "./world.js";
 import { DocksView, spawnOn, type CrewMember, type ViewApi } from "./view.js";
@@ -59,6 +59,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const [form, setForm] = useState({ name: "", symbol: "", supply: "1000000", airdropScope: "plotAndNeighbours" as Scope | "none", airdropEach: "1000",
     claimScope: "anyDocked" as Scope, claimPool: "100000", claimEach: "500", claimPrice: "5" });
   const [launchError, setLaunchError] = useState("");
+  // On chain (simulated in this preview): the plot NFT and the last saved arrangement.
+  const [plotNft, setPlotNft] = useState<number | null>(null);
+  const [saved, setSaved] = useState<Map<bigint, { x: number; y: number }>>(new Map());
+  const [saving, setSaving] = useState(false);
   const world = useRef<World | null>(null);
   const econ = useRef<Economy>(createEconomy());
   const owner = useRef("");
@@ -91,7 +95,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         art.current.loaded.set(walker.id, walker);
         const myPlot: Plot = { id: "me", name: "Your plot", mine: true, access: "invite", friends: [{ m: walker, x: 0, y: 0 }], docked: false };
         world.current = createWorld(samples.filter(s => s.friends.length), myPlot);
-        econ.current = createEconomy(); setFollowing([]); setApprovedVisitors([]); setRequests([]);
+        econ.current = createEconomy(); setFollowing([]); setApprovedVisitors([]); setRequests([]); setPlotNft(null); setSaved(new Map());
         const market = world.current.plots.find(p => p.id === "s4" && p.friends.length);
         if (market) seedLaunch(econ.current, { name: "Market Coin", symbol: "MKT", supply: 1_000_000, creator: market, creatorFriend: market.friends[0].m.id,
           scope: "anyDocked", claimEach: 500, claimPrice: 5, claimRemaining: 50_000 });
@@ -310,6 +314,35 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     if (walker) { const s = spawnOn(walker); api.current?.teleport(s.x, s.y); }
     bump();
   }
+  /** Save the arrangement on chain (simulated): mint the plot NFT if needed, then burn RF for every Friend moved. */
+  async function saveOnChain() {
+    const w = world.current!, me = mine(w);
+    const loose = disconnected(w, me);
+    if (loose.length) { setArranging(true); setMoveAll(false); setSelected(loose[0]); say(`Can't save yet: ${loose.length.toLocaleString()} Friend${loose.length === 1 ? " doesn't" : "s don't"} touch the rest. Every Friend must touch another along part of a side.`); return; }
+    const c = pendingChanges(me, saved);
+    if (!c.moved.length && !c.gone.length) { say("Nothing to save: your plot matches the chain."); return; }
+    if (econ.current.rf < c.rf) { say(`Saving burns ${fmt(c.rf)} RF; you have ${fmt(econ.current.rf)}.`); return; }
+    setSaving(true);
+    await new Promise(r => setTimeout(r, 900));               // stands in for wallet confirmation + receipt
+    let nft = plotNft;
+    if (nft === null) { nft = 1 + Math.floor(Math.random() * 900); setPlotNft(nft); }
+    econ.current.rf -= c.rf; econ.current.burned += c.rf;
+    setSaved(new Map(me.friends.map(pl => [pl.m.id, { x: pl.x, y: pl.y }])));
+    setSaving(false); setArranging(false); setSelected(null);
+    const txs = Math.max(1, Math.ceil(c.moved.length / 100));
+    say(`Saved on chain (simulated): Plot #${nft} · ${c.moved.length.toLocaleString()} Friend${c.moved.length === 1 ? "" : "s"} moved · ${fmt(c.rf)} RF burned · ${txs} transaction${txs === 1 ? "" : "s"} + gas.`);
+  }
+  function discardChanges() {
+    const w = world.current!, me = mine(w);
+    if (!saved.size) { reArrange(); return; }
+    for (const pl of me.friends) { const s = saved.get(pl.m.id); if (s) { pl.x = s.x; pl.y = s.y; } }
+    rebuild(w);
+    const off = me.friends.filter(pl => !saved.has(pl.m.id));
+    for (const pl of off) { me.friends = me.friends.filter(p => p !== pl); rebuild(w); addToPlot(w, pl.m); }
+    const walker = me.friends.find(p => p.m.id === friendId) ?? me.friends[0];
+    if (walker) { const sp = spawnOn(walker); api.current?.teleport(sp.x, sp.y); }
+    setArranging(false); setSelected(null); bump(); say("Back to your saved arrangement.");
+  }
   // arrange with arrow keys
   useEffect(() => {
     if (!arranging) return;
@@ -329,6 +362,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   };
   function doLaunch() {
     const w = world.current!, me = mine(w); setLaunchError("");
+    if (plotNft === null || !saved.has(friendId)) { setLaunchError("Save your plot on chain first (Arrange → Save): launches come from a Friend on a saved plot."); return; }
     const n = (v: string) => Number(v.replace(/[,_\s]/g, "")) || 0;
     try {
       const l = launch(econ.current, w, { name: form.name, symbol: form.symbol, supply: n(form.supply), creator: me, creatorFriend: friendId,
@@ -349,6 +383,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   if (!ready || !world.current) return <div className="docks-loading" role="status"><div className="docks-mark">⚓</div>Reading Friends from chain…</div>;
 
   const w = world.current, me = mine(w), myRank = rankOf(me);
+  const pending = pendingChanges(me, saved), dirty = pending.moved.length > 0 || pending.gone.length > 0;
   const uiBlocked = Boolean(menu) || paused;
   const label = sprites ? `${sprites.familyName} #${friendId}` : `Friend #${friendId}`;
   const visit = gate ? w.visits.get(gate.id) ?? "none" : "none";
@@ -366,6 +401,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     <div className="docks-hud" inert={uiBlocked || undefined}>
       <div className="docks-card">
         <strong>{label}</strong>
+        <small>{plotNft === null ? "Plot not on chain yet" : `Plot #${plotNft} (NFT)`}{pending.moved.length || pending.gone.length ? ` · ${pending.moved.length.toLocaleString()} unsaved move${pending.moved.length === 1 ? "" : "s"}` : plotNft !== null ? " · saved" : ""}</small>
         <small>Your plot: {me.friends.length.toLocaleString()} Friend{me.friends.length === 1 ? "" : "s"} · {myRank.rank} · weight {fmtW(myRank.weight)}</small>
         <small>{me.docked ? `Docked beside ${neighboursOf(w, me).length}` : "Adrift"} · {me.access === "open" ? "Open to visitors" : "Invite only"}{rosterNote ? ` · ${rosterNote}` : ""}</small>
       </div>
@@ -390,12 +426,22 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         {me.friends.length > 1 && <button type="button" aria-pressed={moveAll} onClick={() => setMoveAll(v => !v)}>All together</button>}
         {me.friends.length > 1 && <button type="button" onClick={reArrange}>Auto-arrange</button>}
       </div>
-      <button type="button" className="rf-frame-primary" onClick={finishArranging}>Done</button>
+      <div className="docks-save">
+        <small>{dirty ? `${pending.moved.length.toLocaleString()} moved · burns ${fmt(pending.rf)} RF + gas` : "Matches the chain"}</small>
+        <div className="docks-row tight">
+          <button type="button" onClick={finishArranging}>Done</button>
+          <button type="button" className="rf-frame-primary" disabled={!dirty || saving} onClick={() => void saveOnChain()}>{saving ? "Saving…" : plotNft === null ? "⛓ Mint plot + save" : "⛓ Save on chain"}</button>
+        </div>
+      </div>
     </div> : <div className="docks-bar" inert={uiBlocked || undefined}>
       {gate && !canEnter(w, gate) ? <button type="button" className="docks-act ready" disabled={visit === "pending"} onClick={() => askToVisit(gate)}>
         {visit === "pending" ? `Waiting for ${gate.name}…` : visit === "declined" ? `${gate.name} declined · ask again` : `Ask to visit ${gate.name}`}</button>
+        : dirty ? <div className="docks-row tight docks-unsaved">
+          <button type="button" className="docks-act" disabled={saving} onClick={() => void saveOnChain()}>{saving ? "Saving…" : `⛓ ${plotNft === null ? "Mint plot + save" : "Save"} · ${pending.moved.length.toLocaleString()} moved · ${fmt(pending.rf)} RF`}</button>
+          {saved.size > 0 && <button type="button" onClick={discardChanges}>Undo</button>}</div>
         : <span className="docks-hint">WASD / arrows or tap to walk · seams (⇄) connect plots</span>}
       <div className="docks-nav">
+        <button type="button" className="docks-arrange-btn" onClick={startArranging} disabled={uiBlocked}>✥<span>Arrange</span></button>
         <button type="button" onClick={() => { setPage(1); setMenu("plot"); }} disabled={uiBlocked}>🏡<span>My plot</span></button>
         <button type="button" onClick={() => setMenu("docks")} disabled={uiBlocked}>⚓<span>Docks</span></button>
         <button type="button" onClick={() => setMenu("tokens")} disabled={uiBlocked}>🚀<span>Tokens</span></button>
@@ -412,6 +458,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <div className="docks-item"><span><strong>{me.friends.length.toLocaleString()} Friends · {myRank.rank}</strong>
           <small>Total reward weight {fmtW(myRank.weight)}{myRank.next ? ` · ${fmtW(myRank.next)} to ${RANKS[myRank.index + 1].name}` : ""} · {byGen.map(([g, n]) => `${n.toLocaleString()}× Gen ${g}`).join(" · ")}</small>
           {rosterNote && <small>{rosterNote}{roster.error ? `: ${roster.error}` : ""}</small>}</span></div>
+        <div className="docks-item"><span><strong>⛓ {plotNft === null ? "Not on chain yet" : `Plot #${plotNft} · an NFT you own`}</strong>
+          <small>{dirty ? `${pending.moved.length.toLocaleString()} Friend${pending.moved.length === 1 ? "" : "s"} moved since the last save · saving burns ${fmt(pending.rf)} RF + gas` : "Your arrangement matches the chain."}</small>
+          <small>Saving burns RF for each Friend whose spot changed: {Object.entries(ARRANGE_FEE).map(([g, f]) => `Gen ${g} ${f}`).join(" · ")} RF. Unmoved Friends are free.<span className="docks-sim">SIMULATED</span></small></span>
+          <button type="button" className="rf-frame-primary" disabled={!dirty || saving} onClick={() => { setMenu(null); void saveOnChain(); }}>{plotNft === null ? "Mint + save" : "Save"}</button></div>
         <div className="docks-row">
           <button type="button" onClick={startArranging}>✥ Arrange</button>
           {me.friends.length > 1 && <button type="button" onClick={reArrange}>▦ Auto-arrange</button>}
@@ -447,7 +497,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <p>{me.docked ? `Docked beside ${neighboursOf(w, me).map(p => p.name).join(", ") || "the community"}. The seams where plots touch are the walkways.` : "Your plot is adrift. Pick a glowing spot to dock edge to edge with the others."}</p>
         <ChainMap world={w} slots={me.docked ? [] : dockSlots(w, me)} onPick={(s: Slot) => {
           dock(w, s); const pl = me.friends.find(p => p.m.id === friendId) ?? me.friends[0]; if (pl) { const sp = spawnOn(pl); api.current?.teleport(sp.x, sp.y); }
-          setMenu(null); bump(); say(`Docked! You now share seams with ${neighboursOf(w, me).map(p => p.name).join(", ")}.`);
+          setMenu(null); bump(); say(`Docked beside ${neighboursOf(w, me).map(p => p.name).join(", ")}. Save on chain to make it official.`);
         }} />
         {me.docked && <button type="button" onClick={() => { undock(w); const pl = me.friends.find(p => p.m.id === friendId) ?? me.friends[0]; if (pl) { const sp = spawnOn(pl); api.current?.teleport(sp.x, sp.y); } bump(); }}>Undock and move</button>}
         <h3>Everyone here</h3>
@@ -497,6 +547,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
             : <p className="docks-note">Empty so far.</p>; })()}
       </> : menu === "help" ? <ul className="docks-help">
         <li><strong>Walk:</strong> WASD / arrows, or tap where to go.</li>
+        <li><strong>Arranging is the game:</strong> your plot is an NFT. Move Friends freely as a draft, then Save on chain: every Friend whose spot changed burns RF ({Object.entries(ARRANGE_FEE).map(([g, f]) => `Gen ${g}: ${f}`).join(", ")}), plus gas. Unmoved Friends are free; Undo returns to your last save.</li>
         <li><strong>Your plot:</strong> every activated Friend in your wallet appears automatically as one connected plot, from 1 to 10,000+. Arrange lets you tap any Friend and move it (or All together); each Friend must touch another along part of a side. Auto-arrange packs them into a tidy block.</li>
         <li><strong>Dock:</strong> Docks → pick a spot. Your plot joins edge to edge; the seam is the walkway.</li>
         <li><strong>Visit:</strong> open plots (⇄) let you walk straight in. Invite-only plots (🔒) need approval: walk to the seam and choose Ask to visit.</li>
