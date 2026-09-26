@@ -4,22 +4,27 @@ import { useEffect, useRef, useState } from "react";
 import type { GameComponentProps } from "@rarefriends/friendsdk/runtime";
 import { GameMenu } from "@rarefriends/friendsdk/frame";
 import { createFriendReader, type GenerationSprites } from "@rarefriends/friendsdk/sprites";
-import { readFriend, readOwner, rewardWeight, type Friend } from "./land.js";
+import { readFriend, readOwner, type Friend } from "./land.js";
+import { readOwnedLands } from "./roster.js";
 import {
-  CELL, RANKS, addToPlot, canEnter, cellsW, communityBounds, createWorld, dock, dockSlots, mine, moveFriend, moveGroup, neighboursOf,
-  rankOf, rebuild, removeFromPlot, replaceFriend, undock, type Access, type Placed, type Plot, type Slot, type World,
+  CELL, RANKS, addToPlot, autoArrange, canEnter, communityBounds, createWorld, disconnected, dock, dockSlots, member, memberOf, mine,
+  moveGroup, neighboursOf, swapInto, placeAdrift, plotBounds, rankOf, rebuild, refreshMember, removeFromPlot, undock, weightOf,
+  type Access, type Member, type Placed, type Plot, type Slot, type World,
 } from "./world.js";
 import { DocksView, spawnOn, type CrewMember, type ViewApi } from "./view.js";
-import { LAUNCH_FEE, SCOPES, claim, createEconomy, eligibleFriends, fmt, launch, seedLaunch, type Economy, type Scope } from "./launch.js";
 import { ChainMap } from "./chainmap.js";
+import { LAUNCH_FEE, SCOPES, claimAll, createEconomy, eligibleFriends, fmt, launch, seedLaunch, type Economy, type Launch, type Scope } from "./launch.js";
 import "@rarefriends/friendsdk/frame.css";
 import "./style.css";
 
 type Menu = "plot" | "docks" | "tokens" | "help" | "settings" | null;
 const CHECK_EVERY_MS = 60_000;
+const MAX_FOLLOWING = 24;                         // sprites walking behind you at once
+const ART_CONCURRENCY = 6, ART_CACHE = 500;       // lazy on-chain art: parallel reads, Friends kept in memory
+const PAGE = 50;
 
 /* Sample neighbours: other people's public, activated Friends, read live from chain and
- * clearly labelled. Their access answers are simulated until a shared server exists. */
+ * clearly labelled. Their access answers are simulated until a shared world exists. */
 const SAMPLE_PLOTS: { id: string; name: string; tokens: bigint[]; access: Access; policy?: "approve" | "decline" }[] = [
   { id: "s1", name: "Reading Row", tokens: [7153n], access: "open" },
   { id: "s2", name: "Rooftop Pair", tokens: [7174n, 7843n], access: "invite", policy: "approve" },
@@ -39,31 +44,35 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const [, setTick] = useState(0);
   const [zoom, setZoom] = useState(() => (window.innerWidth < 600 ? 1.5 : 2.2));
   const [reducedMotion, setReducedMotion] = useState(false);
-  const [arranging, setArranging] = useState<Placed | null>(null);
+  const [arranging, setArranging] = useState(false), [selected, setSelected] = useState<Placed | null>(null), [moveAll, setMoveAll] = useState(false);
   const [here, setHere] = useState<Plot | null>(null);
   const [gate, setGate] = useState<Plot | null>(null);
+  const [roster, setRoster] = useState<{ state: "loading" | "done" | "error"; done: number; total: number; error?: string }>({ state: "loading", done: 0, total: 0 });
+  const [following, setFollowing] = useState<bigint[]>([]);
+  const [crewSprites, setCrewSprites] = useState<Map<bigint, GenerationSprites>>(new Map());
+  const [page, setPage] = useState(1);
   const [addId, setAddId] = useState(""), [adding, setAdding] = useState(false), [addError, setAddError] = useState("");
   const [checking, setChecking] = useState(false), [lastCheck, setLastCheck] = useState<Date | null>(null);
   const [requests, setRequests] = useState<string[]>([]);
-  const [retry, setRetry] = useState(0);
-  const world = useRef<World | null>(null);
-  const econ = useRef<Economy>(createEconomy());
-  const [crew, setCrew] = useState<CrewMember[]>([]);
   const [approvedVisitors, setApprovedVisitors] = useState<string[]>([]);
+  const [retry, setRetry] = useState(0);
   const [form, setForm] = useState({ name: "", symbol: "", supply: "1000000", airdropScope: "plotAndNeighbours" as Scope | "none", airdropEach: "1000",
     claimScope: "anyDocked" as Scope, claimPool: "100000", claimEach: "500", claimPrice: "5" });
   const [launchError, setLaunchError] = useState("");
-  const [moveAll, setMoveAll] = useState(false);
+  const world = useRef<World | null>(null);
+  const econ = useRef<Economy>(createEconomy());
   const owner = useRef("");
   const api = useRef<ViewApi | null>(null);
   const epoch = useRef(0);
+  const art = useRef({ queue: [] as Member[], inflight: new Set<bigint>(), loaded: new Map<bigint, Member>(), seen: new Map<bigint, number>(), tick: 0 });
   const bump = () => setTick(x => x + 1);
   const say = (s: string) => setToast(s);
 
-  /* ── session start: SDK read, my Friend, sample neighbours ── */
+  /* ── session start: my Friend, sample neighbours, then all my Friends automatically ── */
   useEffect(() => {
     const v = ++epoch.current;
-    setReady(false); setFatal(""); setMenu(null); setArranging(null); setSprites(null); world.current = null;
+    setReady(false); setFatal(""); setMenu(null); setArranging(false); setSprites(null); world.current = null;
+    art.current = { queue: [], inflight: new Set(), loaded: new Map(), seen: new Map(), tick: 0 };
     const pref = window.matchMedia("(prefers-reduced-motion: reduce)");
     const upd = () => setReducedMotion(pref.matches); upd(); pref.addEventListener("change", upd);
     void createFriendReader().read(friendId).then(s => { if (v === epoch.current) setSprites(s); }).catch(() => {});
@@ -74,19 +83,21 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         owner.current = own;
         const samples = await Promise.all(SAMPLE_PLOTS.map(async s => {
           const got = await Promise.allSettled(s.tokens.map(readFriend));
-          const friends = got.flatMap(r => r.status === "fulfilled" ? [r.value] : []);
-          let x = 0; const placed = friends.map(f => { const p = { friend: f, x, y: 0 }; x += cellsW(f) * CELL; return p; });
-          return { id: s.id, name: s.name, mine: false, access: s.access, policy: s.policy, friends: placed, docked: false } as Plot;
+          const friends = autoArrange(got.flatMap(r => r.status === "fulfilled" ? [memberOf(r.value)] : []));
+          return { id: s.id, name: s.name, mine: false, access: s.access, policy: s.policy, friends, docked: false } as Plot;
         }));
         if (v !== epoch.current) return;
-        const myPlot: Plot = { id: "me", name: "Your plot", mine: true, access: "invite", friends: [{ friend: me, x: 0, y: 0 }], docked: false };
+        const walker = memberOf(me);
+        art.current.loaded.set(walker.id, walker);
+        const myPlot: Plot = { id: "me", name: "Your plot", mine: true, access: "invite", friends: [{ m: walker, x: 0, y: 0 }], docked: false };
         world.current = createWorld(samples.filter(s => s.friends.length), myPlot);
-        econ.current = createEconomy(); setCrew([]); setApprovedVisitors([]);
+        econ.current = createEconomy(); setFollowing([]); setApprovedVisitors([]); setRequests([]);
         const market = world.current.plots.find(p => p.id === "s4" && p.friends.length);
-        if (market) seedLaunch(econ.current, { name: "Market Coin", symbol: "MKT", supply: 1_000_000, creator: market, creatorFriend: market.friends[0].friend.tokenId,
+        if (market) seedLaunch(econ.current, { name: "Market Coin", symbol: "MKT", supply: 1_000_000, creator: market, creatorFriend: market.friends[0].m.id,
           scope: "anyDocked", claimEach: 500, claimPrice: 5, claimRemaining: 50_000 });
-        setReady(true); say("Your Friend is here. Open Docks to dock beside the others.");
-        setLastCheck(new Date());
+        setReady(true); setLastCheck(new Date());
+        say("Finding the rest of your Friends…");
+        void loadRoster(v, true);
       } catch (e) {
         if (v !== epoch.current) return;
         const inactive = (e as { inactive?: boolean }).inactive;
@@ -94,37 +105,112 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       }
     })();
     return () => { epoch.current++; pref.removeEventListener("change", upd); };
-  }, [client, friendId, retry]);
+  }, [client, friendId, retry]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ── on-chain checks: upgrades, deactivation, transfers ── */
+  /** Every activated Friend in the same wallet joins the plot, arranged as one connected block. */
+  async function loadRoster(v: number, first: boolean): Promise<string[]> {
+    const w = world.current; if (!w) return [];
+    setRoster(r => ({ ...r, state: "loading", done: 0, total: 0 }));
+    try {
+      const lands = await readOwnedLands(owner.current, (done, total) => { if (v === epoch.current) setRoster({ state: "loading", done, total }); });
+      if (v !== epoch.current || !world.current) return [];
+      const me = mine(w), have = new Map(me.friends.map(pl => [pl.m.id, pl]));
+      const held = new Map(lands.map(l => [l.id, l]));
+      const walkerPl = have.get(friendId);
+      if (!held.has(friendId) && walkerPl) held.set(friendId, { id: friendId, gen: walkerPl.m.gen, tier: walkerPl.m.tier });
+      const changes: string[] = [];
+      if (first) {
+        const members = [...held.values()].map(l => have.get(l.id)?.m ?? member(l.id, l.gen, l.tier));
+        me.friends = autoArrange(members);
+        placeAdrift(w);
+        const walker = me.friends.find(p => p.m.id === friendId)!;
+        const sp = spawnOn(walker); api.current?.teleport(sp.x, sp.y);
+        setFollowing(members.filter(m => m.id !== friendId).slice(0, 8).map(m => m.id));
+        say(members.length > 1 ? `All ${members.length.toLocaleString()} of your activated Friends are here, arranged as one plot. Open Docks to dock it.`
+          : "Your Friend is here. Open Docks to dock beside the others.");
+      } else {
+        for (const id of have.keys()) if (!held.has(id)) { removeFromPlot(w, id); changes.push(`#${id} left your wallet or was deactivated`); }
+        for (const l of held.values()) {
+          const pl = have.get(l.id);
+          if (!pl) { addToPlot(w, member(l.id, l.gen, l.tier)); changes.push(`#${l.id} joined your plot`); }
+          else if (pl.m.tier !== l.tier) { changes.push(`#${l.id} tier ${pl.m.tier} → ${l.tier}`); pl.m.tier = l.tier; pl.m.friend = null; art.current.loaded.delete(l.id); }
+        }
+        if (changes.length) rebuild(w);
+      }
+      setRoster({ state: "done", done: lands.length, total: lands.length });
+      bump();
+      return changes;
+    } catch (e) {
+      if (v !== epoch.current) return [];
+      setRoster({ state: "error", done: 0, total: 0, error: errText(e) });
+      if (first) say(`Couldn't list your other Friends automatically (${errText(e)}). Add them by number in My plot.`);
+      return [];
+    }
+  }
+
+  /* ── lazy on-chain art for Friends near the camera ── */
+  function onVisible(pls: Placed[]) {
+    const a = art.current, t = ++a.tick;
+    for (const pl of pls) {
+      a.seen.set(pl.m.id, t);
+      if (!pl.m.friend && !a.inflight.has(pl.m.id) && !a.queue.includes(pl.m)) a.queue.push(pl.m);
+    }
+    pump();
+  }
+  function pump() {
+    const a = art.current, v = epoch.current;
+    while (a.inflight.size < ART_CONCURRENCY && a.queue.length) {
+      const m = a.queue.shift()!;
+      if (m.friend) continue;
+      a.inflight.add(m.id);
+      readFriend(m.id).then(f => {
+        if (v !== epoch.current) return;
+        m.friend = f; m.tier = Number(f.traits["Activation tier"] ?? m.tier); a.loaded.set(m.id, m);
+        if (a.loaded.size > ART_CACHE) {                  // forget art for Friends far from the camera
+          const old = [...a.loaded.values()].filter(x => x.id !== friendId).sort((x, y) => (a.seen.get(x.id) ?? 0) - (a.seen.get(y.id) ?? 0));
+          for (const x of old.slice(0, a.loaded.size - ART_CACHE)) { x.friend = null; a.loaded.delete(x.id); }
+        }
+        if (world.current) world.current.version++;
+        bump();
+      }).catch(e => {
+        if ((e as { inactive?: boolean }).inactive && world.current) {
+          const w = world.current;
+          for (const p of w.plots) if (p.friends.some(pl => pl.m === m)) { p.friends = p.friends.filter(pl => pl.m !== m); rebuild(w); }
+          say(`#${m.id} was deactivated and left the docks.`); bump();
+        }
+      }).finally(() => { a.inflight.delete(m.id); pump(); });
+    }
+  }
+
+  /* ── on-chain checks: upgrades, deactivation, transfers, new Friends ── */
   async function checkChain(manual = false) {
     const w = world.current; if (!w || checking) return;
     setChecking(true);
     const changes: string[] = [];
     try {
-      for (const plot of [...w.plots]) for (const pl of [...plot.friends]) {
-        const id = pl.friend.tokenId;
+      changes.push(...await loadRoster(epoch.current, false));
+      // art signatures for Friends currently loaded (mine and neighbours'): catches art changes
+      for (const m of [...art.current.loaded.values()]) {
         try {
-          if (plot.mine && id !== friendId) {
-            const o = await readOwner(id);
-            if (o !== owner.current) { removeFromPlot(w, id); changes.push(`#${id} left your wallet and was removed`); continue; }
-          }
-          const fresh = await readFriend(id);
-          if (fresh.signature !== pl.friend.signature) {
-            const before = `G${pl.friend.traits.Generation} T${pl.friend.traits["Activation tier"]}`, after = `G${fresh.traits.Generation} T${fresh.traits["Activation tier"]}`;
-            if (replaceFriend(w, fresh)) changes.push(`#${id} updated${before !== after ? ` (${before} → ${after})` : ""}`);
-            else { changes.push(`#${id} grew and needs a new spot`); if (plot.mine) { removeFromPlot(w, id); addToPlot(w, fresh); } }
+          const fresh = await readFriend(m.id);
+          if (m.friend && fresh.signature !== m.friend.signature) {
+            const before = `G${m.gen} T${m.tier}`, after = `G${fresh.traits.Generation} T${fresh.traits["Activation tier"]}`;
+            refreshMember(w, fresh);
+            changes.push(`#${m.id} updated${before !== after ? ` (${before} → ${after})` : ""}`);
           }
         } catch (e) {
           if ((e as { inactive?: boolean }).inactive) {
-            if (plot.mine && id === friendId) { changes.push(`#${id} was deactivated`); continue; }
-            plot.friends = plot.friends.filter(p => p !== pl); rebuild(w); changes.push(`#${id} was deactivated and left the docks`);
+            if (m.id === friendId) { changes.push(`#${m.id} was deactivated`); continue; }
+            for (const p of w.plots) if (p.friends.some(pl => pl.m === m)) { p.friends = p.friends.filter(pl => pl.m !== m); rebuild(w); }
+            art.current.loaded.delete(m.id); changes.push(`#${m.id} was deactivated and left the docks`);
           }
         }
       }
     } finally {
       setChecking(false); setLastCheck(new Date()); bump();
-      if (changes.length) say(`On-chain check: ${changes.join(" · ")}`); else if (manual) say("On-chain check: everything matches the chain.");
+      const uniq = [...new Set(changes)];
+      if (uniq.length) say(`On-chain check: ${uniq.slice(0, 4).join(" · ")}${uniq.length > 4 ? ` · +${uniq.length - 4} more` : ""}`);
+      else if (manual) say("On-chain check: everything matches the chain.");
     }
   }
   useEffect(() => {
@@ -133,13 +219,20 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     return () => window.clearInterval(id);
   }); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /* ── crew sprites (only for the Friends walking behind you) ── */
+  useEffect(() => {
+    for (const id of following) if (!crewSprites.has(id)) {
+      void createFriendReader().read(id).then(s => setCrewSprites(m => new Map(m).set(id, s))).catch(() => {});
+    }
+  }, [following]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /* ── simulated visit requests to my plot (until real players exist) ── */
   useEffect(() => {
     const w = world.current; if (!ready || !w) return;
     const me = mine(w);
     if (!me.docked || me.access === "open") return;
     const t = window.setTimeout(() => {
-      const n = neighboursOf(w, me).find(p => !requests.includes(p.id));
+      const n = neighboursOf(w, me).find(p => !requests.includes(p.id) && !approvedVisitors.includes(p.id));
       if (n) { setRequests(r => [...r, n.id]); say(`${n.name} (sample) asks to visit your plot. Answer in My plot.`); }
     }, 20_000);
     return () => window.clearTimeout(t);
@@ -160,25 +253,74 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     setAddError("");
     let id: bigint;
     try { id = BigInt(addId.trim().replace(/^#/, "")); if (id < 1n) throw 0; } catch { setAddError("Enter a Friend number, like 1234."); return; }
-    if (w.plots.some(p => p.friends.some(pl => pl.friend.tokenId === id))) { setAddError(`Friend #${id} is already in the docks.`); return; }
+    if (w.plots.some(p => p.friends.some(pl => pl.m.id === id))) { setAddError(`Friend #${id} is already in the docks.`); return; }
     setAdding(true);
     try {
       const o = await readOwner(id);
       if (o !== owner.current) { setAddError(`Friend #${id} isn't held by the same wallet as #${friendId}.`); return; }
       const f = await readFriend(id);
-      addToPlot(w, f);
-      setCrew(c => [...c, { id, sprites: null, staying: false }]);
-      void createFriendReader().read(id).then(sp => setCrew(c => c.map(m => m.id === id ? { ...m, sprites: sp } : m))).catch(() => {});
-      setAddId(""); bump(); say(`Friend #${id} joined your plot (G${f.traits.Generation} T${f.traits["Activation tier"]}). Use Arrange to move it.`);
+      const m = memberOf(f); art.current.loaded.set(id, m);
+      addToPlot(w, m);
+      setAddId(""); bump(); say(`Friend #${id} joined your plot (G${m.gen} T${m.tier}).`);
     } catch (e) { setAddError(errText(e)); }
     finally { setAdding(false); }
   }
+  function startArranging() {
+    const me = mine(world.current!);
+    setMenu(null); setArranging(true); setMoveAll(me.friends.length <= 1);
+    setSelected(me.friends.find(p => p.m.id === friendId) ?? me.friends[0] ?? null);
+    say("Tap any of your Friends to pick it, or choose All together. Each Friend must touch another along a side.");
+  }
   function nudge(dx: number, dy: number) {
     const w = world.current; if (!w || !arranging) return;
-    const ok = moveAll ? moveGroup(w, mine(w).friends, dx, dy) : moveFriend(w, arranging, dx, dy);
-    if (!ok) say("That spot overlaps another Friend.");
+    const me = mine(w);
+    const ok = moveAll ? moveGroup(w, me.friends, dx, dy)
+      : selected ? moveGroup(w, [selected], dx, dy) || swapInto(w, selected, selected.m.cw * dx, selected.m.ch * dy) : false;
+    if (!ok) say(moveAll ? "Your plot would overlap another plot there." : "That spot overlaps a different-size Friend. Move that one first, or swap with a same-size neighbour.");
     bump();
   }
+  /** After a rearrange, a docked plot that no longer touches anyone slides to the nearest spot where it does. */
+  function keepDocked(w: World): string {
+    const me = mine(w);
+    if (!me.docked || neighboursOf(w, me).length) return "";
+    const slot = dockSlots(w, me).sort((a, b) => Math.abs(a.dx) + Math.abs(a.dy) - Math.abs(b.dx) - Math.abs(b.dy))[0];
+    if (slot) { dock(w, slot); return " It slid to the nearest spot to stay docked."; }
+    undock(w); return " It no longer touches anyone, so it's adrift: dock it again from Docks.";
+  }
+  function reArrange() {
+    const w = world.current!, me = mine(w), b = plotBounds(me);
+    const placed = autoArrange(me.friends.map(p => p.m));
+    for (const p of placed) { p.x += b.x0; p.y += b.y0; }
+    me.friends = placed; rebuild(w);
+    const note = keepDocked(w);
+    setSelected(me.friends.find(p => p.m.id === friendId) ?? null);
+    bump(); say(`Auto-arranged into one connected block.${note}`);
+  }
+  function finishArranging() {
+    const w = world.current!; const me = mine(w);
+    const loose = disconnected(w, me);
+    if (loose.length) {
+      setMoveAll(false); setSelected(loose[0]);
+      say(`${loose.length.toLocaleString()} Friend${loose.length === 1 ? " doesn't" : "s don't"} touch the rest (#${loose[0].m.id} selected). Every Friend must touch another along part of a side, or tap Auto-arrange.`);
+      return;
+    }
+    setArranging(false); setSelected(null);
+    const note = keepDocked(w); if (note) say(`Arranged.${note}`);
+    const walker = me.friends.find(p => p.m.id === friendId) ?? me.friends[0];
+    if (walker) { const s = spawnOn(walker); api.current?.teleport(s.x, s.y); }
+    bump();
+  }
+  // arrange with arrow keys
+  useEffect(() => {
+    if (!arranging) return;
+    const k = (e: KeyboardEvent) => {
+      if (menu) return;
+      const m: Record<string, [number, number]> = { arrowup: [-1, 0], w: [-1, 0], arrowright: [0, -1], d: [0, -1], arrowdown: [1, 0], s: [1, 0], arrowleft: [0, 1], a: [0, 1] };
+      const d = m[e.key.toLowerCase()]; if (d) { e.preventDefault(); nudge(d[0], d[1]); }
+      if (e.key === "Escape" || e.key === "Enter") finishArranging();
+    };
+    window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k);
+  });
   const canVisit = (p: Plot, host: Plot) => {
     if (p === host) return true;
     if (p.mine) return canEnter(world.current!, host);
@@ -195,28 +337,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       say(`$${l.symbol} launched (simulated): ${LAUNCH_FEE.toLocaleString()} RF paid, ${LAUNCH_FEE / 2} burned.`);
     } catch (e) { setLaunchError(errText(e)); }
   }
-  function doClaim(l: Economy["launches"][number], id: bigint) {
-    try { claim(econ.current, world.current!, l, id, canVisit); bump(); say(`#${id} claimed ${fmt(l.claimEach)} $${l.symbol} (simulated) · ${l.claimPrice} RF burned.`); }
-    catch (e) { say(errText(e)); }
-  }
-  // arrange with arrow keys
-  useEffect(() => {
-    if (!arranging) return;
-    const k = (e: KeyboardEvent) => {
-      const C = CELL, m: Record<string, [number, number]> = { arrowup: [-C, 0], w: [-C, 0], arrowright: [0, -C], d: [0, -C], arrowdown: [C, 0], s: [C, 0], arrowleft: [0, C], a: [0, C] };
-      const d = m[e.key.toLowerCase()]; if (d && !menu) { e.preventDefault(); nudge(d[0], d[1]); }
-      if (e.key === "Escape" || e.key === "Enter") finishArranging();
-    };
-    window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k);
-  });
-  function finishArranging() {
-    const w = world.current!; const me = mine(w);
-    setArranging(null);
-    // after rearranging, keep the plot where it is if it still fits; otherwise it drifts and can re-dock
-    if (me.docked && dockSlots(w, me).length === 0 && !neighboursOf(w, me).length) undock(w);
-    const walker = me.friends.find(p => p.friend.tokenId === friendId) ?? me.friends[0];
-    if (walker) { const s = spawnOn(w, walker); api.current?.teleport(s.x, s.y); }
-    bump();
+  function doClaimAll(l: Launch) {
+    const me = mine(world.current!);
+    const n = claimAll(econ.current, world.current!, l, me.friends.map(p => p.m.id), canVisit);
+    bump(); say(n ? `${n.toLocaleString()} of your Friends claimed ${fmt(l.claimEach)} $${l.symbol} each (simulated) · ${fmt(n * l.claimPrice)} RF burned.` : `Nothing to claim for $${l.symbol}.`);
   }
 
   /* ── render ── */
@@ -226,19 +350,24 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
 
   const w = world.current, me = mine(w), myRank = rankOf(me);
   const uiBlocked = Boolean(menu) || paused;
-  const walker = me.friends.find(p => p.friend.tokenId === friendId);
   const label = sprites ? `${sprites.familyName} #${friendId}` : `Friend #${friendId}`;
   const visit = gate ? w.visits.get(gate.id) ?? "none" : "none";
+  const crew: CrewMember[] = following.filter(id => me.friends.some(p => p.m.id === id)).map(id => ({ id, sprites: crewSprites.get(id) ?? null }));
+  const byGen = [1, 2, 3, 4, 5, 6].map(g => [g, me.friends.filter(p => p.m.gen === g).length] as const).filter(([, n]) => n);
+  const rosterNote = roster.state === "loading" ? (roster.total ? `finding your Friends ${roster.done.toLocaleString()} / ${roster.total.toLocaleString()}` : "finding your Friends…")
+    : roster.state === "error" ? "couldn't list your Friends" : "";
 
   return <section className="docks" aria-label={definition.name}>
     <DocksView world={w} version={w.version} sprites={sprites} walkerId={friendId} zoom={zoom} paused={uiBlocked} reducedMotion={reducedMotion}
-      selected={arranging} crew={crew} apiRef={api} onBlocked={p => { setGate(p); if (!menu) say(`${p.name} is invite-only.`); }} onEnterPlot={p => { setHere(p); if (p && p !== gate) setGate(null); }} />
+      arranging={arranging} selected={selected} moveAll={moveAll} crew={crew} apiRef={api} onVisible={onVisible}
+      onPick={pl => { setMoveAll(false); setSelected(pl); }}
+      onBlocked={p => { setGate(p); if (!menu) say(`${p.name} is invite-only.`); }} onEnterPlot={p => { setHere(p); if (p && p !== gate) setGate(null); }} />
 
     <div className="docks-hud" inert={uiBlocked || undefined}>
       <div className="docks-card">
         <strong>{label}</strong>
-        <small>Your plot: {me.friends.length} Friend{me.friends.length === 1 ? "" : "s"} · {myRank.rank} · weight {fmtW(myRank.weight)}</small>
-        <small>{me.docked ? `Docked beside ${neighboursOf(w, me).length}` : "Adrift"} · {me.access === "open" ? "Open to visitors" : "Invite only"}</small>
+        <small>Your plot: {me.friends.length.toLocaleString()} Friend{me.friends.length === 1 ? "" : "s"} · {myRank.rank} · weight {fmtW(myRank.weight)}</small>
+        <small>{me.docked ? `Docked beside ${neighboursOf(w, me).length}` : "Adrift"} · {me.access === "open" ? "Open to visitors" : "Invite only"}{rosterNote ? ` · ${rosterNote}` : ""}</small>
       </div>
       <div className="docks-card docks-where">
         <small>Standing on</small><strong>{here ? (here.mine ? "Your plot" : here.name) : "—"}</strong>
@@ -249,14 +378,17 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     <p className="docks-toast" role="status" aria-live="polite">{toast}</p>
 
     {arranging ? <div className="docks-arrange" role="toolbar" aria-label="Arrange your Friends">
+      <div className="docks-arrange-info"><strong>{moveAll ? `Moving all ${me.friends.length.toLocaleString()}` : selected ? `Moving #${selected.m.id}` : "Tap a Friend"}</strong>
+        <small>Tap your Friends on the map to pick one</small></div>
+      <div className="docks-pad">
+        <button type="button" aria-label="Move up-left" onClick={() => nudge(-1, 0)}>↖</button>
+        <button type="button" aria-label="Move up-right" onClick={() => nudge(0, -1)}>↗</button>
+        <button type="button" aria-label="Move down-left" onClick={() => nudge(0, 1)}>↙</button>
+        <button type="button" aria-label="Move down-right" onClick={() => nudge(1, 0)}>↘</button>
+      </div>
       <div className="docks-chips">
         {me.friends.length > 1 && <button type="button" aria-pressed={moveAll} onClick={() => setMoveAll(v => !v)}>All together</button>}
-        {me.friends.map(p => <button type="button" key={String(p.friend.tokenId)} aria-pressed={!moveAll && p === arranging} onClick={() => { setMoveAll(false); setArranging(p); }}>#{String(p.friend.tokenId)}</button>)}</div>
-      <div className="docks-pad">
-        <button type="button" aria-label="Move up-left" onClick={() => nudge(-CELL, 0)}>↖</button>
-        <button type="button" aria-label="Move up-right" onClick={() => nudge(0, -CELL)}>↗</button>
-        <button type="button" aria-label="Move down-left" onClick={() => nudge(0, CELL)}>↙</button>
-        <button type="button" aria-label="Move down-right" onClick={() => nudge(CELL, 0)}>↘</button>
+        {me.friends.length > 1 && <button type="button" onClick={reArrange}>Auto-arrange</button>}
       </div>
       <button type="button" className="rf-frame-primary" onClick={finishArranging}>Done</button>
     </div> : <div className="docks-bar" inert={uiBlocked || undefined}>
@@ -264,39 +396,25 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         {visit === "pending" ? `Waiting for ${gate.name}…` : visit === "declined" ? `${gate.name} declined · ask again` : `Ask to visit ${gate.name}`}</button>
         : <span className="docks-hint">WASD / arrows or tap to walk · seams (⇄) connect plots</span>}
       <div className="docks-nav">
-        <button type="button" onClick={() => setMenu("plot")} disabled={uiBlocked}>🏡<span>My plot</span></button>
+        <button type="button" onClick={() => { setPage(1); setMenu("plot"); }} disabled={uiBlocked}>🏡<span>My plot</span></button>
         <button type="button" onClick={() => setMenu("docks")} disabled={uiBlocked}>⚓<span>Docks</span></button>
         <button type="button" onClick={() => setMenu("tokens")} disabled={uiBlocked}>🚀<span>Tokens</span></button>
         <button type="button" onClick={() => void checkChain(true)} disabled={uiBlocked || checking}>{checking ? "⏳" : "🔄"}<span>Check</span></button>
         <button type="button" onClick={() => setZoom(z => Math.min(4, +(z + 0.4).toFixed(1)))} disabled={uiBlocked} aria-label="Zoom in">＋</button>
-        <button type="button" onClick={() => setZoom(z => Math.max(0.6, +(z - 0.4).toFixed(1)))} disabled={uiBlocked} aria-label="Zoom out">－</button>
+        <button type="button" onClick={() => setZoom(z => Math.max(0.2, +(z > 0.6 ? z - 0.4 : z - 0.1).toFixed(1)))} disabled={uiBlocked} aria-label="Zoom out">－</button>
         <button type="button" onClick={() => setMenu("settings")} disabled={uiBlocked}>⚙️<span>More</span></button>
       </div>
     </div>}
 
     {menu && <GameMenu onClose={() => setMenu(null)} title={menu === "plot" ? "My plot" : menu === "docks" ? "The Docks" : menu === "tokens" ? "Tokens" : menu === "help" ? "How it works" : "Settings"}>
       {menu === "plot" ? <>
-        <p>Your plot is your activated Friends, side by side, exactly as they render on chain. Every Friend is its own wallet, so your plot is your crew: they walk behind you, and any of them can stay behind to hold a spot. Add as many as you hold and arrange them however you like; gaps are fine.</p>
-        <div className="docks-item"><span><strong>Rank: {myRank.rank}</strong><small>Total reward weight {fmtW(myRank.weight)}{myRank.next ? ` · ${fmtW(myRank.next)} to ${RANKS[myRank.index + 1].name}` : ""}</small></span></div>
-        {me.friends.map(p => <div className="docks-friend" key={String(p.friend.tokenId)}>
-          <div className="crop"><img src={p.friend.art} alt={`Friend #${p.friend.tokenId} on-chain artwork`} /></div>
-          <span><strong>#{String(p.friend.tokenId)}{p.friend.tokenId === friendId ? " · walking" : ""}</strong>
-            <small>Gen {p.friend.traits.Generation} · Tier {p.friend.traits["Activation tier"]} · {p.friend.traits.Scenery} · weight {fmtW(rewardWeight(p.friend))}</small></span>
-          {p.friend.tokenId !== friendId && <span className="docks-row tight">
-            <button type="button" aria-pressed={!crew.find(m => m.id === p.friend.tokenId)?.staying}
-              onClick={() => setCrew(c => c.map(m => m.id === p.friend.tokenId ? { ...m, staying: !m.staying } : m))}>
-              {crew.find(m => m.id === p.friend.tokenId)?.staying ? "Rejoin crew" : "Stay here"}</button>
-            <button type="button" onClick={() => { removeFromPlot(w, p.friend.tokenId); setCrew(c => c.filter(m => m.id !== p.friend.tokenId)); bump(); }}>Remove</button></span>}
-        </div>)}
-        <div className="docks-add">
-          <label htmlFor="add-id">Add another activated Friend you hold</label>
-          <div className="docks-row"><input id="add-id" inputMode="numeric" placeholder="Friend number, e.g. 1234" value={addId} onChange={e => setAddId(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); void addFriend(); } }} disabled={adding} />
-            <button type="button" className="rf-frame-primary" disabled={adding || !addId.trim()} onClick={() => void addFriend()}>{adding ? "Checking…" : "Add"}</button></div>
-          {addError && <p role="alert" className="docks-note">{addError}</p>}
-          <p className="docks-note">Checked on chain: it must be held by the same wallet as #{String(friendId)} and be activated.</p>
-        </div>
+        <p>Every activated Friend in your wallet is here automatically, exactly as it renders on chain, arranged as one plot. Each Friend is its own wallet, so your plot is your crew: pick who walks behind you. Arrange them however you like; every Friend just needs to touch another along part of a side.</p>
+        <div className="docks-item"><span><strong>{me.friends.length.toLocaleString()} Friends · {myRank.rank}</strong>
+          <small>Total reward weight {fmtW(myRank.weight)}{myRank.next ? ` · ${fmtW(myRank.next)} to ${RANKS[myRank.index + 1].name}` : ""} · {byGen.map(([g, n]) => `${n.toLocaleString()}× Gen ${g}`).join(" · ")}</small>
+          {rosterNote && <small>{rosterNote}{roster.error ? `: ${roster.error}` : ""}</small>}</span></div>
         <div className="docks-row">
-          <button type="button" disabled={me.friends.length < 1} onClick={() => { setMenu(null); setArranging(me.friends[me.friends.length - 1]); }}>✥ Arrange Friends</button>
+          <button type="button" onClick={startArranging}>✥ Arrange</button>
+          {me.friends.length > 1 && <button type="button" onClick={reArrange}>▦ Auto-arrange</button>}
           <button type="button" aria-pressed={me.access === "open"} onClick={() => { me.access = me.access === "open" ? "invite" : "open"; w.version++; bump(); }}>
             {me.access === "open" ? "🔓 Open to visitors" : "🔒 Invite only"}</button>
         </div>
@@ -304,20 +422,41 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           return <div className="docks-item" key={id}><span><strong>{p.name}</strong><small>sample neighbour · simulated request</small></span>
             <span className="docks-row tight"><button type="button" onClick={() => { setRequests(r => r.filter(x => x !== id)); setApprovedVisitors(a => [...a, id]); say(`You let ${p.name} in.`); }}>Approve</button>
               <button type="button" onClick={() => { setRequests(r => r.filter(x => x !== id)); say(`You declined ${p.name}.`); }}>Decline</button></span></div>; })}</>}
+        <h3>Your Friends <small className="docks-note">· {crew.length} walking with you (up to {MAX_FOLLOWING})</small></h3>
+        <div className="docks-list">
+          {me.friends.slice(0, page * PAGE).map(p => { const id = p.m.id, f: Friend | null = p.m.friend, walking = following.includes(id);
+            return <div className="docks-friend" key={String(id)}>
+              <div className="crop">{f ? <img src={f.art} alt={`Friend #${id} on-chain artwork`} loading="lazy" /> : <span className="docks-note">#{String(id)}</span>}</div>
+              <span><strong>#{String(id)}{id === friendId ? " · you" : ""}</strong>
+                <small>Gen {p.m.gen} · Tier {p.m.tier}{f ? ` · ${f.traits.Scenery}` : ""} · weight {fmtW(weightOf(p.m))}</small></span>
+              {id !== friendId && <button type="button" aria-pressed={walking} onClick={() => {
+                if (!walking && following.length >= MAX_FOLLOWING) { say(`Up to ${MAX_FOLLOWING} Friends can walk with you at once.`); return; }
+                setFollowing(fl => walking ? fl.filter(x => x !== id) : [...fl, id]);
+              }}>{walking ? "Walking with you" : "Stays on plot"}</button>}
+            </div>; })}
+          {me.friends.length > page * PAGE && <div className="docks-row"><button type="button" onClick={() => setPage(n => n + 1)}>Show {Math.min(PAGE, me.friends.length - page * PAGE)} more of {(me.friends.length - page * PAGE).toLocaleString()}</button></div>}
+        </div>
+        <div className="docks-add">
+          <label htmlFor="add-id">Missing one? Add by number</label>
+          <div className="docks-row"><input id="add-id" inputMode="numeric" placeholder="Friend number, e.g. 1234" value={addId} onChange={e => setAddId(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); void addFriend(); } }} disabled={adding} />
+            <button type="button" className="rf-frame-primary" disabled={adding || !addId.trim()} onClick={() => void addFriend()}>{adding ? "Checking…" : "Add"}</button></div>
+          {addError && <p role="alert" className="docks-note">{addError}</p>}
+          <p className="docks-note">Friends are found from your wallet's on-chain history and re-checked every minute. It must be held by the same wallet as #{String(friendId)} and be activated.</p>
+        </div>
       </> : menu === "docks" ? <>
         <p>{me.docked ? `Docked beside ${neighboursOf(w, me).map(p => p.name).join(", ") || "the community"}. The seams where plots touch are the walkways.` : "Your plot is adrift. Pick a glowing spot to dock edge to edge with the others."}</p>
         <ChainMap world={w} slots={me.docked ? [] : dockSlots(w, me)} onPick={(s: Slot) => {
-          dock(w, s); const pl = walker ?? me.friends[0]; if (pl) { const sp = spawnOn(w, pl); api.current?.teleport(sp.x, sp.y); }
+          dock(w, s); const pl = me.friends.find(p => p.m.id === friendId) ?? me.friends[0]; if (pl) { const sp = spawnOn(pl); api.current?.teleport(sp.x, sp.y); }
           setMenu(null); bump(); say(`Docked! You now share seams with ${neighboursOf(w, me).map(p => p.name).join(", ")}.`);
         }} />
-        {me.docked && <button type="button" onClick={() => { undock(w); const pl = walker ?? me.friends[0]; if (pl) { const sp = spawnOn(w, pl); api.current?.teleport(sp.x, sp.y); } bump(); }}>Undock and move</button>}
+        {me.docked && <button type="button" onClick={() => { undock(w); const pl = me.friends.find(p => p.m.id === friendId) ?? me.friends[0]; if (pl) { const sp = spawnOn(pl); api.current?.teleport(sp.x, sp.y); } bump(); }}>Undock and move</button>}
         <h3>Everyone here</h3>
         {[...w.plots].filter(p => p.friends.length).sort((a, b) => rankOf(b).weight - rankOf(a).weight).map((p, i) => { const r = rankOf(p);
           return <div className="docks-item" key={p.id}><span><strong>{i + 1}. {p.mine ? "You" : p.name} · {r.rank}</strong>
-            <small>{p.friends.map(f => `#${f.friend.tokenId}`).join(" ")} · weight {fmtW(r.weight)}{p.mine ? "" : ` · ${p.access === "open" ? "open" : "invite only"} · sample`}</small></span>
+            <small>{p.friends.length.toLocaleString()} Friend{p.friends.length === 1 ? "" : "s"} · weight {fmtW(r.weight)}{p.mine ? "" : ` · ${p.access === "open" ? "open" : "invite only"} · sample`}</small></span>
             <button type="button" onClick={() => { const pl = p.friends[0]; setMenu(null);
-              if (canEnter(w, p) && (p.docked || p.mine)) { const sp = spawnOn(w, pl); api.current?.teleport(sp.x, sp.y); say(p.mine ? "Back home." : `You and your crew walked over to ${p.name}.`); }
-              else { api.current?.focusOn(pl.x + pl.friend.w / 2, pl.y + pl.friend.h / 2); say(`${p.name} is invite-only: here's the view from the seam. Walk up and ask to visit.`); } }}>{canEnter(w, p) ? "Go" : "Look"}</button></div>; })}
+              if (canEnter(w, p) && (p.docked || p.mine)) { const sp = spawnOn(pl); api.current?.teleport(sp.x, sp.y); say(p.mine ? "Back home." : `You and your crew walked over to ${p.name}.`); }
+              else { api.current?.focusOn((pl.x + pl.m.cw / 2) * CELL, (pl.y + pl.m.ch / 2) * CELL); say(`${p.name} is invite-only: here's the view. Walk up to its seam and ask to visit.`); } }}>{canEnter(w, p) ? "Go" : "Look"}</button></div>; })}
         <p className="docks-note">Rank follows the official Rare Friends reward weight (Generation × Activation tier), summed over a plot's Friends. Neighbours are other people's public Friends shown as samples; their answers to visit requests are simulated.</p>
       </> : menu === "tokens" ? <>
         <div className="docks-rf"><span>Your RF <b>{fmt(econ.current.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Burned <b>{fmt(econ.current.burned)}</b></span><span>Treasury <b>{fmt(econ.current.treasury)}</b></span></div>
@@ -336,34 +475,39 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           <label>Per claim<input inputMode="numeric" value={form.claimEach} onChange={e => setForm({ ...form, claimEach: e.target.value })} /></label>
           <label>Claim price (RF, burned)<input inputMode="numeric" value={form.claimPrice} onChange={e => setForm({ ...form, claimPrice: e.target.value })} /></label>
         </div>
-        <p className="docks-note">{form.airdropScope === "none" ? "No airdrop." : `Airdrop reaches ${eligibleFriends(w, { scope: form.airdropScope, creator: me }, canVisit).length} Friend wallet(s) right now (${SCOPES.find(x => x.id === form.airdropScope)!.hint}).`} The rest of the supply goes to #{String(friendId)}'s wallet.</p>
+        <p className="docks-note">{form.airdropScope === "none" ? "No airdrop." : `Airdrop reaches ${eligibleFriends(w, { scope: form.airdropScope, creator: me }, canVisit).length.toLocaleString()} Friend wallet(s) right now (${SCOPES.find(x => x.id === form.airdropScope)!.hint}).`} The rest of the supply goes to #{String(friendId)}'s wallet.</p>
         {launchError && <p role="alert" className="docks-note">{launchError}</p>}
         <div className="docks-row"><button type="button" className="rf-frame-primary" disabled={!me.docked} onClick={doLaunch}>🚀 Launch for {LAUNCH_FEE.toLocaleString()} RF</button>
           {!me.docked && <span className="docks-note">Dock your plot first.</span>}</div>
         <h3>Tokens on the docks</h3>
         {econ.current.launches.length === 0 && <p className="docks-note">None yet.</p>}
-        {[...econ.current.launches].reverse().map(l => { const mineEligible = eligibleFriends(w, l, canVisit).filter(x => x.plot.mine);
+        {[...econ.current.launches].reverse().map(l => {
+          const mineIds = new Set(me.friends.map(p => p.m.id));
+          const can = eligibleFriends(w, l, canVisit).filter(x => mineIds.has(x.id) && !l.claimed.has(x.id)).length;
+          const n = Math.min(can, l.claimEach ? Math.floor(l.claimRemaining / l.claimEach) : 0, l.claimPrice ? Math.floor(econ.current.rf / l.claimPrice) : can);
+          const claimedAny = [...mineIds].some(id => l.claimed.has(id));
           return <div className="docks-token" key={l.id}><strong>${l.symbol} · {l.name}</strong>
             <small>by {l.creator.mine ? "you" : `${l.creator.name} (sample)`} · supply {fmt(l.supply)} · claim {fmt(l.claimEach)} for {l.claimPrice} RF · {fmt(l.claimRemaining)} left · {SCOPES.find(x => x.id === l.scope)!.label}</small>
-            <div className="docks-row">{me.friends.map(pl => { const id = pl.friend.tokenId, ok = mineEligible.some(x => x.id === id), done = l.claimed.has(id);
-              return <button type="button" key={String(id)} disabled={!ok || done || l.claimRemaining < l.claimEach} onClick={() => doClaim(l, id)}>{done ? `#${id} ✓` : `Claim → #${id}`}</button>; })}</div></div>; })}
+            <div className="docks-row"><button type="button" disabled={n < 1} onClick={() => doClaimAll(l)}>
+              {n < 1 ? (claimedAny ? "Claimed ✓" : "Not eligible") : `Claim for ${n.toLocaleString()} Friend${n === 1 ? "" : "s"} · ${fmt(n * l.claimPrice)} RF`}</button></div></div>; })}
         <h3>Your Friends' wallets</h3>
-        {me.friends.map(pl => { const bal = econ.current.wallets.get(pl.friend.tokenId);
-          return <div className="docks-item" key={String(pl.friend.tokenId)}><span><strong>#{String(pl.friend.tokenId)}</strong>
-            <small>{bal && bal.size ? [...bal].map(([sym, a]) => `${fmt(a)} $${sym}`).join(" · ") : "empty"}</small></span></div>; })}
+        {(() => { const totals = new Map<string, { sum: number; holders: number }>();
+          for (const p of me.friends) for (const [sym, a] of econ.current.wallets.get(p.m.id) ?? []) { const t = totals.get(sym) ?? { sum: 0, holders: 0 }; t.sum += a; t.holders++; totals.set(sym, t); }
+          return totals.size ? [...totals].map(([sym, t]) => <div className="docks-item" key={sym}><span><strong>{fmt(t.sum)} ${sym}</strong><small>across {t.holders.toLocaleString()} Friend wallet{t.holders === 1 ? "" : "s"}</small></span></div>)
+            : <p className="docks-note">Empty so far.</p>; })()}
       </> : menu === "help" ? <ul className="docks-help">
         <li><strong>Walk:</strong> WASD / arrows, or tap where to go.</li>
+        <li><strong>Your plot:</strong> every activated Friend in your wallet appears automatically as one connected plot, from 1 to 10,000+. Arrange lets you tap any Friend and move it (or All together); each Friend must touch another along part of a side. Auto-arrange packs them into a tidy block.</li>
         <li><strong>Dock:</strong> Docks → pick a spot. Your plot joins edge to edge; the seam is the walkway.</li>
         <li><strong>Visit:</strong> open plots (⇄) let you walk straight in. Invite-only plots (🔒) need approval: walk to the seam and choose Ask to visit.</li>
-        <li><strong>Your plot:</strong> add any activated Friends you hold and arrange them (↖ ↗ ↙ ↘ or arrow keys), one at a time or all together. Gaps are fine. Lands sit on the same 4-tile grid as the on-chain registry; any rounding becomes boardwalk.</li>
-        <li><strong>Your crew:</strong> your other Friends walk behind you. In My plot, tell one to Stay here and it holds that spot until it rejoins.</li>
+        <li><strong>Your crew:</strong> pick up to {MAX_FOLLOWING} Friends to walk behind you in My plot.</li>
         <li><strong>Tokens:</strong> launch a token for 1,000 RF, airdrop it into Friend wallets and open a claim pool; claims burn RF. Simulated in this preview.</li>
-        <li><strong>Always on-chain:</strong> every Friend is its real on-chain artwork. The game re-checks the chain every minute (or tap Check): upgrades update the art and rank, deactivated or transferred Friends leave.</li>
+        <li><strong>Always on-chain:</strong> every Friend is its real on-chain artwork, loaded as you get near it. The game re-checks the chain every minute (or tap Check): new Friends join, upgrades update, sold or deactivated Friends leave.</li>
         <li>This preview doesn't save: reloading starts fresh. RF balances, launches and claims are simulated.</li>
       </ul> : <>
         <div className="docks-row"><button type="button" onClick={() => setMenu("help")}>❓ How it works</button></div>
         <label><input type="checkbox" checked={reducedMotion} onChange={e => setReducedMotion(e.target.checked)} /> Reduce motion</label>
-        <p className="docks-note">Last on-chain check: {lastCheck ? lastCheck.toLocaleTimeString() : "—"}. Wallet connection and ownership of #{String(friendId)} are verified by FriendSDK. Bounds: {(() => { const b = communityBounds(w); return `${b.x1 - b.x0} × ${b.y1 - b.y0} tiles`; })()}.</p>
+        <p className="docks-note">Last on-chain check: {lastCheck ? lastCheck.toLocaleTimeString() : "—"}. Wallet connection and ownership of #{String(friendId)} are verified by FriendSDK. Docks: {(() => { const b = communityBounds(w); return Number.isFinite(b.x0) ? `${(b.x1 - b.x0) * CELL} × ${(b.y1 - b.y0) * CELL} tiles` : "—"; })()}.</p>
       </>}
     </GameMenu>}
   </section>;

@@ -2,20 +2,9 @@
 import { useState } from "react";
 import { mine, plotBounds, type Plot, type Slot, type World } from "./world.js";
 
-function runs(p: Plot, dx = 0, dy = 0) {
-  const out: { x: number; y: number; w: number }[] = [];
-  for (const pl of p.friends) {
-    const f = pl.friend;
-    for (let j = 0; j < f.h; j++) {
-      let start = -1;
-      for (let i = 0; i <= f.w; i++) {
-        const on = i < f.w && f.tiles[j * f.w + i];
-        if (on && start < 0) start = i;
-        if (!on && start >= 0) { out.push({ x: pl.x + start + dx, y: pl.y + j + dy, w: i - start }); start = -1; }
-      }
-    }
-  }
-  return out;
+/** One rect per Friend footprint, in cells. */
+function rects(p: Plot, dx = 0, dy = 0) {
+  return p.friends.map(pl => ({ x: pl.x + dx, y: pl.y + dy, w: pl.m.cw, h: pl.m.ch }));
 }
 
 export function ChainMap({ world, slots, onPick }: { world: World; slots: Slot[]; onPick: (s: Slot) => void }) {
@@ -33,15 +22,15 @@ export function ChainMap({ world, slots, onPick }: { world: World; slots: Slot[]
   const mb = me.friends.length ? plotBounds(me) : null;
   if (mb) slots.forEach(s => extend(mb.x0 + s.dx, mb.y0 + s.dy, mb.x1 + s.dx, mb.y1 + s.dy));
   if (!Number.isFinite(minX)) { minX = 0; maxX = 10; minY = 0; maxY = 10; }
-  const pad = 3, vb = `${minX - pad} ${minY - pad} ${maxX - minX + pad * 2} ${maxY - minY + pad * 2}`;
+  const pad = 1.5, vb = `${minX - pad} ${minY - pad} ${maxX - minX + pad * 2} ${maxY - minY + pad * 2}`;
   return <div className="docks-chainmap">
     <svg viewBox={vb} role="img" aria-label={`Map: ${shown.length} docked plots${slots.length ? `, ${slots.length} spots where your plot fits` : ""}`}>
       <g transform="matrix(1 0.5 -1 0.5 0 0)">
         {shown.map(p => <g key={p.id} className={p.mine ? "mine" : p.access === "open" ? "open" : "invite"}>
-          {runs(p).map((r, i) => <rect key={i} x={r.x} y={r.y} width={r.w} height={1.02} />)}
+          {rects(p).map((r, i) => <rect key={i} x={r.x} y={r.y} width={r.w + 0.02} height={r.h + 0.02} />)}
         </g>)}
         {slots.map((s, i) => <g key={i} className={`slot ${hover === i ? "hot" : ""}`} onPointerEnter={() => setHover(i)} onPointerLeave={() => setHover(null)} onClick={() => onPick(s)}>
-          {runs(me, s.dx, s.dy).map((r, j) => <rect key={j} x={r.x} y={r.y} width={r.w} height={1.02} />)}
+          {rects(me, s.dx, s.dy).map((r, j) => <rect key={j} x={r.x} y={r.y} width={r.w + 0.02} height={r.h + 0.02} />)}
         </g>)}
       </g>
       {mb && slots.map((s, i) => { const cx = (mb.x0 + mb.x1) / 2 + s.dx, cy = (mb.y0 + mb.y1) / 2 + s.dy;

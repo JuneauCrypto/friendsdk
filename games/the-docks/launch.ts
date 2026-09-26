@@ -1,7 +1,7 @@
 /* Token launches — SIMULATED in this preview. Mirrors contracts/src/docks/DocksLaunchpad.sol:
  * 1,000 RF per launch (500 burned, 500 to the treasury); fixed supply, no owner; airdrops and
  * claims land in the Friend's own wallet; every claim costs the launch's RF price, burned. */
-import { cellsH, cellsW, CELL, type Plot, type World } from "./world.js";
+import { touchesPlot, type Plot, type World } from "./world.js";
 
 export const LAUNCH_FEE = 1000;
 export const START_RF = 5000;                                   // simulated RF for the preview
@@ -28,14 +28,6 @@ function credit(e: Economy, id: bigint, symbol: string, amount: number) {
   w.set(symbol, (w.get(symbol) ?? 0) + amount); e.wallets.set(id, w);
 }
 
-/** Friends whose footprints share an edge (the on-chain `adjacent`). */
-function touching(a: { x: number; y: number; w: number; h: number }, b: typeof a) {
-  const xTouch = a.x + a.w === b.x || b.x + b.w === a.x, yTouch = a.y + a.h === b.y || b.y + b.h === a.y;
-  const xOver = a.x < b.x + b.w && b.x < a.x + a.w, yOver = a.y < b.y + b.h && b.y < a.y + a.h;
-  return (xTouch && yOver) || (yTouch && xOver);
-}
-const rect = (pl: Plot["friends"][number]) => ({ x: pl.x, y: pl.y, w: cellsW(pl.friend) * CELL, h: cellsH(pl.friend) * CELL });
-
 export function eligibleFriends(w: World, l: Pick<Launch, "scope" | "creator">, canVisit: (p: Plot, host: Plot) => boolean) {
   const out: { plot: Plot; id: bigint }[] = [];
   for (const p of w.plots) {
@@ -45,8 +37,8 @@ export function eligibleFriends(w: World, l: Pick<Launch, "scope" | "creator">, 
       if (l.scope === "anyDocked") ok = p.docked;
       else if (l.scope === "holderPlot") ok = p === l.creator;
       else if (l.scope === "visitors") ok = p === l.creator || (p.docked && canVisit(p, l.creator));
-      else ok = p === l.creator || (p.docked && l.creator.friends.some(c => touching(rect(pl), rect(c))));
-      if (ok) out.push({ plot: p, id: pl.friend.tokenId });
+      else ok = p === l.creator || (p.docked && touchesPlot(w, pl, l.creator));
+      if (ok) out.push({ plot: p, id: pl.m.id });
     }
   }
   return out;
@@ -91,6 +83,18 @@ export function claim(e: Economy, w: World, l: Launch, friendId: bigint, canVisi
   e.rf -= l.claimPrice; e.burned += l.claimPrice;
   l.claimed.add(friendId); l.claimRemaining -= l.claimEach;
   credit(e, friendId, l.symbol, l.claimEach);
+}
+
+/** Claim for many of your Friends at once (on chain: DocksLaunchpad.claimMany, chunked). */
+export function claimAll(e: Economy, w: World, l: Launch, ids: bigint[], canVisit: (p: Plot, host: Plot) => boolean) {
+  const ok = new Set(eligibleFriends(w, l, canVisit).map(x => x.id));
+  let n = 0;
+  for (const id of ids) {
+    if (!ok.has(id) || l.claimed.has(id) || l.claimRemaining < l.claimEach || e.rf < l.claimPrice) continue;
+    e.rf -= l.claimPrice; e.burned += l.claimPrice; l.claimed.add(id); l.claimRemaining -= l.claimEach;
+    credit(e, id, l.symbol, l.claimEach); n++;
+  }
+  return n;
 }
 
 export const fmt = (n: number) => n >= 1e6 ? `${+(n / 1e6).toFixed(2)}M` : n >= 1e4 ? `${+(n / 1e3).toFixed(1)}k` : n.toLocaleString();

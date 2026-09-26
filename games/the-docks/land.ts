@@ -97,8 +97,10 @@ export function parseFriendSvg(tokenId: bigint, svg: string, traits: Record<stri
   // screen position of the footprint origin inside the artwork = projected (minX, minY) + scene translate
   const anchor = { x: A * UNIT * (minX - minY) + offX, y: B * UNIT * (minX + minY) + offY };
   const sig = hash(`${traits.Generation}|${traits["Activation tier"]}|${traits.State}|${svg.length}|${hash(svg)}`);
+  let noPortrait = "";                            // built only for the Friend you walk as
   return { tokenId, w, h, tiles, blocked, props, traits, anchor,
-    art: toDataUrl(displaySvg(svg, false)), artWithoutPortrait: toDataUrl(displaySvg(svg, true)),
+    art: toDataUrl(displaySvg(svg, false)),
+    get artWithoutPortrait() { return noPortrait ||= toDataUrl(displaySvg(svg, true)); },
     signature: sig, active: traits.State === "Active" };
 }
 
@@ -136,6 +138,7 @@ export const REWARD_WEIGHT: Readonly<Record<number, readonly number[]>> = {
   5: [12, 18.375, 28.125, 43.03125, 65.8125],
   6: [1.1, 1.6875, 2.5875, 3.965625, 6.075],
 };
+export function rewardWeightOf(gen: number, tier: number) { return REWARD_WEIGHT[gen]?.[Math.max(0, Math.min(4, tier))] ?? 0; }
 export function rewardWeight(f: Friend) {
   const g = Number(f.traits.Generation), t = Number(f.traits["Activation tier"] ?? 0);
   return REWARD_WEIGHT[g]?.[Math.max(0, Math.min(4, t))] ?? 0;

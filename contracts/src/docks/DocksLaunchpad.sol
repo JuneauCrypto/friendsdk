@@ -19,6 +19,8 @@ contract DocksToken is ERC20 {
 /// @notice Launch a token from your plot for 1,000 RF (half burned, half to the treasury),
 /// airdrop it into Friend wallets and/or open a claim pool. Every claim costs the launch's
 /// RF claim price, which is burned. Tokens always land in the Friend's own wallet.
+/// @dev Airdrops and claims are sent in batches (`airdrop`, `claimMany`) so they scale to
+/// plots and docks of any size; eligibility is checked per Friend when each batch lands.
 contract DocksLaunchpad is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -37,6 +39,9 @@ contract DocksLaunchpad is ReentrancyGuard {
         uint256 claimEach;
         uint256 claimPrice;
         uint256 claimRemaining;
+        Scope airdropScope;
+        uint256 airdropEach;
+        uint256 airdropRemaining;
     }
 
     struct LaunchParams {
@@ -44,8 +49,9 @@ contract DocksLaunchpad is ReentrancyGuard {
         string symbol;
         uint256 creatorFriendId;
         uint256 supply;
-        uint256[] airdropFriendIds;
+        uint256 airdropPool;
         uint256 airdropEach;
+        Scope airdropScope;
         uint256 claimPool;
         uint256 claimEach;
         uint256 claimPrice;
@@ -62,6 +68,8 @@ contract DocksLaunchpad is ReentrancyGuard {
     error AlreadyClaimed();
     error PoolEmpty();
     error UnknownLaunch();
+    error NotCreator();
+    error LengthMismatch();
 
     event Launched(
         uint256 indexed launchId,
@@ -82,6 +90,7 @@ contract DocksLaunchpad is ReentrancyGuard {
 
     Launch[] private _launches;
     mapping(uint256 launchId => mapping(uint256 friendId => bool)) public claimed;
+    mapping(uint256 launchId => mapping(uint256 friendId => bool)) public airdropped;
 
     constructor(IERC20 rf_, DocksRegistry registry_, address treasury_) {
         rf = rf_;
@@ -93,9 +102,11 @@ contract DocksLaunchpad is ReentrancyGuard {
     function launch(LaunchParams calldata p) external nonReentrant returns (uint256 launchId) {
         if (!_controls(msg.sender, p.creatorFriendId)) revert NotHolder();
         if (!registry.isValid(p.creatorFriendId)) revert NotDocked();
-        uint256 airdropTotal = p.airdropFriendIds.length * p.airdropEach;
-        if (p.supply == 0 || airdropTotal + p.claimPool > p.supply) revert BadAllocation();
+        if (p.supply == 0 || p.airdropPool + p.claimPool > p.supply) revert BadAllocation();
         if ((p.claimPool == 0) != (p.claimEach == 0) || p.claimEach > p.claimPool) {
+            revert BadAllocation();
+        }
+        if ((p.airdropPool == 0) != (p.airdropEach == 0) || p.airdropEach > p.airdropPool) {
             revert BadAllocation();
         }
 
@@ -113,19 +124,73 @@ contract DocksLaunchpad is ReentrancyGuard {
                 p.scope,
                 p.claimEach,
                 p.claimPrice,
-                p.claimPool
+                p.claimPool,
+                p.airdropScope,
+                p.airdropEach,
+                p.airdropPool
             )
         );
         emit Launched(
             launchId, address(token), creator, p.creatorFriendId, p.scope, p.claimEach, p.claimPrice
         );
-
-        for (uint256 i; i < p.airdropFriendIds.length; ++i) {
-            IERC20(address(token)).safeTransfer(_wallet(p.airdropFriendIds[i]), p.airdropEach);
-            emit Airdropped(launchId, p.airdropFriendIds[i], p.airdropEach);
-        }
-        uint256 rest = p.supply - airdropTotal - p.claimPool;
+        uint256 rest = p.supply - p.airdropPool - p.claimPool;
         if (rest > 0) IERC20(address(token)).safeTransfer(_wallet(p.creatorFriendId), rest);
+    }
+
+    /// @notice Creator sends the airdrop in batches. Friends that are not eligible under the
+    /// airdrop scope, or already received it, are skipped. `vias` as for `claim`.
+    function airdrop(uint256 launchId, uint256[] calldata friendIds, uint256[] calldata vias)
+        external
+        nonReentrant
+        returns (uint256 sent)
+    {
+        if (launchId >= _launches.length) revert UnknownLaunch();
+        if (friendIds.length != vias.length) revert LengthMismatch();
+        Launch storage l = _launches[launchId];
+        if (msg.sender != l.creator) revert NotCreator();
+        for (uint256 i; i < friendIds.length && l.airdropRemaining >= l.airdropEach; ++i) {
+            uint256 id = friendIds[i];
+            if (airdropped[launchId][id] || !_eligible(l, l.airdropScope, id, vias[i])) continue;
+            airdropped[launchId][id] = true;
+            l.airdropRemaining -= l.airdropEach;
+            IERC20(address(l.token)).safeTransfer(_wallet(id), l.airdropEach);
+            emit Airdropped(launchId, id, l.airdropEach);
+            ++sent;
+        }
+    }
+
+    /// @notice Creator ends the airdrop; what is left goes to the launching Friend's wallet.
+    function endAirdrop(uint256 launchId) external nonReentrant {
+        if (launchId >= _launches.length) revert UnknownLaunch();
+        Launch storage l = _launches[launchId];
+        if (msg.sender != l.creator) revert NotCreator();
+        uint256 rest = l.airdropRemaining;
+        l.airdropRemaining = 0;
+        if (rest > 0) IERC20(address(l.token)).safeTransfer(_wallet(l.creatorFriendId), rest);
+    }
+
+    /// @notice Claim for many Friends you hold in one transaction. Friends that are not
+    /// eligible, already claimed, or beyond the pool are skipped; RF is taken only for claims made.
+    function claimMany(uint256 launchId, uint256[] calldata friendIds, uint256[] calldata vias)
+        external
+        nonReentrant
+        returns (uint256 made)
+    {
+        if (launchId >= _launches.length) revert UnknownLaunch();
+        if (friendIds.length != vias.length) revert LengthMismatch();
+        Launch storage l = _launches[launchId];
+        if (l.claimEach == 0) revert PoolEmpty();
+        for (uint256 i; i < friendIds.length && l.claimRemaining >= l.claimEach; ++i) {
+            uint256 id = friendIds[i];
+            if (!_controls(msg.sender, id)) revert NotHolder();
+            if (claimed[launchId][id] || !_eligible(l, l.scope, id, vias[i])) continue;
+            claimed[launchId][id] = true;
+            l.claimRemaining -= l.claimEach;
+            IERC20(address(l.token)).safeTransfer(_wallet(id), l.claimEach);
+            emit Claimed(launchId, id, l.claimEach, l.claimPrice);
+            ++made;
+        }
+        if (made > 0 && l.claimPrice > 0) rf.safeTransferFrom(msg.sender, BURN, made * l.claimPrice);
     }
 
     /// @notice Claim for a docked Friend you hold (from your wallet or the Friend's wallet).
@@ -136,7 +201,7 @@ contract DocksLaunchpad is ReentrancyGuard {
         if (!_controls(msg.sender, friendId)) revert NotHolder();
         if (claimed[launchId][friendId]) revert AlreadyClaimed();
         if (l.claimRemaining < l.claimEach || l.claimEach == 0) revert PoolEmpty();
-        if (!eligible(launchId, friendId, via)) revert NotEligible();
+        if (!_eligible(l, l.scope, friendId, via)) revert NotEligible();
 
         claimed[launchId][friendId] = true;
         l.claimRemaining -= l.claimEach;
@@ -151,11 +216,19 @@ contract DocksLaunchpad is ReentrancyGuard {
         returns (bool)
     {
         Launch storage l = _launches[launchId];
+        return _eligible(l, l.scope, friendId, via);
+    }
+
+    function _eligible(Launch storage l, Scope scope, uint256 friendId, uint256 via)
+        private
+        view
+        returns (bool)
+    {
         if (!registry.isValid(friendId)) return false;
         address holder = generations.ownerOf(friendId);
-        if (l.scope == Scope.AnyDocked) return true;
-        if (l.scope == Scope.HolderPlot) return holder == l.creator;
-        if (l.scope == Scope.PlotAndNeighbours) {
+        if (scope == Scope.AnyDocked) return true;
+        if (scope == Scope.HolderPlot) return holder == l.creator;
+        if (scope == Scope.PlotAndNeighbours) {
             if (holder == l.creator) return true;
             return registry.isValid(via) && generations.ownerOf(via) == l.creator
                 && registry.adjacent(friendId, via);

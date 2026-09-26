@@ -209,13 +209,21 @@ contract DocksTest is Test {
         Visitors
     }
 
-    function testLaunchChargesFeeAirdropsAndSendsRestToFriendWallet() public {
+    function _two(uint256 x, uint256 y) internal pure returns (uint256[] memory a) {
+        a = new uint256[](2);
+        a[0] = x;
+        a[1] = y;
+    }
+
+    function testLaunchChargesFeeAirdropsInBatchesAndSendsRestToFriendWallet() public {
         _place(alice, 1, 0, 0);
+        _place(alice, 2, 1, 0);
+        _place(bob, 10, 2, 0); // docked to alice's #2
+        _place(carol, 20, 9, 9); // far away
         DocksLaunchpad.LaunchParams memory p = _params(Scope_.AnyDocked);
-        p.airdropFriendIds = new uint256[](2);
-        p.airdropFriendIds[0] = 2;
-        p.airdropFriendIds[1] = 10;
+        p.airdropPool = 1000 ether;
         p.airdropEach = 50 ether;
+        p.airdropScope = DocksLaunchpad.Scope.PlotAndNeighbours;
         uint256 burnBefore = rf.balanceOf(pad.BURN());
         vm.prank(alice);
         uint256 id = pad.launch(p);
@@ -223,10 +231,74 @@ contract DocksTest is Test {
         assertEq(rf.balanceOf(treasury), 500 ether);
         assertEq(rf.balanceOf(alice), 9000 ether);
         IERC20 t = IERC20(address(pad.launches(id).token));
+        assertEq(t.balanceOf(gen.tokenBoundAccount(1)), 1_000_000 ether - 1000 ether - 100_000 ether);
+
+        vm.prank(bob);
+        vm.expectRevert(DocksLaunchpad.NotCreator.selector);
+        pad.airdrop(id, _one(10), _one(2));
+
+        // #20 is not a neighbour and is skipped; #2 and #10 (via #2) receive; repeats are skipped
+        uint256[] memory ids = new uint256[](4);
+        ids[0] = 2;
+        ids[1] = 10;
+        ids[2] = 20;
+        ids[3] = 2;
+        uint256[] memory vias = new uint256[](4);
+        vias[1] = 2;
+        vm.prank(alice);
+        assertEq(pad.airdrop(id, ids, vias), 2);
         assertEq(t.balanceOf(gen.tokenBoundAccount(2)), 50 ether);
         assertEq(t.balanceOf(gen.tokenBoundAccount(10)), 50 ether);
+        assertEq(t.balanceOf(gen.tokenBoundAccount(20)), 0);
+        vm.prank(alice);
+        pad.endAirdrop(id);
         assertEq(t.balanceOf(gen.tokenBoundAccount(1)), 1_000_000 ether - 100 ether - 100_000 ether);
-        assertEq(t.balanceOf(address(pad)), 100_000 ether);
+    }
+
+    function testClaimManyChargesOnlyForClaimsMade() public {
+        _place(alice, 1, 0, 0);
+        _place(alice, 2, 1, 0);
+        _place(alice, 3, 2, 0);
+        vm.prank(alice);
+        uint256 id = pad.launch(_params(Scope_.AnyDocked));
+        vm.prank(alice);
+        pad.claim(id, 2, 0);
+        uint256 rfBefore = rf.balanceOf(alice);
+        uint256[] memory ids = new uint256[](3);
+        ids[0] = 1;
+        ids[1] = 2; // already claimed: skipped
+        ids[2] = 3;
+        vm.prank(alice);
+        assertEq(pad.claimMany(id, ids, new uint256[](3)), 2);
+        assertEq(rfBefore - rf.balanceOf(alice), 10 ether);
+        vm.prank(bob);
+        vm.expectRevert(DocksLaunchpad.NotHolder.selector);
+        pad.claimMany(id, _one(1), _one(0));
+    }
+
+    /// A big holder: 300 Gen 6 Friends placed in one transaction, then claimed for in one.
+    function testScaleThreeHundredFriends() public {
+        uint256 n = 300;
+        uint256[] memory ids = new uint256[](n);
+        int32[] memory xs = new int32[](n);
+        int32[] memory ys = new int32[](n);
+        for (uint256 i; i < n; ++i) {
+            ids[i] = 1000 + i;
+            _friend(ids[i], alice);
+            xs[i] = int32(int256(i % 20));
+            ys[i] = int32(int256(i / 20));
+        }
+        vm.prank(alice);
+        reg.place(ids, xs, ys);
+        assertEq(reg.placedCount(), n);
+        DocksLaunchpad.LaunchParams memory p = _params(Scope_.HolderPlot);
+        p.creatorFriendId = 1000;
+        p.claimEach = 100 ether;
+        vm.prank(alice);
+        uint256 id = pad.launch(p);
+        vm.prank(alice);
+        assertEq(pad.claimMany(id, ids, new uint256[](n)), n);
+        assertEq(rf.balanceOf(pad.BURN()), 500 ether + n * 5 ether);
     }
 
     function testLaunchNeedsDockedFriendYouHold() public {
