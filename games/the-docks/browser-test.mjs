@@ -102,9 +102,31 @@ try {
   // manual on-chain check
   await btn("Check").click();
   await game.getByText(/On-chain check: #7573 updated \(G3 T1 → G3 T2\)/).waitFor();
+  // crew: #7573 walks behind; tell it to stay
+  assert.equal(await game.locator("canvas.docks-avatar.crew").count(), 1, "crew follower drawn");
+  await btn("My plot").click();
+  await game.getByRole("button", { name: "Stay here" }).click();
+  await game.getByRole("button", { name: "Rejoin crew" }).waitFor();
+  await game.getByRole("button", { name: "Close My plot" }).click();
+  // tokens: claim the sample $MKT, then launch our own
+  await btn("Tokens").click();
+  await game.getByRole("button", { name: "Claim → #7730" }).first().click();
+  await game.getByText(/#7730 claimed 500 \$MKT \(simulated\)/).waitFor();
+  await game.getByLabel("Name").fill("Dock Coin");
+  await game.getByLabel("Ticker").fill("DOCK");
+  await game.getByRole("button", { name: /Launch for 1,000 RF/ }).click();
+  await game.getByText(/\$DOCK launched \(simulated\)/).waitFor();
+  await shot("tokens");
+  const rfText = await game.locator(".docks-rf").textContent();
+  assert.match(rfText, /Your RF\s*3,995/, "5,000 − 5 claim − 1,000 launch");
+  assert.match(rfText, /Burned\s*505/);
+  await game.getByRole("button", { name: "Close Tokens" }).click();
   const alerts = await game.locator("[role=alert]").allTextContents();
   assert.deepEqual(alerts, [], "No in-game alerts");
-  assert.deepEqual([...errors, ...fixture.errors], [], "Browser errors");
+  // The SDK fixture only has sprite art for #7730; the crew's sprite read for #7573 is refused
+  // there (the game falls back to a plain silhouette). Any other fixture error still fails.
+  const fixtureErrors = fixture.errors.filter(e => !/7573n !== 7730n/.test(String(e)));
+  assert.deepEqual([...errors, ...fixtureErrors], [], "Browser errors");
   console.log("ok", tag, failImport ? "(fallback)" : "(chain import)");
 } catch (e) {
   console.error("FAIL", e.message, [...errors, ...(fixture?.errors ?? [])]); await shot("fail").catch(() => {}); process.exitCode = 1;

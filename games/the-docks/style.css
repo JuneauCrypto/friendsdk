@@ -75,3 +75,10 @@
   .docks-toast{bottom:118px;font-size:10px}.docks-hint{font-size:9px}
   .docks-arrange{bottom:46px;padding:6px;gap:6px}
 }
+.docks-seams .pier{fill:#1b1b1b;stroke:#3a3a3a;stroke-width:.35}
+.docks-avatar.crew{opacity:.95}.docks-avatar.staying{filter:drop-shadow(0 0 2px #ccff00)}
+.docks-rf{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;margin:6px 0}.docks-rf b{font-size:13px}
+.docks-sim{display:inline-block;font-size:9px;font-weight:700;letter-spacing:.04em;padding:1px 4px;border:1px solid currentColor;margin-left:6px;vertical-align:middle}
+.docks-form{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px 10px;margin:8px 0}
+.docks-form label{margin:0;font-size:11px;font-weight:700}.docks-form input,.docks-form select{display:block;width:100%;box-sizing:border-box;font:inherit;font-weight:400;padding:6px;border:1.5px solid #000;background:#fff;color:#000;margin-top:2px}
+.docks-token{padding:8px 0;border-bottom:1px solid #ddd}.docks-token small{display:block;font-size:11px;margin-top:2px}

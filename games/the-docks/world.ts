@@ -16,19 +16,24 @@ export type Plot = {
 export type Visit = "none" | "pending" | "approved" | "declined";
 export type World = {
   plots: Plot[]; visits: Map<string, Visit>; version: number;
-  occ: Map<string, { plot: Plot; placed: Placed; blocked: boolean }>;
+  /** pier: tiles inside a Friend's whole-cell footprint that its land doesn't cover — boardwalk. */
+  occ: Map<string, { plot: Plot; placed: Placed; blocked: boolean; pier?: boolean }>;
 };
 
 const key = (x: number, y: number) => `${x},${y}`;
+/** The on-chain grid (DocksRegistry): 4x4-tile cells; each Friend covers whole cells at true size. */
+export const CELL = 4;
+export const snap = (v: number) => Math.round(v / CELL) * CELL;
+export const cellsW = (f: Friend) => Math.ceil(f.w / CELL), cellsH = (f: Friend) => Math.ceil(f.h / CELL);
 export const mine = (w: World) => w.plots.find(p => p.mine)!;
 
 export function rebuild(w: World) {
   w.occ = new Map();
   for (const plot of w.plots) for (const pl of plot.friends) {
-    const f = pl.friend;
-    for (let j = 0; j < f.h; j++) for (let i = 0; i < f.w; i++) {
-      if (!f.tiles[j * f.w + i]) continue;
-      w.occ.set(key(pl.x + i, pl.y + j), { plot, placed: pl, blocked: f.blocked[j * f.w + i] });
+    const f = pl.friend, W = cellsW(f) * CELL, H = cellsH(f) * CELL;
+    for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+      const land = i < f.w && j < f.h && f.tiles[j * f.w + i];
+      w.occ.set(key(pl.x + i, pl.y + j), land ? { plot, placed: pl, blocked: f.blocked[j * f.w + i] } : { plot, placed: pl, blocked: false, pier: true });
     }
   }
   w.version++;
@@ -52,12 +57,12 @@ export function createWorld(neighbours: Plot[], myPlot: Plot): World {
 /* ── plot geometry ── */
 function cellsOf(p: Plot) {
   const cells: [number, number][] = [];
-  for (const pl of p.friends) { const f = pl.friend; for (let j = 0; j < f.h; j++) for (let i = 0; i < f.w; i++) if (f.tiles[j * f.w + i]) cells.push([pl.x + i, pl.y + j]); }
+  for (const pl of p.friends) { const W = cellsW(pl.friend) * CELL, H = cellsH(pl.friend) * CELL; for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) cells.push([pl.x + i, pl.y + j]); }
   return cells;
 }
 export function plotBounds(p: Plot) {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (const pl of p.friends) { x0 = Math.min(x0, pl.x); y0 = Math.min(y0, pl.y); x1 = Math.max(x1, pl.x + pl.friend.w); y1 = Math.max(y1, pl.y + pl.friend.h); }
+  for (const pl of p.friends) { x0 = Math.min(x0, pl.x); y0 = Math.min(y0, pl.y); x1 = Math.max(x1, pl.x + cellsW(pl.friend) * CELL); y1 = Math.max(y1, pl.y + cellsH(pl.friend) * CELL); }
   return { x0, y0, x1, y1 };
 }
 export function communityBounds(w: World) {
@@ -73,8 +78,8 @@ export function placeAdrift(w: World) {
   me.docked = false;
   if (!me.friends.length) return;
   const b = plotBounds(me);
-  const cx = Number.isFinite(c.x0) ? Math.round((c.x0 + c.x1) / 2 - (b.x1 - b.x0) / 2) : 0;
-  const cy = Number.isFinite(c.y1) ? c.y1 + 8 : 0;
+  const cx = Number.isFinite(c.x0) ? snap((c.x0 + c.x1) / 2 - (b.x1 - b.x0) / 2) : 0;
+  const cy = Number.isFinite(c.y1) ? c.y1 + 2 * CELL : 0;
   shiftPlot(me, cx - b.x0, cy - b.y0);
   rebuild(w);
 }
@@ -101,14 +106,14 @@ export function dockSlots(w: World, p: Plot): Slot[] {
     if (q === p || !q.docked || !q.friends.length) continue;
     const qb = plotBounds(q);
     const tries: [number, number, number, number][] = [];
-    for (let o = -ph + 2; o < qb.y1 - qb.y0 - 1; o += 2) { tries.push([qb.x1, qb.y0 + o, -1, 0]); tries.push([qb.x0 - pw, qb.y0 + o, 1, 0]); }
-    for (let o = -pw + 2; o < qb.x1 - qb.x0 - 1; o += 2) { tries.push([qb.x0 + o, qb.y1, 0, -1]); tries.push([qb.x0 + o, qb.y0 - ph, 0, 1]); }
+    for (let o = -ph + CELL; o < qb.y1 - qb.y0; o += CELL) { tries.push([qb.x1, qb.y0 + o, -CELL, 0]); tries.push([qb.x0 - pw, qb.y0 + o, CELL, 0]); }
+    for (let o = -pw + CELL; o < qb.x1 - qb.x0; o += CELL) { tries.push([qb.x0 + o, qb.y1, 0, -CELL]); tries.push([qb.x0 + o, qb.y0 - ph, 0, CELL]); }
     for (let [tx, ty, sx, sy] of tries) {
       let dx = tx - pb.x0, dy = ty - pb.y0;
       let best = evaluate(w, p, dx, dy);
       if (!best) continue;
       for (let s = 0; s < 10 && best && best.seam === 0; s++) { const n = evaluate(w, p, dx + sx, dy + sy); if (!n) break; dx += sx; dy += sy; best = n; }
-      if (!best || best.seam < 2) continue;
+      if (!best || best.seam < CELL) continue;
       const k = key(dx, dy);
       if (!out.has(k)) out.set(k, { dx, dy, touches: best.touches, seam: best.seam });
     }
@@ -134,13 +139,25 @@ export function neighboursOf(w: World, p: Plot) {
 
 /* ── arranging my own Friends (any layout, gaps allowed, no overlaps) ── */
 export function canPlace(w: World, placed: Placed, x: number, y: number) {
-  const f = placed.friend;
-  for (let j = 0; j < f.h; j++) for (let i = 0; i < f.w; i++) {
-    if (!f.tiles[j * f.w + i]) continue;
+  const W = cellsW(placed.friend) * CELL, H = cellsH(placed.friend) * CELL;
+  for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
     const o = w.occ.get(key(x + i, y + j));
     if (o && o.placed !== placed) return false;
   }
   return true;
+}
+/** Move several of my Friends by the same step at once (the whole crew relocates together). */
+export function moveGroup(w: World, group: Placed[], dx: number, dy: number) {
+  const inGroup = new Set(group);
+  for (const pl of group) {
+    const W = cellsW(pl.friend) * CELL, H = cellsH(pl.friend) * CELL;
+    for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) {
+      const o = w.occ.get(key(pl.x + dx + i, pl.y + dy + j));
+      if (o && !inGroup.has(o.placed)) return false;
+    }
+  }
+  for (const pl of group) { pl.x += dx; pl.y += dy; }
+  rebuild(w); return true;
 }
 export function moveFriend(w: World, placed: Placed, dx: number, dy: number) {
   if (!canPlace(w, placed, placed.x + dx, placed.y + dy)) return false;
@@ -153,10 +170,11 @@ export function addToPlot(w: World, friend: Friend) {
   if (!me.friends.length) { me.friends.push(placed); placeAdrift(w); return placed; }
   const b = plotBounds(me);
   const candidates: [number, number][] = [];
-  for (let r = 0; r < 40; r += 2) for (const [x, y] of [[b.x1 + r, b.y0], [b.x0, b.y1 + r], [b.x0 - friend.w - r, b.y0], [b.x0, b.y0 - friend.h - r], [b.x1 + r, b.y1 - friend.h]]) candidates.push([x, y]);
+  const fw = cellsW(friend) * CELL, fh = cellsH(friend) * CELL;
+  for (let r = 0; r < 40; r += CELL) for (const [x, y] of [[b.x1 + r, b.y0], [b.x0, b.y1 + r], [b.x0 - fw - r, b.y0], [b.x0, b.y0 - fh - r], [b.x1 + r, b.y1 - fh]]) candidates.push([x, y]);
   me.friends.push(placed);
   for (const [x, y] of candidates) if (canPlace(w, placed, x, y)) { placed.x = x; placed.y = y; rebuild(w); return placed; }
-  placed.x = b.x1 + 60; placed.y = b.y0; rebuild(w); return placed;
+  placed.x = b.x1 + 15 * CELL; placed.y = b.y0; rebuild(w); return placed;
 }
 export function removeFromPlot(w: World, tokenId: bigint) {
   const me = mine(w); me.friends = me.friends.filter(p => p.friend.tokenId !== tokenId); rebuild(w);

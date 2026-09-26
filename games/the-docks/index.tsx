@@ -6,15 +6,16 @@ import { GameMenu } from "@rarefriends/friendsdk/frame";
 import { createFriendReader, type GenerationSprites } from "@rarefriends/friendsdk/sprites";
 import { readFriend, readOwner, rewardWeight, type Friend } from "./land.js";
 import {
-  RANKS, addToPlot, canEnter, communityBounds, createWorld, dock, dockSlots, mine, moveFriend, neighboursOf,
+  CELL, RANKS, addToPlot, canEnter, cellsW, communityBounds, createWorld, dock, dockSlots, mine, moveFriend, moveGroup, neighboursOf,
   rankOf, rebuild, removeFromPlot, replaceFriend, undock, type Access, type Placed, type Plot, type Slot, type World,
 } from "./world.js";
-import { DocksView, spawnOn, type ViewApi } from "./view.js";
+import { DocksView, spawnOn, type CrewMember, type ViewApi } from "./view.js";
+import { LAUNCH_FEE, SCOPES, claim, createEconomy, eligibleFriends, fmt, launch, seedLaunch, type Economy, type Scope } from "./launch.js";
 import { ChainMap } from "./chainmap.js";
 import "@rarefriends/friendsdk/frame.css";
 import "./style.css";
 
-type Menu = "plot" | "docks" | "help" | "settings" | null;
+type Menu = "plot" | "docks" | "tokens" | "help" | "settings" | null;
 const CHECK_EVERY_MS = 60_000;
 
 /* Sample neighbours: other people's public, activated Friends, read live from chain and
@@ -46,6 +47,13 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const [requests, setRequests] = useState<string[]>([]);
   const [retry, setRetry] = useState(0);
   const world = useRef<World | null>(null);
+  const econ = useRef<Economy>(createEconomy());
+  const [crew, setCrew] = useState<CrewMember[]>([]);
+  const [approvedVisitors, setApprovedVisitors] = useState<string[]>([]);
+  const [form, setForm] = useState({ name: "", symbol: "", supply: "1000000", airdropScope: "plotAndNeighbours" as Scope | "none", airdropEach: "1000",
+    claimScope: "anyDocked" as Scope, claimPool: "100000", claimEach: "500", claimPrice: "5" });
+  const [launchError, setLaunchError] = useState("");
+  const [moveAll, setMoveAll] = useState(false);
   const owner = useRef("");
   const api = useRef<ViewApi | null>(null);
   const epoch = useRef(0);
@@ -67,12 +75,16 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         const samples = await Promise.all(SAMPLE_PLOTS.map(async s => {
           const got = await Promise.allSettled(s.tokens.map(readFriend));
           const friends = got.flatMap(r => r.status === "fulfilled" ? [r.value] : []);
-          let x = 0; const placed = friends.map(f => { const p = { friend: f, x, y: 0 }; x += f.w; return p; });
+          let x = 0; const placed = friends.map(f => { const p = { friend: f, x, y: 0 }; x += cellsW(f) * CELL; return p; });
           return { id: s.id, name: s.name, mine: false, access: s.access, policy: s.policy, friends: placed, docked: false } as Plot;
         }));
         if (v !== epoch.current) return;
         const myPlot: Plot = { id: "me", name: "Your plot", mine: true, access: "invite", friends: [{ friend: me, x: 0, y: 0 }], docked: false };
         world.current = createWorld(samples.filter(s => s.friends.length), myPlot);
+        econ.current = createEconomy(); setCrew([]); setApprovedVisitors([]);
+        const market = world.current.plots.find(p => p.id === "s4" && p.friends.length);
+        if (market) seedLaunch(econ.current, { name: "Market Coin", symbol: "MKT", supply: 1_000_000, creator: market, creatorFriend: market.friends[0].friend.tokenId,
+          scope: "anyDocked", claimEach: 500, claimPrice: 5, claimRemaining: 50_000 });
         setReady(true); say("Your Friend is here. Open Docks to dock beside the others.");
         setLastCheck(new Date());
       } catch (e) {
@@ -155,20 +167,43 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       if (o !== owner.current) { setAddError(`Friend #${id} isn't held by the same wallet as #${friendId}.`); return; }
       const f = await readFriend(id);
       addToPlot(w, f);
+      setCrew(c => [...c, { id, sprites: null, staying: false }]);
+      void createFriendReader().read(id).then(sp => setCrew(c => c.map(m => m.id === id ? { ...m, sprites: sp } : m))).catch(() => {});
       setAddId(""); bump(); say(`Friend #${id} joined your plot (G${f.traits.Generation} T${f.traits["Activation tier"]}). Use Arrange to move it.`);
     } catch (e) { setAddError(errText(e)); }
     finally { setAdding(false); }
   }
   function nudge(dx: number, dy: number) {
     const w = world.current; if (!w || !arranging) return;
-    if (!moveFriend(w, arranging, dx, dy)) say("That spot overlaps another Friend.");
+    const ok = moveAll ? moveGroup(w, mine(w).friends, dx, dy) : moveFriend(w, arranging, dx, dy);
+    if (!ok) say("That spot overlaps another Friend.");
     bump();
+  }
+  const canVisit = (p: Plot, host: Plot) => {
+    if (p === host) return true;
+    if (p.mine) return canEnter(world.current!, host);
+    if (host.mine) return host.access === "open" || approvedVisitors.includes(p.id);
+    return host.access === "open";
+  };
+  function doLaunch() {
+    const w = world.current!, me = mine(w); setLaunchError("");
+    const n = (v: string) => Number(v.replace(/[,_\s]/g, "")) || 0;
+    try {
+      const l = launch(econ.current, w, { name: form.name, symbol: form.symbol, supply: n(form.supply), creator: me, creatorFriend: friendId,
+        airdropScope: form.airdropScope, airdropEach: n(form.airdropEach), claimScope: form.claimScope, claimPool: n(form.claimPool), claimEach: n(form.claimEach), claimPrice: n(form.claimPrice) }, canVisit);
+      setForm(f => ({ ...f, name: "", symbol: "" })); bump();
+      say(`$${l.symbol} launched (simulated): ${LAUNCH_FEE.toLocaleString()} RF paid, ${LAUNCH_FEE / 2} burned.`);
+    } catch (e) { setLaunchError(errText(e)); }
+  }
+  function doClaim(l: Economy["launches"][number], id: bigint) {
+    try { claim(econ.current, world.current!, l, id, canVisit); bump(); say(`#${id} claimed ${fmt(l.claimEach)} $${l.symbol} (simulated) · ${l.claimPrice} RF burned.`); }
+    catch (e) { say(errText(e)); }
   }
   // arrange with arrow keys
   useEffect(() => {
     if (!arranging) return;
     const k = (e: KeyboardEvent) => {
-      const m: Record<string, [number, number]> = { arrowup: [-2, 0], w: [-2, 0], arrowright: [0, -2], d: [0, -2], arrowdown: [2, 0], s: [2, 0], arrowleft: [0, 2], a: [0, 2] };
+      const C = CELL, m: Record<string, [number, number]> = { arrowup: [-C, 0], w: [-C, 0], arrowright: [0, -C], d: [0, -C], arrowdown: [C, 0], s: [C, 0], arrowleft: [0, C], a: [0, C] };
       const d = m[e.key.toLowerCase()]; if (d && !menu) { e.preventDefault(); nudge(d[0], d[1]); }
       if (e.key === "Escape" || e.key === "Enter") finishArranging();
     };
@@ -197,7 +232,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
 
   return <section className="docks" aria-label={definition.name}>
     <DocksView world={w} version={w.version} sprites={sprites} walkerId={friendId} zoom={zoom} paused={uiBlocked} reducedMotion={reducedMotion}
-      selected={arranging} apiRef={api} onBlocked={p => { setGate(p); if (!menu) say(`${p.name} is invite-only.`); }} onEnterPlot={p => { setHere(p); if (p && p !== gate) setGate(null); }} />
+      selected={arranging} crew={crew} apiRef={api} onBlocked={p => { setGate(p); if (!menu) say(`${p.name} is invite-only.`); }} onEnterPlot={p => { setHere(p); if (p && p !== gate) setGate(null); }} />
 
     <div className="docks-hud" inert={uiBlocked || undefined}>
       <div className="docks-card">
@@ -214,12 +249,14 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     <p className="docks-toast" role="status" aria-live="polite">{toast}</p>
 
     {arranging ? <div className="docks-arrange" role="toolbar" aria-label="Arrange your Friends">
-      <div className="docks-chips">{me.friends.map(p => <button type="button" key={String(p.friend.tokenId)} aria-pressed={p === arranging} onClick={() => setArranging(p)}>#{String(p.friend.tokenId)}</button>)}</div>
+      <div className="docks-chips">
+        {me.friends.length > 1 && <button type="button" aria-pressed={moveAll} onClick={() => setMoveAll(v => !v)}>All together</button>}
+        {me.friends.map(p => <button type="button" key={String(p.friend.tokenId)} aria-pressed={!moveAll && p === arranging} onClick={() => { setMoveAll(false); setArranging(p); }}>#{String(p.friend.tokenId)}</button>)}</div>
       <div className="docks-pad">
-        <button type="button" aria-label="Move up-left" onClick={() => nudge(-2, 0)}>↖</button>
-        <button type="button" aria-label="Move up-right" onClick={() => nudge(0, -2)}>↗</button>
-        <button type="button" aria-label="Move down-left" onClick={() => nudge(0, 2)}>↙</button>
-        <button type="button" aria-label="Move down-right" onClick={() => nudge(2, 0)}>↘</button>
+        <button type="button" aria-label="Move up-left" onClick={() => nudge(-CELL, 0)}>↖</button>
+        <button type="button" aria-label="Move up-right" onClick={() => nudge(0, -CELL)}>↗</button>
+        <button type="button" aria-label="Move down-left" onClick={() => nudge(0, CELL)}>↙</button>
+        <button type="button" aria-label="Move down-right" onClick={() => nudge(CELL, 0)}>↘</button>
       </div>
       <button type="button" className="rf-frame-primary" onClick={finishArranging}>Done</button>
     </div> : <div className="docks-bar" inert={uiBlocked || undefined}>
@@ -229,6 +266,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       <div className="docks-nav">
         <button type="button" onClick={() => setMenu("plot")} disabled={uiBlocked}>🏡<span>My plot</span></button>
         <button type="button" onClick={() => setMenu("docks")} disabled={uiBlocked}>⚓<span>Docks</span></button>
+        <button type="button" onClick={() => setMenu("tokens")} disabled={uiBlocked}>🚀<span>Tokens</span></button>
         <button type="button" onClick={() => void checkChain(true)} disabled={uiBlocked || checking}>{checking ? "⏳" : "🔄"}<span>Check</span></button>
         <button type="button" onClick={() => setZoom(z => Math.min(4, +(z + 0.4).toFixed(1)))} disabled={uiBlocked} aria-label="Zoom in">＋</button>
         <button type="button" onClick={() => setZoom(z => Math.max(0.6, +(z - 0.4).toFixed(1)))} disabled={uiBlocked} aria-label="Zoom out">－</button>
@@ -236,15 +274,19 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       </div>
     </div>}
 
-    {menu && <GameMenu onClose={() => setMenu(null)} title={menu === "plot" ? "My plot" : menu === "docks" ? "The Docks" : menu === "help" ? "How it works" : "Settings"}>
+    {menu && <GameMenu onClose={() => setMenu(null)} title={menu === "plot" ? "My plot" : menu === "docks" ? "The Docks" : menu === "tokens" ? "Tokens" : menu === "help" ? "How it works" : "Settings"}>
       {menu === "plot" ? <>
-        <p>Your plot is your activated Friends, side by side, exactly as they render on chain. Add as many as you hold and arrange them however you like; gaps are fine.</p>
+        <p>Your plot is your activated Friends, side by side, exactly as they render on chain. Every Friend is its own wallet, so your plot is your crew: they walk behind you, and any of them can stay behind to hold a spot. Add as many as you hold and arrange them however you like; gaps are fine.</p>
         <div className="docks-item"><span><strong>Rank: {myRank.rank}</strong><small>Total reward weight {fmtW(myRank.weight)}{myRank.next ? ` · ${fmtW(myRank.next)} to ${RANKS[myRank.index + 1].name}` : ""}</small></span></div>
         {me.friends.map(p => <div className="docks-friend" key={String(p.friend.tokenId)}>
           <div className="crop"><img src={p.friend.art} alt={`Friend #${p.friend.tokenId} on-chain artwork`} /></div>
           <span><strong>#{String(p.friend.tokenId)}{p.friend.tokenId === friendId ? " · walking" : ""}</strong>
             <small>Gen {p.friend.traits.Generation} · Tier {p.friend.traits["Activation tier"]} · {p.friend.traits.Scenery} · weight {fmtW(rewardWeight(p.friend))}</small></span>
-          {p.friend.tokenId !== friendId && <button type="button" onClick={() => { removeFromPlot(w, p.friend.tokenId); bump(); }}>Remove</button>}
+          {p.friend.tokenId !== friendId && <span className="docks-row tight">
+            <button type="button" aria-pressed={!crew.find(m => m.id === p.friend.tokenId)?.staying}
+              onClick={() => setCrew(c => c.map(m => m.id === p.friend.tokenId ? { ...m, staying: !m.staying } : m))}>
+              {crew.find(m => m.id === p.friend.tokenId)?.staying ? "Rejoin crew" : "Stay here"}</button>
+            <button type="button" onClick={() => { removeFromPlot(w, p.friend.tokenId); setCrew(c => c.filter(m => m.id !== p.friend.tokenId)); bump(); }}>Remove</button></span>}
         </div>)}
         <div className="docks-add">
           <label htmlFor="add-id">Add another activated Friend you hold</label>
@@ -260,7 +302,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         </div>
         {requests.length > 0 && <><h3>Visit requests</h3>{requests.map(id => { const p = w.plots.find(q => q.id === id); if (!p) return null;
           return <div className="docks-item" key={id}><span><strong>{p.name}</strong><small>sample neighbour · simulated request</small></span>
-            <span className="docks-row tight"><button type="button" onClick={() => { setRequests(r => r.filter(x => x !== id)); say(`You let ${p.name} in.`); }}>Approve</button>
+            <span className="docks-row tight"><button type="button" onClick={() => { setRequests(r => r.filter(x => x !== id)); setApprovedVisitors(a => [...a, id]); say(`You let ${p.name} in.`); }}>Approve</button>
               <button type="button" onClick={() => { setRequests(r => r.filter(x => x !== id)); say(`You declined ${p.name}.`); }}>Decline</button></span></div>; })}</>}
       </> : menu === "docks" ? <>
         <p>{me.docked ? `Docked beside ${neighboursOf(w, me).map(p => p.name).join(", ") || "the community"}. The seams where plots touch are the walkways.` : "Your plot is adrift. Pick a glowing spot to dock edge to edge with the others."}</p>
@@ -272,15 +314,52 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <h3>Everyone here</h3>
         {[...w.plots].filter(p => p.friends.length).sort((a, b) => rankOf(b).weight - rankOf(a).weight).map((p, i) => { const r = rankOf(p);
           return <div className="docks-item" key={p.id}><span><strong>{i + 1}. {p.mine ? "You" : p.name} · {r.rank}</strong>
-            <small>{p.friends.map(f => `#${f.friend.tokenId}`).join(" ")} · weight {fmtW(r.weight)}{p.mine ? "" : ` · ${p.access === "open" ? "open" : "invite only"} · sample`}</small></span></div>; })}
+            <small>{p.friends.map(f => `#${f.friend.tokenId}`).join(" ")} · weight {fmtW(r.weight)}{p.mine ? "" : ` · ${p.access === "open" ? "open" : "invite only"} · sample`}</small></span>
+            <button type="button" onClick={() => { const pl = p.friends[0]; setMenu(null);
+              if (canEnter(w, p) && (p.docked || p.mine)) { const sp = spawnOn(w, pl); api.current?.teleport(sp.x, sp.y); say(p.mine ? "Back home." : `You and your crew walked over to ${p.name}.`); }
+              else { api.current?.focusOn(pl.x + pl.friend.w / 2, pl.y + pl.friend.h / 2); say(`${p.name} is invite-only: here's the view from the seam. Walk up and ask to visit.`); } }}>{canEnter(w, p) ? "Go" : "Look"}</button></div>; })}
         <p className="docks-note">Rank follows the official Rare Friends reward weight (Generation × Activation tier), summed over a plot's Friends. Neighbours are other people's public Friends shown as samples; their answers to visit requests are simulated.</p>
+      </> : menu === "tokens" ? <>
+        <div className="docks-rf"><span>Your RF <b>{fmt(econ.current.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Burned <b>{fmt(econ.current.burned)}</b></span><span>Treasury <b>{fmt(econ.current.treasury)}</b></span></div>
+        <p className="docks-note">Launch a token from your plot for {LAUNCH_FEE.toLocaleString()} RF (half burned, half to the treasury). Airdrops and claims land in each Friend's own wallet; every claim costs RF, which is burned. In this preview it's all simulated; the contracts are in the submission.</p>
+        <h3>Launch a token</h3>
+        <div className="docks-form">
+          <label>Name<input value={form.name} maxLength={32} placeholder="Market Coin" onChange={e => setForm({ ...form, name: e.target.value })} /></label>
+          <label>Ticker<input value={form.symbol} maxLength={8} placeholder="MKT" onChange={e => setForm({ ...form, symbol: e.target.value.toUpperCase() })} /></label>
+          <label>Total supply<input inputMode="numeric" value={form.supply} onChange={e => setForm({ ...form, supply: e.target.value })} /></label>
+          <label>Airdrop to<select value={form.airdropScope} onChange={e => setForm({ ...form, airdropScope: e.target.value as Scope | "none" })}>
+            <option value="none">No airdrop</option>{SCOPES.map(sc => <option key={sc.id} value={sc.id}>{sc.label}</option>)}</select></label>
+          <label>Airdrop per Friend<input inputMode="numeric" value={form.airdropEach} disabled={form.airdropScope === "none"} onChange={e => setForm({ ...form, airdropEach: e.target.value })} /></label>
+          <label>Who can claim<select value={form.claimScope} onChange={e => setForm({ ...form, claimScope: e.target.value as Scope })}>
+            {SCOPES.map(sc => <option key={sc.id} value={sc.id}>{sc.label}</option>)}</select></label>
+          <label>Claim pool<input inputMode="numeric" value={form.claimPool} onChange={e => setForm({ ...form, claimPool: e.target.value })} /></label>
+          <label>Per claim<input inputMode="numeric" value={form.claimEach} onChange={e => setForm({ ...form, claimEach: e.target.value })} /></label>
+          <label>Claim price (RF, burned)<input inputMode="numeric" value={form.claimPrice} onChange={e => setForm({ ...form, claimPrice: e.target.value })} /></label>
+        </div>
+        <p className="docks-note">{form.airdropScope === "none" ? "No airdrop." : `Airdrop reaches ${eligibleFriends(w, { scope: form.airdropScope, creator: me }, canVisit).length} Friend wallet(s) right now (${SCOPES.find(x => x.id === form.airdropScope)!.hint}).`} The rest of the supply goes to #{String(friendId)}'s wallet.</p>
+        {launchError && <p role="alert" className="docks-note">{launchError}</p>}
+        <div className="docks-row"><button type="button" className="rf-frame-primary" disabled={!me.docked} onClick={doLaunch}>🚀 Launch for {LAUNCH_FEE.toLocaleString()} RF</button>
+          {!me.docked && <span className="docks-note">Dock your plot first.</span>}</div>
+        <h3>Tokens on the docks</h3>
+        {econ.current.launches.length === 0 && <p className="docks-note">None yet.</p>}
+        {[...econ.current.launches].reverse().map(l => { const mineEligible = eligibleFriends(w, l, canVisit).filter(x => x.plot.mine);
+          return <div className="docks-token" key={l.id}><strong>${l.symbol} · {l.name}</strong>
+            <small>by {l.creator.mine ? "you" : `${l.creator.name} (sample)`} · supply {fmt(l.supply)} · claim {fmt(l.claimEach)} for {l.claimPrice} RF · {fmt(l.claimRemaining)} left · {SCOPES.find(x => x.id === l.scope)!.label}</small>
+            <div className="docks-row">{me.friends.map(pl => { const id = pl.friend.tokenId, ok = mineEligible.some(x => x.id === id), done = l.claimed.has(id);
+              return <button type="button" key={String(id)} disabled={!ok || done || l.claimRemaining < l.claimEach} onClick={() => doClaim(l, id)}>{done ? `#${id} ✓` : `Claim → #${id}`}</button>; })}</div></div>; })}
+        <h3>Your Friends' wallets</h3>
+        {me.friends.map(pl => { const bal = econ.current.wallets.get(pl.friend.tokenId);
+          return <div className="docks-item" key={String(pl.friend.tokenId)}><span><strong>#{String(pl.friend.tokenId)}</strong>
+            <small>{bal && bal.size ? [...bal].map(([sym, a]) => `${fmt(a)} $${sym}`).join(" · ") : "empty"}</small></span></div>; })}
       </> : menu === "help" ? <ul className="docks-help">
         <li><strong>Walk:</strong> WASD / arrows, or tap where to go.</li>
         <li><strong>Dock:</strong> Docks → pick a spot. Your plot joins edge to edge; the seam is the walkway.</li>
         <li><strong>Visit:</strong> open plots (⇄) let you walk straight in. Invite-only plots (🔒) need approval: walk to the seam and choose Ask to visit.</li>
-        <li><strong>Your plot:</strong> add any activated Friends you hold and arrange them (↖ ↗ ↙ ↘ or arrow keys). Gaps are fine.</li>
+        <li><strong>Your plot:</strong> add any activated Friends you hold and arrange them (↖ ↗ ↙ ↘ or arrow keys), one at a time or all together. Gaps are fine. Lands sit on the same 4-tile grid as the on-chain registry; any rounding becomes boardwalk.</li>
+        <li><strong>Your crew:</strong> your other Friends walk behind you. In My plot, tell one to Stay here and it holds that spot until it rejoins.</li>
+        <li><strong>Tokens:</strong> launch a token for 1,000 RF, airdrop it into Friend wallets and open a claim pool; claims burn RF. Simulated in this preview.</li>
         <li><strong>Always on-chain:</strong> every Friend is its real on-chain artwork. The game re-checks the chain every minute (or tap Check): upgrades update the art and rank, deactivated or transferred Friends leave.</li>
-        <li>This preview doesn't save: reloading starts fresh.</li>
+        <li>This preview doesn't save: reloading starts fresh. RF balances, launches and claims are simulated.</li>
       </ul> : <>
         <div className="docks-row"><button type="button" onClick={() => setMenu("help")}>❓ How it works</button></div>
         <label><input type="checkbox" checked={reducedMotion} onChange={e => setReducedMotion(e.target.checked)} /> Reduce motion</label>
