@@ -3,12 +3,17 @@
 A place for all Rare Friends, built from **floating islands**. Every activated Friend is
 a small floating island, exactly as its fully on-chain artwork renders. Join Friends
 together and they make one big island; a holder's Friends can move as one island or be
-**deployed to different islands**. **Every island is an NFT.**
+**deployed to different islands**. **The only NFTs are the activated Friends**: an island
+is a saved layout that belongs to the wallet that built it, and it can't be sold.
 
 - **Arranging is the game.** Move your Friends around your island as a draft, then
   **Save on chain**: every Friend whose spot changed burns RF (Gen 1: 100 · Gen 2: 50 ·
   Gen 3: 20 · Gen 4: 10 · Gen 5: 5 · Gen 6: 1 RF) plus gas. Unmoved Friends are free;
   **Undo** returns to the last save. Each Friend must touch another along part of a side.
+- **Holes.** If a saved Friend leaves the wallet (sending it clears its activation) or is
+  deactivated, its spot becomes a **hole** in the island. The hole stays, reserved, until
+  that Friend comes back (it heals for free) or the owner fills it with another activated
+  Friend **of the same generation** (normal arrange fee).
 - **Docking.** Islands float on one shared berth grid: **one island per berth whatever its
   size**, so the docks grow with the number of islands, not their size. Dock at a free
   **loading zone** next to another island; neighbours are joined by a **gangway**. Docking
@@ -51,6 +56,7 @@ app's built-in browser (the SDK has no WalletConnect).
 | --- | --- |
 | **Art** | `tokenURI(id)` on Generations (`0x14C4…181D`) → metadata → the on-chain isometric SVG, shown through `<img>` unchanged apart from removing its black backdrop (so lands sit side by side) and, for the Friend you walk as, the standing figure (it walks instead). |
 | **Footprint** | Parsed from the same SVG: the land outline (`fill="url(#rf-floor)"`) and objects (`data-prop`), unprojected with the renderer's projection (a = 0.866, b = 0.28) onto a tile grid at true size (2 renderer units per tile). Solid objects block walking. |
+| **Holes** | When the minute check finds a saved Friend gone from the wallet (or deactivated), its spot turns into a hole (drawn dark with a red dashed edge). 🏝 Islands lists holes with a **Fill with…** picker (same generation only; the Friend that left fills its own hole for free). It heals by itself if that Friend returns. ⚙️ More → *Preview: a Friend leaves your wallet* shows the flow without sending anything. |
 | **Islands** | Each island has its own grid of 4 × 4-tile cells; Friends cover whole cells at true size (Gen 1 = 30 tiles … Gen 6 = 4), and rounding becomes boardwalk. 🏝 Islands → switch islands, **＋ New island**, and deploy any Friend to another island from its row. |
 | **Docking** | ⚓ Docks → the berth map: one square per island, glowing loading zones next to docked islands. Pick one to dock or move (gas only). Islands are drawn centred in their berth with water between; neighbours are joined by a gangway you can walk. |
 | **Bridges** | On the berth map, tap an island you aren't next to (or **Bridge to …**): 10 RF per berth of distance, burned. The bridge is a walkway over the water and lasts until either island moves. |
@@ -69,7 +75,7 @@ Controls: WASD / arrow keys or tap to walk; ＋/－ zoom; reduced-motion in More
 
 - **No saving.** The SDK sandbox has no storage and no save API; islands, positions,
   berths, bridges, access settings and approvals reset on reload.
-- **RF, saves, plot NFTs, docking, bridges, launches and claims are simulated** (see Economy).
+- **RF, saves, holes, docking, bridges, launches and claims are simulated** (see Economy).
 - **Neighbours are samples.** Until players share one world, the other plots are
   other holders' public, activated Friends read live from chain (#7153, #7174,
   #7843, #7096, #7333, #7834), labelled "sample". Their answers to visit requests,
@@ -93,7 +99,8 @@ pushes changes to connected players instead of polling.
 | Action | Cost | Where the RF goes |
 | --- | --- | --- |
 | Save an island arrangement (the core loop) | per Friend moved or deployed: Gen 1 100 · Gen 2 50 · Gen 3 20 · Gen 4 10 · Gen 5 5 · Gen 6 1 RF, plus gas | 100 % burned (`0x…dEaD`) |
-| Mint a plot (island) NFT | gas only (happens on an island's first save) | — |
+| Create an island on chain | gas only (happens on an island's first save; islands are not tokens) | — |
+| Fill a hole | the filling Friend's arrange fee (free if the Friend that left comes back) | 100 % burned |
 | Dock / move an island | gas only | — |
 | Build a bridge | 10 RF per berth of distance, plus gas | 100 % burned |
 | Launch a token | 1,000 RF | 500 burned (`0x…dEaD`), 500 to the treasury |
@@ -107,25 +114,30 @@ needs backing.
 
 **On-chain phase (written and tested, not deployed)** in `contracts/src/docks/`:
 
-- `DocksPlots.sol` — **every island is an ERC-721** ("The Docks Plot", `PLOT`) with fully
-  on-chain metadata (a map of its Friends).
-  - *Islands:* `mint(name)`; `arrange(plotId, ids, xs, ys)` saves positions on the island's
-    own cell grid for Friends you hold on an island you own (also deploys a Friend from
-    another of your islands) and **burns RF per Friend moved, by generation** (`FEE_GEN1…6`
-    = 100/50/20/10/5/1 RF; unchanged Friends free; batched); `arrangeCost` previews it;
+- `DocksIslands.sol` — islands are **not tokens**: `create(name)` records an island owned by
+  the calling wallet, with no transfer, approval or sale functions; the only NFTs are the
+  activated Friends.
+  - *Islands:* `arrange(islandId, ids, xs, ys)` saves positions on the island's own cell grid
+    for Friends you hold on an island you own (also deploys a Friend from another of your
+    islands) and **burns RF per Friend moved, by generation** (`FEE_GEN1…6` =
+    100/50/20/10/5/1 RF; unchanged Friends free; batched); `arrangeCost` previews it;
     `remove` is free. True-size footprints by generation; `adjacent` = two Friends of an
     island sharing part of an edge.
-  - *Docking (gas only):* one berth per island whatever its size; `dock(plotId, x, y)` at a
-    free berth next to a docked island (`isLoadingZone`), also to move; `undock`;
-    `plotAtBerth`; `connected(a, b)` = neighbouring berths or a live bridge.
+  - *Holes:* a Friend counts only while activated and held by the island's owner. If it
+    leaves (a Rare Friends transfer also clears activation) or is deactivated, `isHole`
+    reports its spot as a hole and its cells stay reserved. When the new holder places it
+    anywhere, the spot is **burned in** (`HoleBurned`, `holeOf`). The owner can
+    `fillHole(islandId, oldFriend, newFriend)` with an activated Friend of the **same
+    generation** (its arrange fee; free when the Friend that left fills its own hole). If
+    the Friend comes back before being placed elsewhere, the hole simply heals.
+  - *Docking (gas only):* one berth per island whatever its size; `dock(islandId, x, y)` at
+    a free berth next to a docked island (`isLoadingZone`), also to move; `undock`;
+    `islandAtBerth`; `connected(a, b)` = neighbouring berths or a live bridge.
   - *Bridges:* `buildBridge(from, to)` burns `BRIDGE_FEE_PER_BERTH` (10 RF) × berth
     distance; a bridge records both islands' berth epochs and ends when either moves.
-  - *Access & validity:* open / invite-only islands with approved visitors, set by the
-    NFT's owner. Ownership and activation are checked through the live activation
-    manager (`positions(generations, id)`); a Friend counts only while activated and held
-    by the island NFT's owner, so a sold Friend (or a deed sold alone) leaves a stale spot
-    anyone can `clear`. Friends are never escrowed: in Rare Friends a transfer clears
-    activation, so an island NFT can't carry its Friends with it.
+  - *Access:* open / invite-only islands with approved visitors, set by the island's owner.
+    Ownership and activation are checked through the live activation manager
+    (`positions(generations, id)`).
 - `DocksLaunchpad.sol` — launches come from a Friend on a saved, docked island; `LAUNCH_FEE = 1000 RF` split burn/treasury; `DocksToken`
   fixed-supply ERC-20; an airdrop pool sent in batches by the creator (`airdrop`,
   `endAirdrop`) and a claim pool claimed per Friend or in batches (`claimMany`, RF
@@ -133,9 +145,9 @@ needs backing.
   and one claim per Friend per launch; claim price burned; scopes as above. Batches
   keep 10,000-Friend plots practical (a client sends ~100 placements or claims per
   transaction).
-- Tests: `forge test --match-contract DocksTest` (30 unit tests: island NFTs, per-generation burn, only moved Friends charged, deploying between islands, loading zones, size-independent berths, bridge pricing and expiry, launch scopes over gangways and bridges, deed transfer, 300 Friends arranged and claimed in one transaction each) and
+- Tests: `forge test --match-contract DocksTest` (31 unit tests: islands are not tokens, per-generation burn, only moved Friends charged, deploying between islands, holes (reserved, healed on return, burned in when placed elsewhere, filled by same-size Friends), loading zones, size-independent berths, bridge pricing and expiry, launch scopes over gangways and bridges, 300 Friends arranged and claimed in one transaction each) and
   `FRIENDSDK_FORK_RPC=https://rpc.mainnet.chain.robinhood.com forge test --match-contract DocksForkTest`
-  (real Generations, activation manager and RF on a local fork: mints two islands, arranges
+  (real Generations, activation manager and RF on a local fork: creates two islands, arranges
   #67111 (burns 50 RF) and #7153, docks them side by side, launches, claims).
 
 Deployment, funding and production publication wait for Rare Friends review. The

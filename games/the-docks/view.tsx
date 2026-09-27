@@ -234,6 +234,19 @@ export function DocksView(props: Props) {
   useEffect(() => { props.onVisible(visible.map(v => v.pl)); }, [visible]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const boards = useMemo(() => visible.map(v => diamond(v.x, v.y, v.x + T(v.pl.m.cw), v.y + T(v.pl.m.ch))).join(""), [visible]);
+  const holes = useMemo(() => {
+    const out: { key: string; d: string; x: number; y: number; id: bigint }[] = [];
+    for (const plot of world.plots) {
+      const o = world.origin.get(plot); if (!o) continue;
+      for (const h of plot.holes ?? []) {
+        const x = o.x + T(h.x), y = o.y + T(h.y);
+        if (x + T(h.cw) < vis.x0 || x > vis.x1 || y + T(h.ch) < vis.y0 || y > vis.y1) continue;
+        const c = toScreen(x + T(h.cw) / 2, y + T(h.ch) / 2);
+        out.push({ key: `${plot.id}-${h.id}`, d: diamond(x, y, x + T(h.cw), y + T(h.ch)), x: c.x, y: c.y, id: h.id });
+      }
+    }
+    return out;
+  }, [world, version, vis]); // eslint-disable-line react-hooks/exhaustive-deps
   const walkways = useMemo(() => {
     const g: string[] = [], br: string[] = [];
     for (const [k, kind] of world.walk) {
@@ -267,7 +280,9 @@ export function DocksView(props: Props) {
   return <div className="docks-viewport" ref={viewport} onPointerDown={onPointer} aria-hidden="true">
     <div className="docks-layer" ref={layer}>
       <svg className="docks-seams" width="1" height="1" style={{ zIndex: 5 }}>
-        <path d={walkways.gangway} className="gangway" /><path d={walkways.bridge} className="bridge" /><path d={boards} className="pier" /></svg>
+        <path d={walkways.gangway} className="gangway" /><path d={walkways.bridge} className="bridge" /><path d={boards} className="pier" />
+        {holes.map(h => <path key={h.key} d={h.d} className="hole" />)}</svg>
+      {holes.map(h => <span key={h.key} className="docks-hole-tag" style={{ left: h.x, top: h.y, zIndex: 9 }}>hole · #{String(h.id)}</span>)}
       {visible.map(({ plot, pl, x, y }, i) => {
         const f = pl.m.friend, o = toScreen(x, y);
         if (!f) { const c = toScreen(x + T(pl.m.cw) / 2, y + T(pl.m.ch) / 2);

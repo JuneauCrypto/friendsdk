@@ -9,8 +9,8 @@ import { readOwnedLands } from "./roster.js";
 import {
   ARRANGE_FEE, BRIDGE_FEE_PER_BERTH, RANKS, addBridge, addToPlot, autoArrange, bridgeCost, canEnter, createWorld, deploy, disconnected,
   dockAt, loadingZones, member, memberOf, moveGroup, myPlots, neighboursOf, pendingChanges, plotOf, rankOf, rebuild,
-  refreshMember, removeFromPlot, swapInto, undock, weightOf,
-  type Access, type Berth, type Member, type Placed, type Plot, type Saved, type World,
+  refreshMember, removeFromPlot, swapInto, undock, weightOf, burnHole, fillHole, holesOf, feeOf,
+  type Access, type Berth, type Hole, type Member, type Placed, type Plot, type World,
 } from "./world.js";
 import { DocksView, spawnOn, type CrewMember, type ViewApi } from "./view.js";
 import { ChainMap } from "./chainmap.js";
@@ -61,9 +61,12 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const [form, setForm] = useState({ name: "", symbol: "", supply: "1000000", airdropScope: "plotAndNeighbours" as Scope | "none", airdropEach: "1000",
     claimScope: "anyDocked" as Scope, claimPool: "100000", claimEach: "500", claimPrice: "5" });
   const [launchError, setLaunchError] = useState("");
-  // On chain (simulated in this preview): plot NFTs and the last saved island layouts.
-  const [nfts, setNfts] = useState<Map<string, number>>(new Map());
-  const [saved, setSaved] = useState<Saved>(new Map());
+  // On chain (simulated in this preview): islands created on chain and their last saved layouts.
+  // Islands are not tokens: the only NFTs are the activated Friends.
+  const onChain = useRef<Map<string, number>>(new Map());
+  const savedRef = useRef<Map<bigint, { plot: string; x: number; y: number }>>(new Map());
+  const simGone = useRef<Set<bigint>>(new Set());               // preview: Friends "sent to another wallet"
+  const [sendId, setSendId] = useState("");
   const [saving, setSaving] = useState(false);
   const world = useRef<World | null>(null);
   const econ = useRef<Economy>(createEconomy());
@@ -99,7 +102,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         const home: Plot = { id: "me-1", name: "Your island", mine: true, access: "invite", friends: [{ m: walker, x: 0, y: 0 }], berth: null };
         plotSeq.current = 1;
         world.current = createWorld(samples.filter(s => s.friends.length), [home]);
-        econ.current = createEconomy(); setFollowing([]); setApprovedVisitors([]); setRequests([]); setNfts(new Map()); setSaved(new Map()); setIslandId("me-1");
+        econ.current = createEconomy(); setFollowing([]); setApprovedVisitors([]); setRequests([]); onChain.current = new Map(); savedRef.current = new Map(); simGone.current = new Set(); setIslandId("me-1");
         const market = world.current.plots.find(p => p.id === "s4" && p.friends.length);
         if (market) seedLaunch(econ.current, { name: "Market Coin", symbol: "MKT", supply: 1_000_000, creator: market, creatorFriend: market.friends[0].m.id,
           scope: "anyDocked", claimEach: 500, claimPrice: 5, claimRemaining: 50_000 });
@@ -123,7 +126,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     const w = world.current; if (!w) return [];
     setRoster(r => ({ ...r, state: "loading", done: 0, total: 0 }));
     try {
-      const lands = await readOwnedLands(owner.current, (done, total) => { if (v === epoch.current) setRoster({ state: "loading", done, total }); });
+      const lands = (await readOwnedLands(owner.current, (done, total) => { if (v === epoch.current) setRoster({ state: "loading", done, total }); }))
+        .filter(l => !simGone.current.has(l.id));
       if (v !== epoch.current || !world.current) return [];
       const have = new Map(myPlots(w).flatMap(p => p.friends.map(pl => [pl.m.id, pl] as const)));
       const held = new Map(lands.map(l => [l.id, l]));
@@ -138,10 +142,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         say(members.length > 1 ? `All ${members.length.toLocaleString()} of your activated Friends joined into one floating island. Open Docks to find a loading zone.`
           : "Your Friend is a floating island. Open Docks to find a loading zone next to the others.");
       } else {
-        for (const id of have.keys()) if (!held.has(id)) { removeFromPlot(w, id); changes.push(`#${id} left your wallet or was deactivated`); }
+        for (const id of have.keys()) if (!held.has(id)) changes.push(friendLeft(id));
         for (const l of held.values()) {
           const pl = have.get(l.id);
-          if (!pl) { addToPlot(w, home(), member(l.id, l.gen, l.tier)); changes.push(`#${l.id} joined your island`); }
+          if (!pl) changes.push(friendArrived(member(l.id, l.gen, l.tier)));
           else if (pl.m.tier !== l.tier) { changes.push(`#${l.id} tier ${pl.m.tier} → ${l.tier}`); pl.m.tier = l.tier; pl.m.friend = null; art.current.loaded.delete(l.id); }
         }
         if (changes.length) rebuild(w);
@@ -155,6 +159,48 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       if (first) say(`Couldn't list your other Friends automatically (${errText(e)}). Add them by number in My islands.`);
       return [];
     }
+  }
+
+  /** A Friend left the wallet (or was deactivated). Saved on an island: its spot burns into a hole. */
+  function friendLeft(id: bigint) {
+    const w = world.current!, s = savedRef.current.get(id);
+    setFollowing(f => f.filter(x => x !== id));
+    if (s) {
+      const r = burnHole(w, id); savedRef.current.delete(id);
+      return r ? `#${id} left your wallet: a hole opened on ${r.plot.name}` : `#${id} left your wallet`;
+    }
+    removeFromPlot(w, id); return `#${id} left your wallet`;
+  }
+  /** A Friend arrived. If it left a hole on one of my islands, it heals that hole for free. */
+  function friendArrived(m: Member) {
+    const w = world.current!, found = holesOf(w).find(x => x.plot.mine && x.hole.id === m.id);
+    if (found) {
+      fillHole(w, found.plot, found.hole, m);
+      savedRef.current.set(m.id, { plot: found.plot.id, x: found.hole.x, y: found.hole.y });
+      return `#${m.id} came back and healed its hole on ${found.plot.name}`;
+    }
+    addToPlot(w, home(), m); return `#${m.id} joined your island`;
+  }
+  /** Fill a hole with an activated Friend of the same generation: its own Friend is free, any other pays its arrange fee. */
+  function doFillHole(p: Plot, h: Hole, id: bigint) {
+    const w = world.current!, pl = myPlots(w).flatMap(q => q.friends).find(x => x.m.id === id);
+    if (!pl) return;
+    const cost = id === h.id ? 0 : feeOf(pl.m);
+    if (econ.current.rf < cost) { say(`Filling this hole burns ${cost} RF; you have ${fmt(econ.current.rf)}.`); return; }
+    if (!fillHole(w, p, h, pl.m)) { say("Holes can only be filled by a Friend of the same generation."); return; }
+    econ.current.rf -= cost; econ.current.burned += cost;
+    savedRef.current.set(id, { plot: p.id, x: h.x, y: h.y });
+    bump(); say(`Hole on ${p.name} filled with #${id} (simulated)${cost ? `: ${cost} RF burned` : ": free"} + gas.`);
+  }
+  /** Preview only: pretend a Friend was sent to another wallet (or brought back), to see what happens. */
+  function previewSend(id: bigint) {
+    if (id === friendId) return;
+    simGone.current.add(id); say(friendLeft(id)); bump();
+  }
+  function previewReturn(id: bigint) {
+    const w = world.current!; simGone.current.delete(id);
+    const gen = holesOf(w).find(x => x.hole.id === id)?.hole.gen ?? 6;
+    say(friendArrived(member(id, gen, 0))); bump();
   }
 
   /* ── lazy on-chain art for Friends near the camera ── */
@@ -183,8 +229,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         bump();
       }).catch(e => {
         if ((e as { inactive?: boolean }).inactive && world.current) {
-          removeFromPlot(world.current, m.id);
-          say(`#${m.id} was deactivated and left the docks.`); bump();
+          const mineToo = myPlots(world.current).some(q => q.friends.some(x => x.m === m));
+          if (mineToo) say(friendLeft(m.id).replace("left your wallet", "was deactivated"));
+          else { removeFromPlot(world.current, m.id); say(`#${m.id} was deactivated and left the docks.`); }
+          bump();
         }
       }).finally(() => { a.inflight.delete(m.id); pump(); });
     }
@@ -208,7 +256,9 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         } catch (e) {
           if ((e as { inactive?: boolean }).inactive) {
             if (m.id === friendId) { changes.push(`#${m.id} was deactivated`); continue; }
-            removeFromPlot(w, m.id); art.current.loaded.delete(m.id); changes.push(`#${m.id} was deactivated and left the docks`);
+            const mineToo = myPlots(w).some(q => q.friends.some(x => x.m === m));
+            art.current.loaded.delete(m.id);
+            changes.push(mineToo ? friendLeft(m.id).replace("left your wallet", "was deactivated") : (removeFromPlot(w, m.id), `#${m.id} was deactivated and left the docks`));
           }
         }
       }
@@ -286,7 +336,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     if (!target) return;
     const from = plotOf(w, id);
     deploy(w, id, target);
-    if (from && !from.friends.length && from.id !== "me-1" && !nfts.has(from.id)) { w.plots = w.plots.filter(p => p !== from); rebuild(w); }
+    if (from && !from.friends.length && from.id !== "me-1" && !onChain.current.has(from.id)) { w.plots = w.plots.filter(p => p !== from); rebuild(w); }
     bump(); say(`#${id} deployed to ${target.name}. Save on chain to make it official.`);
   }
   function startArranging() {
@@ -318,29 +368,29 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     }
     setArranging(false); setSelected(null); goTo(home()); bump();
   }
-  /** Save every changed island on chain (simulated): mint plot NFTs as needed, burn RF per Friend moved. */
+  /** Save every changed island on chain (simulated): create islands as needed, burn RF per Friend moved. */
   async function saveOnChain() {
     const w = world.current!;
     for (const p of myPlots(w)) {
       const loose = disconnected(w, p);
       if (loose.length) { setIslandId(p.id); setArranging(true); setSelected(loose[0]); say(`Can't save yet: on ${p.name}, ${loose.length.toLocaleString()} Friend${loose.length === 1 ? " doesn't" : "s don't"} touch the rest.`); return; }
     }
-    const c = pendingChanges(w, saved);
+    const c = pendingChanges(w, savedRef.current);
     if (!c.moved.length && !c.gone.length) { say("Nothing to save: your islands match the chain."); return; }
     if (econ.current.rf < c.rf) { say(`Saving burns ${fmt(c.rf)} RF; you have ${fmt(econ.current.rf)}.`); return; }
     setSaving(true);
     await new Promise(r => setTimeout(r, 900));               // stands in for wallet confirmation + receipt
-    const next = new Map(nfts); const minted: number[] = [];
-    for (const p of myPlots(w)) if (p.friends.length && !next.has(p.id)) { const n = 1 + Math.floor(Math.random() * 900); next.set(p.id, n); minted.push(n); }
-    setNfts(next);
+    const minted: number[] = [];
+    for (const p of myPlots(w)) if (p.friends.length && !onChain.current.has(p.id)) { const n = 1 + Math.floor(Math.random() * 900); onChain.current.set(p.id, n); minted.push(n); }
     econ.current.rf -= c.rf; econ.current.burned += c.rf;
-    setSaved(new Map(myPlots(w).flatMap(p => p.friends.map(pl => [pl.m.id, { plot: p.id, x: pl.x, y: pl.y }] as const))));
+    savedRef.current = new Map(myPlots(w).flatMap(p => p.friends.map(pl => [pl.m.id, { plot: p.id, x: pl.x, y: pl.y }] as const)));
     setSaving(false); setArranging(false); setSelected(null);
     const txs = Math.max(1, c.plots.length, Math.ceil(c.moved.length / 100));
-    say(`Saved on chain (simulated)${minted.length ? `: minted Plot #${minted.join(", #")}` : ""} · ${c.moved.length.toLocaleString()} Friend${c.moved.length === 1 ? "" : "s"} moved · ${fmt(c.rf)} RF burned · ${txs} transaction${txs === 1 ? "" : "s"} + gas.`);
+    say(`Saved on chain (simulated)${minted.length ? `: created Island #${minted.join(", #")} on chain` : ""} · ${c.moved.length.toLocaleString()} Friend${c.moved.length === 1 ? "" : "s"} moved · ${fmt(c.rf)} RF burned · ${txs} transaction${txs === 1 ? "" : "s"} + gas.`);
   }
   function discardChanges() {
     const w = world.current!;
+    const saved = savedRef.current;
     if (!saved.size) { reArrange(); return; }
     const mine = myPlots(w), byId = new Map(mine.map(p => [p.id, p]));
     const all = mine.flatMap(p => p.friends);
@@ -388,7 +438,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   };
   function doLaunch() {
     const w = world.current!, h = home(); setLaunchError("");
-    if (!nfts.has(h.id) || saved.get(friendId)?.plot !== h.id) { setLaunchError("Save your island on chain first (Arrange → Save): launches come from a Friend on a saved island."); return; }
+    if (!onChain.current.has(h.id) || savedRef.current.get(friendId)?.plot !== h.id) { setLaunchError("Save your island on chain first (Arrange → Save): launches come from a Friend on a saved island."); return; }
     const n = (v: string) => Number(v.replace(/[,_\s]/g, "")) || 0;
     try {
       const l = launch(econ.current, w, { name: form.name, symbol: form.symbol, supply: n(form.supply), creator: h, creatorFriend: friendId,
@@ -410,6 +460,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
 
   const w = world.current, mine = myPlots(w), isl = island(), h = home(), homeRank = rankOf(h);
   const allMine = mine.flatMap(p => p.friends);
+  const saved = savedRef.current;
   const pending = pendingChanges(w, saved), dirty = pending.moved.length > 0 || pending.gone.length > 0;
   const uiBlocked = Boolean(menu) || paused;
   const label = sprites ? `${sprites.familyName} #${friendId}` : `Friend #${friendId}`;
@@ -418,11 +469,11 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const byGen = [1, 2, 3, 4, 5, 6].map(g => [g, isl.friends.filter(p => p.m.gen === g).length] as const).filter(([, n]) => n);
   const rosterNote = roster.state === "loading" ? (roster.total ? `finding your Friends ${roster.done.toLocaleString()} / ${roster.total.toLocaleString()}` : "finding your Friends…")
     : roster.state === "error" ? "couldn't list your Friends" : "";
-  const nftOf = (p: Plot) => nfts.get(p.id);
+  const nftOf = (p: Plot) => onChain.current.get(p.id);
   const zones = menu === "docks" ? loadingZones(w, isl) : [];
   const islandTabs = mine.length > 1 && <div className="docks-plots" role="tablist" aria-label="Your islands">
     {mine.map(p => <button type="button" key={p.id} role="tab" aria-pressed={p === isl} onClick={() => setIslandId(p.id)}>
-      {p.name}{nftOf(p) ? ` · #${nftOf(p)}` : ""} · {p.friends.length.toLocaleString()}{p.berth ? "" : " · floating"}</button>)}</div>;
+       {p.name} · {p.friends.length.toLocaleString()}{p.berth ? "" : " · floating"}</button>)}</div>;
 
   return <section className="docks" aria-label={definition.name}>
     <DocksView world={w} version={w.version} sprites={sprites} walkerId={friendId} zoom={zoom} paused={uiBlocked} reducedMotion={reducedMotion}
@@ -433,7 +484,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     <div className="docks-hud" inert={uiBlocked || undefined}>
       <div className="docks-card">
         <strong>{label}</strong>
-        <small>{h.name}{nftOf(h) ? ` · Plot #${nftOf(h)} (NFT)` : " · not on chain yet"}{dirty ? ` · ${pending.moved.length.toLocaleString()} unsaved move${pending.moved.length === 1 ? "" : "s"}` : nftOf(h) ? " · saved" : ""}</small>
+        <small>{h.name}{nftOf(h) ? ` · Island #${nftOf(h)} on chain` : " · not on chain yet"}{dirty ? ` · ${pending.moved.length.toLocaleString()} unsaved move${pending.moved.length === 1 ? "" : "s"}` : nftOf(h) ? " · saved" : ""}</small>
         <small>{h.friends.length.toLocaleString()} Friend{h.friends.length === 1 ? "" : "s"} · {homeRank.rank} · weight {fmtW(homeRank.weight)}{mine.length > 1 ? ` · ${mine.length} islands` : ""}</small>
         <small>{h.berth ? `Docked · ${neighboursOf(w, h).length} connected` : "Floating free"} · {h.access === "open" ? "Open to visitors" : "Invite only"}{rosterNote ? ` · ${rosterNote}` : ""}</small>
       </div>
@@ -461,14 +512,14 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <small>{dirty ? `${pending.moved.length.toLocaleString()} moved · burns ${fmt(pending.rf)} RF + gas` : "Matches the chain"}</small>
         <div className="docks-row tight">
           <button type="button" onClick={finishArranging}>Done</button>
-          <button type="button" className="rf-frame-primary" disabled={!dirty || saving} onClick={() => void saveOnChain()}>{saving ? "Saving…" : nftOf(isl) ? "⛓ Save on chain" : "⛓ Mint plot + save"}</button>
+          <button type="button" className="rf-frame-primary" disabled={!dirty || saving} onClick={() => void saveOnChain()}>{saving ? "Saving…" : nftOf(isl) ? "⛓ Save on chain" : "⛓ Save on chain"}</button>
         </div>
       </div>
     </div> : <div className="docks-bar" inert={uiBlocked || undefined}>
       {gate && !canEnter(w, gate) ? <button type="button" className="docks-act ready" disabled={visit === "pending"} onClick={() => askToVisit(gate)}>
         {visit === "pending" ? `Waiting for ${gate.name}…` : visit === "declined" ? `${gate.name} declined · ask again` : `Ask to visit ${gate.name}`}</button>
         : dirty ? <div className="docks-row tight docks-unsaved">
-          <button type="button" className="docks-act" disabled={saving} onClick={() => void saveOnChain()}>{saving ? "Saving…" : `⛓ ${[...pending.plots].some(p => !nftOf(p)) ? "Mint plot + save" : "Save"} · ${pending.moved.length.toLocaleString()} moved · ${fmt(pending.rf)} RF`}</button>
+          <button type="button" className="docks-act" disabled={saving} onClick={() => void saveOnChain()}>{saving ? "Saving…" : `⛓ ${[...pending.plots].some(p => !nftOf(p)) ? "Save" : "Save"} · ${pending.moved.length.toLocaleString()} moved · ${fmt(pending.rf)} RF`}</button>
           {saved.size > 0 && <button type="button" onClick={discardChanges}>Undo</button>}</div>
         : <span className="docks-hint">WASD / arrows or tap to walk · gangways (⇄) join docked islands</span>}
       <div className="docks-nav">
@@ -485,15 +536,15 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
 
     {menu && <GameMenu onClose={() => setMenu(null)} title={menu === "plot" ? "My islands" : menu === "docks" ? "The Docks" : menu === "tokens" ? "Tokens" : menu === "help" ? "How it works" : "Settings"}>
       {menu === "plot" ? <>
-        <p>Every activated Friend is a small floating island; joined together they make one big island. Every activated Friend in your wallet is here automatically, exactly as it renders on chain. Keep them together, or deploy them to other islands. Each island is an NFT.</p>
+        <p>Every activated Friend is a small floating island; joined together they make one big island. Every activated Friend in your wallet is here automatically, exactly as it renders on chain. Keep them together, or deploy them to other islands. Islands belong to your wallet and can't be sold: the only NFTs are your Friends.</p>
         {islandTabs}
         <div className="docks-item"><span><strong>{isl.name} · {isl.friends.length.toLocaleString()} Friends · {rankOf(isl).rank}</strong>
           <small>Reward weight {fmtW(rankOf(isl).weight)}{rankOf(isl).next ? ` · ${fmtW(rankOf(isl).next)} to ${RANKS[rankOf(isl).index + 1].name}` : ""}{byGen.length ? ` · ${byGen.map(([g, n]) => `${n.toLocaleString()}× Gen ${g}`).join(" · ")}` : ""}</small>
           {rosterNote && <small>{rosterNote}{roster.error ? `: ${roster.error}` : ""}</small>}</span></div>
-        <div className="docks-item"><span><strong>⛓ {nftOf(isl) ? `Plot #${nftOf(isl)} · an NFT you own` : "Not on chain yet"}</strong>
+        <div className="docks-item"><span><strong>⛓ {nftOf(isl) ? `Island #${nftOf(isl)} · saved on chain to your wallet` : "Not on chain yet"}</strong>
           <small>{dirty ? `${pending.moved.length.toLocaleString()} Friend${pending.moved.length === 1 ? "" : "s"} moved since the last save · saving burns ${fmt(pending.rf)} RF + gas` : "Your islands match the chain."}</small>
           <small>Saving burns RF for each Friend whose spot on its island changed: {Object.entries(ARRANGE_FEE).map(([g, f]) => `Gen ${g} ${f}`).join(" · ")} RF. Docking and moving islands cost only gas.<span className="docks-sim">SIMULATED</span></small></span>
-          <button type="button" className="rf-frame-primary" disabled={!dirty || saving} onClick={() => { setMenu(null); void saveOnChain(); }}>{nftOf(isl) ? "Save" : "Mint + save"}</button></div>
+          <button type="button" className="rf-frame-primary" disabled={!dirty || saving} onClick={() => { setMenu(null); void saveOnChain(); }}>Save</button></div>
         <div className="docks-row">
           <button type="button" onClick={startArranging} disabled={!isl.friends.length}>✥ Arrange</button>
           {isl.friends.length > 1 && <button type="button" onClick={reArrange}>▦ Auto-arrange</button>}
@@ -505,6 +556,13 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           return <div className="docks-item" key={id}><span><strong>{p.name}</strong><small>sample neighbour · simulated request</small></span>
             <span className="docks-row tight"><button type="button" onClick={() => { setRequests(r => r.filter(x => x !== id)); setApprovedVisitors(a => [...a, id]); say(`You let ${p.name} in.`); }}>Approve</button>
               <button type="button" onClick={() => { setRequests(r => r.filter(x => x !== id)); say(`You declined ${p.name}.`); }}>Decline</button></span></div>; })}</>}
+        {(isl.holes ?? []).length > 0 && <><h3>Holes on {isl.name}</h3>
+          <p className="docks-note">A saved Friend left your wallet or was deactivated, so its spot is a hole. It heals for free if that Friend comes back; or fill it with another activated Friend of the same generation (normal arrange fee).</p>
+          {(isl.holes ?? []).map(hl => { const same = mine.flatMap(q => q.friends).filter(x => x.m.gen === hl.gen);
+            return <div className="docks-item docks-hole" key={String(hl.id)}><span><strong>Hole where #{String(hl.id)} was · Gen {hl.gen}</strong>
+              <small>{same.length ? `${same.length} Gen ${hl.gen} Friend${same.length === 1 ? "" : "s"} could fill it` : `No Gen ${hl.gen} Friend to fill it right now`}</small></span>
+              {same.length > 0 && <select aria-label={`Fill hole of #${hl.id}`} value="" onChange={e => { if (e.target.value) doFillHole(isl, hl, BigInt(e.target.value)); }}>
+                <option value="">Fill with…</option>{same.slice(0, 200).map(x => <option key={String(x.m.id)} value={String(x.m.id)}>#{String(x.m.id)} · {x.m.id === hl.id ? "free" : `${feeOf(x.m)} RF`}</option>)}</select>}</div>; })}</>}
         <h3>Friends on {isl.name} <small className="docks-note">· {crew.length} walking with you (up to {MAX_FOLLOWING})</small></h3>
         {!isl.friends.length && <p className="docks-note">No Friends here yet. Deploy some from another island's list.</p>}
         <div className="docks-list">
@@ -582,7 +640,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           return totals.size ? [...totals].map(([sym, t]) => <div className="docks-item" key={sym}><span><strong>{fmt(t.sum)} ${sym}</strong><small>across {t.holders.toLocaleString()} Friend wallet{t.holders === 1 ? "" : "s"}</small></span></div>)
             : <p className="docks-note">Empty so far.</p>; })()}
       </> : menu === "help" ? <ul className="docks-help">
-        <li><strong>Islands:</strong> every activated Friend is a small floating island; joined, they make one big island. Every activated Friend in your wallet joins automatically, from 1 to 10,000+. Keep them together or deploy them to more islands (＋ New island). Each island is an NFT.</li>
+        <li><strong>Islands:</strong> every activated Friend is a small floating island; joined, they make one big island. Every activated Friend in your wallet joins automatically, from 1 to 10,000+. Keep them together or deploy them to more islands (＋ New island). Islands are saved to your wallet and can't be sold; the only NFTs are your Friends.</li>
+        <li><strong>Holes:</strong> if a saved Friend leaves your wallet (sending it clears its activation) or is deactivated, its spot becomes a hole in the island. The hole stays until that Friend comes back (it heals for free) or you fill it with another activated Friend of the same generation (normal arrange fee).</li>
         <li><strong>Arranging is the game:</strong> Arrange → tap a Friend, move it; each must touch another along part of a side. Save on chain burns RF for every Friend whose spot changed ({Object.entries(ARRANGE_FEE).map(([g, f]) => `Gen ${g}: ${f}`).join(", ")}), plus gas. Unmoved Friends are free; Undo returns to your last save.</li>
         <li><strong>Dock:</strong> Docks → pick a loading zone next to another island. Every island takes one berth whatever its size, so how far you can roam depends on how many islands there are. Docking and moving cost only gas. Neighbours are joined by a gangway.</li>
         <li><strong>Bridges:</strong> can't dock next to an island? Build a bridge to it: {BRIDGE_FEE_PER_BERTH} RF per berth of distance, burned. It lasts until either island moves.</li>
@@ -594,6 +653,12 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       </ul> : <>
         <div className="docks-row"><button type="button" onClick={() => setMenu("help")}>❓ How it works</button></div>
         <label><input type="checkbox" checked={reducedMotion} onChange={e => setReducedMotion(e.target.checked)} /> Reduce motion</label>
+        <h3>Preview: a Friend leaves your wallet</h3>
+        <p className="docks-note">See what happens when a saved Friend is sent to another wallet (which also clears its activation). Nothing is sent: this only changes the preview.</p>
+        <div className="docks-row"><select aria-label="Friend to send away" value={sendId} onChange={e => setSendId(e.target.value)}>
+          <option value="">Pick a Friend…</option>{allMine.filter(x => x.m.id !== friendId).slice(0, 200).map(x => <option key={String(x.m.id)} value={String(x.m.id)}>#{String(x.m.id)}{saved.has(x.m.id) ? " · saved" : " · not saved"}</option>)}</select>
+          <button type="button" disabled={!sendId} onClick={() => { previewSend(BigInt(sendId)); setSendId(""); setMenu(null); }}>Send away</button></div>
+        {simGone.current.size > 0 && <div className="docks-row">{[...simGone.current].map(id => <button type="button" key={String(id)} onClick={() => { previewReturn(id); setMenu(null); }}>Bring #{String(id)} back</button>)}</div>}
         <p className="docks-note">Last on-chain check: {lastCheck ? lastCheck.toLocaleTimeString() : "—"}. Wallet connection and ownership of #{String(friendId)} are verified by FriendSDK. Docks: {w.berths.size} islands on {w.cols.length} × {w.rows.length} berths.</p>
       </>}
     </GameMenu>}

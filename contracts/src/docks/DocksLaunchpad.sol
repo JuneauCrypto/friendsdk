@@ -5,9 +5,9 @@ import { IERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.
 import { ERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
 import { SafeERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import { ReentrancyGuard } from "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
-import { DocksPlots, IDocksGenerations } from "./DocksPlots.sol";
+import { DocksIslands, IDocksGenerations } from "./DocksIslands.sol";
 
-/// @notice Fixed-supply token launched from a plot. No owner, no minting after launch.
+/// @notice Fixed-supply token launched from an island. No owner, no minting after launch.
 contract DocksToken is ERC20 {
     constructor(string memory name_, string memory symbol_, uint256 supply)
         ERC20(name_, symbol_)
@@ -16,18 +16,18 @@ contract DocksToken is ERC20 {
     }
 }
 
-/// @notice Launch a token from your plot (an NFT on DocksPlots) for 1,000 RF (half burned, half to the treasury),
+/// @notice Launch a token from your island (DocksIslands) for 1,000 RF (half burned, half to the treasury),
 /// airdrop it into Friend wallets and/or open a claim pool. Every claim costs the launch's
 /// RF claim price, which is burned. Tokens always land in the Friend's own wallet.
 /// @dev Airdrops and claims are sent in batches (`airdrop`, `claimMany`) so they scale to
-/// plots and docks of any size; eligibility is checked per Friend when each batch lands.
+/// islands and docks of any size; eligibility is checked per Friend when each batch lands.
 contract DocksLaunchpad is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     enum Scope {
         AnyDocked,
-        HolderPlot,
-        PlotAndNeighbours,
+        HolderIsland,
+        IslandAndNeighbours,
         Visitors
     }
 
@@ -35,7 +35,7 @@ contract DocksLaunchpad is ReentrancyGuard {
         DocksToken token;
         address creator;
         uint256 creatorFriendId;
-        uint256 creatorPlotId;
+        uint256 creatorIslandId;
         Scope scope;
         uint256 claimEach;
         uint256 claimPrice;
@@ -84,7 +84,7 @@ contract DocksLaunchpad is ReentrancyGuard {
     event Claimed(uint256 indexed launchId, uint256 indexed friendId, uint256 amount, uint256 rfBurned);
 
     IERC20 public immutable rf;
-    DocksPlots public immutable registry;
+    DocksIslands public immutable registry;
     IDocksGenerations public immutable generations;
     address public immutable treasury;
 
@@ -92,7 +92,7 @@ contract DocksLaunchpad is ReentrancyGuard {
     mapping(uint256 launchId => mapping(uint256 friendId => bool)) public claimed;
     mapping(uint256 launchId => mapping(uint256 friendId => bool)) public airdropped;
 
-    constructor(IERC20 rf_, DocksPlots registry_, address treasury_) {
+    constructor(IERC20 rf_, DocksIslands registry_, address treasury_) {
         rf = rf_;
         registry = registry_;
         generations = registry_.generations();
@@ -102,7 +102,7 @@ contract DocksLaunchpad is ReentrancyGuard {
     function launch(LaunchParams calldata p) external nonReentrant returns (uint256 launchId) {
         if (!_controls(msg.sender, p.creatorFriendId)) revert NotHolder();
         if (!registry.isValid(p.creatorFriendId)) revert NotDocked();
-        (,, bool docked,) = registry.berthOf(registry.plotOf(p.creatorFriendId));
+        (,, bool docked,) = registry.berthOf(registry.islandOf(p.creatorFriendId));
         if (!docked) revert NotDocked();
         if (p.supply == 0 || p.airdropPool + p.claimPool > p.supply) revert BadAllocation();
         if ((p.claimPool == 0) != (p.claimEach == 0) || p.claimEach > p.claimPool) {
@@ -123,7 +123,7 @@ contract DocksLaunchpad is ReentrancyGuard {
                 token,
                 creator,
                 p.creatorFriendId,
-                registry.plotOf(p.creatorFriendId),
+                registry.islandOf(p.creatorFriendId),
                 p.scope,
                 p.claimEach,
                 p.claimPrice,
@@ -219,13 +219,13 @@ contract DocksLaunchpad is ReentrancyGuard {
     /// and every island docked next to it or bridged to it · visitors allowed onto it.
     function _eligible(Launch storage l, Scope scope, uint256 friendId) private view returns (bool) {
         if (!registry.isValid(friendId)) return false;
-        uint256 plot = registry.plotOf(friendId);
-        if (plot == l.creatorPlotId) return true;
-        (,, bool docked,) = registry.berthOf(plot);
-        if (!docked || scope == Scope.HolderPlot) return false;
+        uint256 island = registry.islandOf(friendId);
+        if (island == l.creatorIslandId) return true;
+        (,, bool docked,) = registry.berthOf(island);
+        if (!docked || scope == Scope.HolderIsland) return false;
         if (scope == Scope.AnyDocked) return true;
-        if (scope == Scope.PlotAndNeighbours) return registry.connected(plot, l.creatorPlotId);
-        return registry.canVisit(l.creatorPlotId, generations.ownerOf(friendId));
+        if (scope == Scope.IslandAndNeighbours) return registry.connected(island, l.creatorIslandId);
+        return registry.canVisit(l.creatorIslandId, generations.ownerOf(friendId));
     }
 
     function launchCount() external view returns (uint256) {

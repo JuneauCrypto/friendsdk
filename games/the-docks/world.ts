@@ -1,9 +1,11 @@
 /* The Docks — pure logic, no rendering. Floating islands made of activated Friends.
  *
- * - Every Friend is a small floating island. A plot is an island made of Friends joined
- *   together, laid out on the plot's own grid of 4 × 4-tile cells (true size by generation).
- *   Each Friend must touch another along part of a side. A holder can deploy their Friends
- *   across several plots; every plot is an NFT (DocksPlots).
+ * - Every Friend is a small floating island. An island is made of Friends joined together,
+ *   laid out on its own grid of 4 × 4-tile cells (true size by generation). Each Friend must
+ *   touch another along part of a side. A holder can deploy their Friends across several
+ *   islands. Islands are not tokens: the only NFTs are the activated Friends (DocksIslands).
+ * - If a saved Friend leaves the wallet (or is deactivated), its spot becomes a hole: reserved
+ *   until the Friend returns, or filled with another activated Friend of the same size.
  * - Islands float on one shared berth grid: one island per berth, whatever its size, so the
  *   world grows with the number of plots, not their size. An island docks at a free berth
  *   next to another island (a loading zone). Neighbouring islands are joined by a gangway.
@@ -37,9 +39,12 @@ export const memberOf = (f: Friend) => member(f.tokenId, Number(f.traits.Generat
 export type Access = "open" | "invite";
 export type Placed = { m: Member; x: number; y: number };        // cell position on its island's own grid
 export type Berth = { x: number; y: number };
+/** A spot left by a saved Friend that left the wallet or was deactivated. */
+export type Hole = { id: bigint; gen: number; cw: number; ch: number; x: number; y: number };
 export type Plot = {
   id: string; name: string; mine: boolean; access: Access;
   friends: Placed[];
+  holes?: Hole[];
   berth: Berth | null;                                             // null: floating free, not docked
   policy?: "approve" | "decline";                                  // sample neighbours' simulated answer
 };
@@ -49,6 +54,7 @@ export type Box = { x0: number; y0: number; x1: number; y1: number };
 export type World = {
   plots: Plot[]; visits: Map<string, Visit>; version: number; bridges: Bridge[];
   occ: Map<Plot, Map<number, Placed>>;                             // island cell → Friend
+  holeOcc: Map<Plot, Map<number, Hole>>;                           // island cell → hole
   berths: Map<number, Plot>;
   origin: Map<Plot, { x: number; y: number }>;                     // world tile of the island's cell (0, 0)
   box: Map<Plot, Box>;                                             // island bounds, world tiles
@@ -66,17 +72,19 @@ export const plotOf = (w: World, id: bigint) => w.plots.find(p => p.friends.some
 /* ── building the world ── */
 
 export function emptyWorld(): World {
-  return { plots: [], visits: new Map(), version: 0, bridges: [], occ: new Map(), berths: new Map(), origin: new Map(), box: new Map(), cols: [], rows: [], walk: new Map() };
+  return { plots: [], visits: new Map(), version: 0, bridges: [], occ: new Map(), holeOcc: new Map(), berths: new Map(), origin: new Map(), box: new Map(), cols: [], rows: [], walk: new Map() };
 }
 
 export function rebuild(w: World) {
-  w.occ = new Map(); w.berths = new Map();
+  w.occ = new Map(); w.holeOcc = new Map(); w.berths = new Map();
   for (const p of w.plots) {
-    const m = new Map<number, Placed>();
+    const m = new Map<number, Placed>(), hm = new Map<number, Hole>();
     for (const pl of p.friends) for (let j = 0; j < pl.m.ch; j++) for (let i = 0; i < pl.m.cw; i++) m.set(ck(pl.x + i, pl.y + j), pl);
-    w.occ.set(p, m);
-    if (p.berth && p.friends.length) w.berths.set(ck(p.berth.x, p.berth.y), p);
-    else if (p.berth && !p.friends.length) p.berth = null;
+    for (const h of p.holes ?? []) for (let j = 0; j < h.ch; j++) for (let i = 0; i < h.cw; i++) hm.set(ck(h.x + i, h.y + j), h);
+    w.occ.set(p, m); w.holeOcc.set(p, hm);
+    const hasShape = p.friends.length > 0 || (p.holes?.length ?? 0) > 0;
+    if (p.berth && hasShape) w.berths.set(ck(p.berth.x, p.berth.y), p);
+    else if (p.berth) p.berth = null;
   }
   w.bridges = w.bridges.filter(b => b.a.berth && b.b.berth && same(b.a.berth, b.at[0]) && same(b.b.berth, b.at[1]));
   layout(w);
@@ -87,7 +95,7 @@ const same = (a: Berth, b: Berth) => a.x === b.x && a.y === b.y;
 /** Berths become a table: each column as wide as its widest island, each row as tall as its
  *  tallest, with water between. Islands sit centred in their berth. */
 function layout(w: World) {
-  const docked = w.plots.filter(p => p.berth && p.friends.length);
+  const docked = w.plots.filter(p => p.berth && (p.friends.length || p.holes?.length));
   const colW = new Map<number, number>(), rowH = new Map<number, number>();
   for (const p of docked) {
     const b = plotBounds(p), bx = p.berth!.x, by = p.berth!.y;
@@ -112,7 +120,7 @@ function layout(w: World) {
   }
   // islands floating free (mine, not docked yet) drift just below the docks
   let fx = 0; const fy = (w.rows.at(-1)?.y1 ?? 0) + GAP * 2;
-  for (const p of w.plots) if (!p.berth && p.friends.length) {
+  for (const p of w.plots) if (!p.berth && (p.friends.length || p.holes?.length)) {
     const b = plotBounds(p), wT = T(b.x1 - b.x0), hT = T(b.y1 - b.y0);
     place(p, fx, fy, wT, hT); fx += wT + GAP * 2;
   }
@@ -168,24 +176,32 @@ function* edgeCells(pl: Placed): Generator<[number, number]> {
 }
 /** Friends not joined to the first one (each must touch another along part of a side). */
 export function disconnected(w: World, p: Plot): Placed[] {
-  if (p.friends.length < 2) return [];
-  const occ = w.occ.get(p)!, seen = new Set<Placed>([p.friends[0]]), queue = [p.friends[0]];
-  while (queue.length) {
+  if (p.friends.length + (p.holes?.length ?? 0) < 2 || !p.friends.length) return [];
+  const occ = w.occ.get(p)!, hocc = w.holeOcc.get(p)!;
+  const asPlaced = (h: Hole): Placed => ({ m: { id: h.id, gen: h.gen, tier: 0, cw: h.cw, ch: h.ch, friend: null }, x: h.x, y: h.y });
+  const holeNode = new Map((p.holes ?? []).map(h => [h, asPlaced(h)]));
+  const seen = new Set<Placed>([p.friends[0]]), queue = [p.friends[0]];
+  while (queue.length) {                               // holes still belong to the island's shape
     const pl = queue.pop()!;
-    for (const [nx, ny] of edgeCells(pl)) { const o = occ.get(ck(nx, ny)); if (o && !seen.has(o)) { seen.add(o); queue.push(o); } }
+    for (const [nx, ny] of edgeCells(pl)) {
+      const k = ck(nx, ny), o = occ.get(k) ?? (hocc.get(k) && holeNode.get(hocc.get(k)!));
+      if (o && !seen.has(o)) { seen.add(o); queue.push(o); }
+    }
   }
   return p.friends.filter(pl => !seen.has(pl));
 }
 export function plotBounds(p: Plot): Box {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (const pl of p.friends) { x0 = Math.min(x0, pl.x); y0 = Math.min(y0, pl.y); x1 = Math.max(x1, pl.x + pl.m.cw); y1 = Math.max(y1, pl.y + pl.m.ch); }
-  return p.friends.length ? { x0, y0, x1, y1 } : { x0: 0, y0: 0, x1: 1, y1: 1 };
+  const rects = [...p.friends.map(pl => ({ x: pl.x, y: pl.y, w: pl.m.cw, h: pl.m.ch })), ...(p.holes ?? []).map(h => ({ x: h.x, y: h.y, w: h.cw, h: h.ch }))];
+  for (const r of rects) { x0 = Math.min(x0, r.x); y0 = Math.min(y0, r.y); x1 = Math.max(x1, r.x + r.w); y1 = Math.max(y1, r.y + r.h); }
+  return rects.length ? { x0, y0, x1, y1 } : { x0: 0, y0: 0, x1: 1, y1: 1 };
 }
+const blocked = (w: World, p: Plot, x: number, y: number) => w.holeOcc.get(p)?.has(ck(x, y)) ?? false;
 export function moveGroup(w: World, p: Plot, group: Placed[], dx: number, dy: number) {
   if (!group.length) return false;
   const occ = w.occ.get(p)!, inGroup = new Set(group);
   for (const pl of group) for (let j = 0; j < pl.m.ch; j++) for (let i = 0; i < pl.m.cw; i++) {
-    const o = occ.get(ck(pl.x + dx + i, pl.y + dy + j)); if (o && !inGroup.has(o)) return false;
+    const o = occ.get(ck(pl.x + dx + i, pl.y + dy + j)); if ((o && !inGroup.has(o)) || blocked(w, p, pl.x + dx + i, pl.y + dy + j)) return false;
   }
   for (const pl of group) { pl.x += dx; pl.y += dy; }
   rebuild(w); return true;
@@ -200,14 +216,14 @@ export function swapInto(w: World, p: Plot, pl: Placed, dx: number, dy: number) 
 /** Attach a Friend flush against an island (first free spot touching it). */
 export function addToPlot(w: World, p: Plot, m: Member) {
   const placed: Placed = { m, x: 0, y: 0 };
-  if (!p.friends.length) { p.friends.push(placed); rebuild(w); return placed; }
+  if (!p.friends.length && !p.holes?.length) { p.friends.push(placed); rebuild(w); return placed; }
   const occ = w.occ.get(p)!, b = plotBounds(p);
   for (let r = 0; r < 512; r++) for (const [x, y] of [[b.x1, b.y0 + r], [b.x0 + r, b.y1], [b.x0 - m.cw, b.y0 + r], [b.x0 + r, b.y0 - m.ch]]) {
     let free = true;
-    for (let j = 0; j < m.ch && free; j++) for (let i = 0; i < m.cw; i++) if (occ.has(ck(x + i, y + j))) { free = false; break; }
+    for (let j = 0; j < m.ch && free; j++) for (let i = 0; i < m.cw; i++) if (occ.has(ck(x + i, y + j)) || blocked(w, p, x + i, y + j)) { free = false; break; }
     if (!free) continue;
     placed.x = x; placed.y = y;
-    for (const [nx, ny] of edgeCells(placed)) if (occ.has(ck(nx, ny))) { p.friends.push(placed); rebuild(w); return placed; }
+    for (const [nx, ny] of edgeCells(placed)) if (occ.has(ck(nx, ny)) || blocked(w, p, nx, ny)) { p.friends.push(placed); rebuild(w); return placed; }
   }
   placed.x = b.x1; placed.y = b.y0; p.friends.push(placed); rebuild(w); return placed;
 }
@@ -222,6 +238,23 @@ export function deploy(w: World, id: bigint, to: Plot) {
   from.friends = from.friends.filter(x => x !== pl); rebuild(w);
   addToPlot(w, to, pl.m); return true;
 }
+/** A saved Friend left the wallet (or was deactivated): its spot on the island becomes a hole. */
+export function burnHole(w: World, id: bigint) {
+  const p = plotOf(w, id), pl = p?.friends.find(x => x.m.id === id);
+  if (!p || !pl) return null;
+  p.friends = p.friends.filter(x => x !== pl);
+  const h: Hole = { id, gen: pl.m.gen, cw: pl.m.cw, ch: pl.m.ch, x: pl.x, y: pl.y };
+  (p.holes ??= []).push(h); rebuild(w); return { plot: p, hole: h };
+}
+export const holesOf = (w: World) => w.plots.flatMap(p => (p.holes ?? []).map(h => ({ plot: p, hole: h })));
+/** Fill a hole with a Friend of the same size (the Friend that left, back again, or another). */
+export function fillHole(w: World, p: Plot, h: Hole, m: Member) {
+  if (m.gen !== h.gen) return false;
+  for (const q of w.plots) q.friends = q.friends.filter(x => x.m.id !== m.id);
+  p.holes = (p.holes ?? []).filter(x => x !== h);
+  p.friends.push({ m, x: h.x, y: h.y }); rebuild(w); return true;
+}
+
 /** Fresh art/traits after an on-chain check. Returns false if the generation (footprint) changed. */
 export function refreshMember(w: World, fresh: Friend) {
   for (const p of w.plots) for (const pl of p.friends) if (pl.m.id === fresh.tokenId) {

@@ -153,11 +153,11 @@ try {
   await game.getByRole("toolbar", { name: "Arrange your Friends" }).waitFor({ state: "detached" });
   // save on chain (simulated): mints the plot NFT and burns RF per Friend moved (2 × Gen 3 = 40 RF)
   if (many) {
-    await game.getByRole("button", { name: /Mint plot \+ save · 10,002 moved · 55k RF/ }).click();
+    await game.getByRole("button", { name: /Save · 10,002 moved · 55k RF/ }).click();
     await game.getByText(/Saving burns 55k RF; you have 5,000/).waitFor();
   } else {
-    await game.getByRole("button", { name: /Mint plot \+ save · 2 moved · 40 RF/ }).click();
-    await game.getByText(/Saved on chain \(simulated\): minted Plot #\d+ · 2 Friends moved · 40 RF burned/).waitFor();
+    await game.getByRole("button", { name: /Save · 2 moved · 40 RF/ }).click();
+    await game.getByText(/Saved on chain \(simulated\): created Island #\d+ on chain · 2 Friends moved · 40 RF burned/).waitFor();
     await shot("saved");
     // one more move is a new draft: only that Friend is charged; Undo returns to the save
     await game.locator(".docks-arrange-btn").click();
@@ -220,9 +220,22 @@ try {
     await game.getByLabel("Deploy #7573 to").selectOption({ label: "→ Island 2" });
     await game.getByText(/#7573 deployed to Island 2/).waitFor();
     await game.getByRole("button", { name: "Close My islands" }).click();
-    await game.getByRole("button", { name: /Mint plot \+ save · 1 moved · 20 RF/ }).click();
-    await game.getByText(/minted Plot #\d+ · 1 Friend moved · 20 RF burned/).waitFor();
+    await game.getByRole("button", { name: /Save · 1 moved · 20 RF/ }).click();
+    await game.getByText(/created Island #\d+ on chain · 1 Friend moved · 20 RF burned/).waitFor();
     await shot("two-islands");
+    // #7573 (saved on Island 2) leaves the wallet: its spot becomes a hole; it comes back and heals it
+    await btn("More").click();
+    await game.getByLabel("Friend to send away").selectOption("7573");
+    await game.getByRole("button", { name: "Send away" }).click();
+    await game.getByText(/#7573 left your wallet: a hole opened on Island 2/).waitFor();
+    await btn("Islands").click();
+    await game.getByRole("tab", { name: /Island 2/ }).click();
+    await game.getByText("Hole where #7573 was · Gen 3").waitFor();
+    await shot("hole");
+    await game.getByRole("button", { name: "Close My islands" }).click();
+    await btn("More").click();
+    await game.getByRole("button", { name: "Bring #7573 back" }).click();
+    await game.getByText(/#7573 came back and healed its hole on Island 2/).waitFor();
   }
   const alerts = await game.locator("[role=alert]").allTextContents();
   assert.deepEqual(alerts, [], "No in-game alerts");

@@ -99,3 +99,6 @@
 .docks-chainmap .slot text{font:900 .3px ui-monospace,monospace}
 .docks-plots{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}.docks-plots button{padding:5px 8px;font-size:11px}
 .docks-friend select{font:inherit;font-size:11px;padding:4px;border:1.5px solid #000;background:#fff;color:#000}
+.docks-seams .hole{fill:#050505;stroke:#ff5d5d;stroke-width:.6;stroke-dasharray:1.5 1.2}
+.docks-hole-tag{position:absolute;transform:translate(-50%,-50%);font-size:6px;color:#ff5d5d;white-space:nowrap;pointer-events:none}
+.docks-hole{border-left:3px solid #ff5d5d;padding-left:8px}

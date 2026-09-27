@@ -4,7 +4,7 @@ pragma solidity ^0.8.36;
 import { Test } from "forge-std/Test.sol";
 import { IERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import { ERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
-import { DocksPlots, IDocksGenerations } from "../src/docks/DocksPlots.sol";
+import { DocksIslands, IDocksGenerations } from "../src/docks/DocksIslands.sol";
 import { DocksLaunchpad } from "../src/docks/DocksLaunchpad.sol";
 
 contract MockRF is ERC20 {
@@ -62,7 +62,7 @@ contract DocksTest is Test {
     MockRF rf;
     MockActivation act;
     MockGenerations gen;
-    DocksPlots reg;
+    DocksIslands reg;
     DocksLaunchpad pad;
     address alice = address(0xA11CE);
     address bob = address(0xB0B);
@@ -72,8 +72,8 @@ contract DocksTest is Test {
 
     enum Scope_ {
         AnyDocked,
-        HolderPlot,
-        PlotAndNeighbours,
+        HolderIsland,
+        IslandAndNeighbours,
         Visitors
     }
 
@@ -81,7 +81,7 @@ contract DocksTest is Test {
         rf = new MockRF();
         act = new MockActivation();
         gen = new MockGenerations(address(act));
-        reg = new DocksPlots(IDocksGenerations(address(gen)), IERC20(address(rf)));
+        reg = new DocksIslands(IDocksGenerations(address(gen)), IERC20(address(rf)));
         pad = new DocksLaunchpad(IERC20(address(rf)), reg, treasury);
         _friend(1, alice);
         _friend(2, alice);
@@ -94,7 +94,7 @@ contract DocksTest is Test {
             vm.startPrank(who[i]);
             rf.approve(address(pad), type(uint256).max);
             rf.approve(address(reg), type(uint256).max);
-            plotOf[who[i]] = reg.mint("");
+            plotOf[who[i]] = reg.create("");
             vm.stopPrank();
         }
     }
@@ -128,54 +128,108 @@ contract DocksTest is Test {
         reg.dock(plotOf[who], bx, by);
     }
 
-    /* ── plots are NFTs ── */
+    /* ── islands are not tokens ── */
 
-    function testPlotsAreNFTs() public {
+    function testIslandsAreNotTokens() public {
         assertEq(reg.ownerOf(plotOf[alice]), alice);
-        assertEq(reg.totalPlots(), 3);
+        assertEq(reg.totalIslands(), 3);
         vm.prank(alice);
-        uint256 second = reg.mint("Harbour");
+        uint256 second = reg.create("Harbour");
         assertEq(reg.ownerOf(second), alice);
-        assertEq(reg.plotName(second), "Harbour");
+        assertEq(reg.islandName(second), "Harbour");
+        // no transfer, approve or sale surface exists: only the Friends are NFTs
+        (bool ok,) = address(reg).call(abi.encodeWithSignature("transferFrom(address,address,uint256)", alice, bob, second));
+        assertFalse(ok);
     }
 
-    function testTokenURIIsOnChainJson() public {
+    /* ── holes: a saved Friend that leaves the wallet ── */
+
+    function testSoldFriendLeavesAReservedHoleUntilReturned() public {
         _place(alice, 1, 0, 0);
         _place(alice, 2, 1, 0);
-        vm.prank(alice);
-        reg.setPlot(plotOf[alice], 'Alice "Market"', false);
-        string memory uri = reg.tokenURI(plotOf[alice]);
-        assertTrue(_startsWith(uri, "data:application/json;base64,"));
-    }
-
-    function _startsWith(string memory s, string memory p) internal pure returns (bool) {
-        bytes memory a = bytes(s);
-        bytes memory b = bytes(p);
-        if (a.length < b.length) return false;
-        for (uint256 i; i < b.length; ++i) if (a[i] != b[i]) return false;
-        return true;
-    }
-
-    function testOnlyPlotOwnerArranges() public {
-        vm.prank(bob);
-        vm.expectRevert(DocksPlots.NotPlotOwner.selector);
-        reg.arrange(plotOf[alice], _one(10), _i(0), _i(0));
-        vm.prank(alice);
-        vm.expectRevert(DocksPlots.NotHolder.selector);
-        reg.arrange(plotOf[alice], _one(10), _i(0), _i(0));
-    }
-
-    function testTransferringPlotWithoutFriendsLeavesThemStale() public {
-        _place(alice, 1, 0, 0);
-        assertTrue(reg.isValid(1));
-        vm.prank(alice);
-        reg.transferFrom(alice, bob, plotOf[alice]);
+        gen.set(1, bob); // alice sells #1 (in Rare Friends this also clears activation)
         assertFalse(reg.isValid(1));
-        reg.clear(1);
-        assertEq(reg.memberCount(plotOf[alice]), 0);
+        assertTrue(reg.isHole(plotOf[alice], 1));
+        (bool occ,, bool hole) = reg.friendAt(plotOf[alice], 0, 0);
+        assertTrue(occ && hole);
+        vm.expectRevert(DocksIslands.CellTaken.selector); // the hole is reserved
+        _place(alice, 3, 0, 0);
+        gen.set(1, alice); // returned: the hole heals by itself, free
+        assertTrue(reg.isValid(1));
+        assertFalse(reg.isHole(plotOf[alice], 1));
     }
 
-    /* ── islands: arranging burns RF per Friend moved, by generation ── */
+    function testHoleIsBurnedInWhenTheNewOwnerPlacesTheFriend() public {
+        _place(alice, 1, 0, 0);
+        _place(alice, 2, 1, 0);
+        gen.set(1, bob);
+        _place(bob, 1, 3, 3); // bob builds with it: alice's island keeps a burned-in hole
+        assertEq(reg.islandOf(1), plotOf[bob]);
+        assertTrue(reg.isHole(plotOf[alice], 1));
+        (bool occ, uint256 who, bool hole) = reg.friendAt(plotOf[alice], 0, 0);
+        assertTrue(occ && hole);
+        assertEq(who, 1);
+        (,,, bool open) = reg.holeOf(plotOf[alice], 1);
+        assertTrue(open);
+        vm.expectRevert(DocksIslands.CellTaken.selector);
+        _place(alice, 3, 0, 0);
+    }
+
+    function testFillHoleWithSameSizeFriendPaysItsFee() public {
+        gen.setGen(1, 3);
+        gen.setGen(3, 3);
+        gen.setGen(2, 5);
+        _place(alice, 1, 0, 0);
+        gen.set(1, bob);
+        _place(bob, 1, 0, 0);
+        vm.prank(alice);
+        vm.expectRevert(DocksIslands.WrongSize.selector); // #2 is Gen 5, the hole is Gen 3
+        reg.fillHole(plotOf[alice], 1, 2);
+        uint256 before = _burned();
+        vm.prank(alice);
+        assertEq(reg.fillHole(plotOf[alice], 1, 3), 20 ether);
+        assertEq(_burned() - before, 20 ether);
+        assertFalse(reg.isHole(plotOf[alice], 1));
+        (, uint256 at, bool hole) = reg.friendAt(plotOf[alice], 0, 0);
+        assertEq(at, 3);
+        assertFalse(hole);
+    }
+
+    function testReturnedFriendFillsItsOwnHoleFree() public {
+        _place(alice, 1, 0, 0);
+        gen.set(1, bob);
+        _place(bob, 1, 0, 0); // burned in on alice's island
+        gen.set(1, alice); // bob sends it back
+        uint256 before = _burned();
+        vm.prank(alice);
+        assertEq(reg.fillHole(plotOf[alice], 1, 1), 0);
+        assertEq(_burned(), before);
+        assertEq(reg.islandOf(1), plotOf[alice]);
+        assertEq(reg.memberCount(plotOf[bob]), 0);
+    }
+
+    function testFillAPendingHoleWithAnotherFriend() public {
+        _place(alice, 1, 0, 0);
+        act.set(1, 0); // deactivated but still held: a pending hole
+        assertTrue(reg.isHole(plotOf[alice], 1));
+        vm.prank(alice);
+        reg.fillHole(plotOf[alice], 1, 2);
+        (, uint256 at,) = reg.friendAt(plotOf[alice], 0, 0);
+        assertEq(at, 2);
+        vm.prank(alice);
+        vm.expectRevert(DocksIslands.NotAHole.selector);
+        reg.fillHole(plotOf[alice], 2, 3);
+    }
+
+
+    function testOnlyIslandOwnerArranges() public {
+        vm.prank(bob);
+        vm.expectRevert(DocksIslands.NotIslandOwner.selector);
+        reg.arrange(plotOf[alice], _one(10), _i(0), _i(0));
+        vm.prank(alice);
+        vm.expectRevert(DocksIslands.NotHolder.selector);
+        reg.arrange(plotOf[alice], _one(10), _i(0), _i(0));
+    }
 
     function testBurnPerFriendMovedByGeneration() public {
         gen.setGen(1, 1); // 100 RF
@@ -206,7 +260,7 @@ contract DocksTest is Test {
         address dave = address(0xDA5E);
         _friend(40, dave);
         vm.startPrank(dave);
-        uint256 plot = reg.mint("");
+        uint256 plot = reg.create("");
         vm.expectRevert();
         reg.arrange(plot, _one(40), _i(0), _i(0));
         vm.stopPrank();
@@ -224,27 +278,27 @@ contract DocksTest is Test {
     function testIslandsHaveTheirOwnGrids() public {
         _place(alice, 1, 0, 0);
         _place(bob, 10, 0, 0); // same local cell, different island: fine
-        (, uint256 a) = reg.friendAt(plotOf[alice], 0, 0);
-        (, uint256 b) = reg.friendAt(plotOf[bob], 0, 0);
+        (, uint256 a,) = reg.friendAt(plotOf[alice], 0, 0);
+        (, uint256 b,) = reg.friendAt(plotOf[bob], 0, 0);
         assertEq(a, 1);
         assertEq(b, 10);
-        vm.expectRevert(DocksPlots.CellTaken.selector);
+        vm.expectRevert(DocksIslands.CellTaken.selector);
         _place(alice, 2, 0, 0);
     }
 
-    function testDeployAFriendToAnotherOfYourPlots() public {
+    function testDeployAFriendToAnotherOfYourIslands() public {
         _place(alice, 1, 0, 0);
         _place(alice, 2, 1, 0);
         vm.prank(alice);
-        uint256 second = reg.mint("Outpost");
+        uint256 second = reg.create("Outpost");
         uint256 before = _burned();
         vm.prank(alice);
         reg.arrange(second, _one(2), _i(0), _i(0)); // joining a new island counts as a move
         assertEq(_burned() - before, 1 ether);
-        assertEq(reg.plotOf(2), second);
+        assertEq(reg.islandOf(2), second);
         assertEq(reg.memberCount(plotOf[alice]), 1);
         assertEq(reg.memberCount(second), 1);
-        (bool occ,) = reg.friendAt(plotOf[alice], 1, 0);
+        (bool occ,,) = reg.friendAt(plotOf[alice], 1, 0);
         assertFalse(occ);
     }
 
@@ -260,33 +314,15 @@ contract DocksTest is Test {
         int32[] memory ys = new int32[](2);
         vm.prank(alice);
         reg.arrange(plotOf[alice], ids, xs, ys);
-        (, uint256 at1) = reg.friendAt(plotOf[alice], 1, 0);
-        (, uint256 at2) = reg.friendAt(plotOf[alice], 2, 0);
+        (, uint256 at1,) = reg.friendAt(plotOf[alice], 1, 0);
+        (, uint256 at2,) = reg.friendAt(plotOf[alice], 2, 0);
         assertEq(at1, 1);
         assertEq(at2, 2);
     }
 
-    function testSoldFriendGoesStaleAndCellFrees() public {
-        _place(alice, 1, 0, 0);
-        gen.set(1, carol); // sold on the marketplace
-        assertFalse(reg.isValid(1));
-        _place(alice, 2, 0, 0); // stale occupant gives way
-        (, uint256 id) = reg.friendAt(plotOf[alice], 0, 0);
-        assertEq(id, 2);
-    }
-
-    function testClearOnlyWhenStale() public {
-        _place(bob, 10, 0, 0);
-        vm.expectRevert(DocksPlots.StillValid.selector);
-        reg.clear(10);
-        act.set(10, 0);
-        reg.clear(10);
-        assertEq(reg.memberCount(plotOf[bob]), 0);
-    }
-
     function testInactiveCannotPlace() public {
         act.set(3, 0);
-        vm.expectRevert(DocksPlots.NotActive.selector);
+        vm.expectRevert(DocksIslands.NotActive.selector);
         _place(alice, 3, 0, 0);
     }
 
@@ -310,10 +346,10 @@ contract DocksTest is Test {
         _dock(alice, 0, 0); // first island docks anywhere
         assertEq(rf.balanceOf(alice), before);
         vm.prank(bob);
-        vm.expectRevert(DocksPlots.NotLoadingZone.selector);
+        vm.expectRevert(DocksIslands.NotLoadingZone.selector);
         reg.dock(plotOf[bob], 5, 5);
         vm.prank(bob);
-        vm.expectRevert(DocksPlots.BerthTaken.selector);
+        vm.expectRevert(DocksIslands.BerthTaken.selector);
         reg.dock(plotOf[bob], 0, 0);
         assertTrue(reg.isLoadingZone(1, 0));
         _dock(bob, 1, 0);
@@ -322,14 +358,14 @@ contract DocksTest is Test {
         assertFalse(reg.connected(plotOf[alice], plotOf[carol]));
         // move alice's island to the other side of carol
         _dock(alice, 3, 0);
-        assertEq(reg.plotAtBerth(0, 0), 0);
+        assertEq(reg.islandAtBerth(0, 0), 0);
         assertTrue(reg.connected(plotOf[alice], plotOf[carol]));
         assertEq(reg.dockedCount(), 3);
     }
 
     function testEmptyIslandCannotDock() public {
         vm.prank(alice);
-        vm.expectRevert(DocksPlots.EmptyPlot.selector);
+        vm.expectRevert(DocksIslands.EmptyIsland.selector);
         reg.dock(plotOf[alice], 0, 0);
     }
 
@@ -353,7 +389,7 @@ contract DocksTest is Test {
         _dock(carol, 2, 0);
         assertEq(reg.bridgeCost(plotOf[alice], plotOf[carol]), 20 ether);
         vm.prank(alice);
-        vm.expectRevert(DocksPlots.AlreadyConnected.selector);
+        vm.expectRevert(DocksIslands.AlreadyConnected.selector);
         reg.buildBridge(plotOf[alice], plotOf[bob]);
         uint256 before = _burned();
         vm.prank(alice);
@@ -367,15 +403,15 @@ contract DocksTest is Test {
     function testAccess() public {
         assertTrue(reg.canVisit(plotOf[alice], bob));
         vm.prank(alice);
-        reg.setPlot(plotOf[alice], "Alice Market", true);
+        reg.setIsland(plotOf[alice], "Alice Market", true);
         assertFalse(reg.canVisit(plotOf[alice], bob));
         vm.prank(alice);
         reg.setVisitor(plotOf[alice], bob, true);
         assertTrue(reg.canVisit(plotOf[alice], bob));
         assertFalse(reg.canVisit(plotOf[alice], carol));
         vm.prank(bob);
-        vm.expectRevert(DocksPlots.NotPlotOwner.selector);
-        reg.setPlot(plotOf[alice], "mine now", false);
+        vm.expectRevert(DocksIslands.NotIslandOwner.selector);
+        reg.setIsland(plotOf[alice], "mine now", false);
     }
 
     /* ── launches ── */
@@ -407,7 +443,7 @@ contract DocksTest is Test {
         DocksLaunchpad.LaunchParams memory p = _params(Scope_.AnyDocked);
         p.airdropPool = 1000 ether;
         p.airdropEach = 50 ether;
-        p.airdropScope = DocksLaunchpad.Scope.PlotAndNeighbours;
+        p.airdropScope = DocksLaunchpad.Scope.IslandAndNeighbours;
         uint256 burnBefore = _burned();
         uint256 rfBefore = rf.balanceOf(alice);
         vm.prank(alice);
@@ -507,10 +543,10 @@ contract DocksTest is Test {
         pad.claim(id, 20);
     }
 
-    function testHolderPlotScope() public {
+    function testHolderIslandScope() public {
         _world();
         vm.prank(alice);
-        uint256 id = pad.launch(_params(Scope_.HolderPlot));
+        uint256 id = pad.launch(_params(Scope_.HolderIsland));
         vm.prank(alice);
         pad.claim(id, 2);
         vm.prank(bob);
@@ -521,7 +557,7 @@ contract DocksTest is Test {
     function testNeighbourScopeIncludesBridges() public {
         _world();
         vm.prank(alice);
-        uint256 id = pad.launch(_params(Scope_.PlotAndNeighbours));
+        uint256 id = pad.launch(_params(Scope_.IslandAndNeighbours));
         vm.prank(bob);
         pad.claim(id, 10);
         vm.prank(carol);
@@ -536,7 +572,7 @@ contract DocksTest is Test {
     function testVisitorScope() public {
         _world();
         vm.prank(alice);
-        reg.setPlot(plotOf[alice], "", true);
+        reg.setIsland(plotOf[alice], "", true);
         vm.prank(alice);
         reg.setVisitor(plotOf[alice], bob, true);
         vm.prank(alice);
@@ -583,7 +619,7 @@ contract DocksTest is Test {
         reg.arrange(plotOf[alice], ids, xs, ys);
         assertEq(_burned() - before, n * 1 ether);
         _dock(alice, 0, 0);
-        DocksLaunchpad.LaunchParams memory p = _params(Scope_.HolderPlot);
+        DocksLaunchpad.LaunchParams memory p = _params(Scope_.HolderIsland);
         p.creatorFriendId = 1000;
         p.claimEach = 100 ether;
         vm.prank(alice);
