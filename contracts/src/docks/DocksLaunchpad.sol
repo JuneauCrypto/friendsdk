@@ -70,8 +70,7 @@ contract DocksLaunchpad is ReentrancyGuard {
     error PoolEmpty();
     error UnknownLaunch();
     error NotCreator();
-    error LengthMismatch();
-
+    
     event Launched(
         uint256 indexed launchId,
         address indexed token,
@@ -103,6 +102,8 @@ contract DocksLaunchpad is ReentrancyGuard {
     function launch(LaunchParams calldata p) external nonReentrant returns (uint256 launchId) {
         if (!_controls(msg.sender, p.creatorFriendId)) revert NotHolder();
         if (!registry.isValid(p.creatorFriendId)) revert NotDocked();
+        (,, bool docked,) = registry.berthOf(registry.plotOf(p.creatorFriendId));
+        if (!docked) revert NotDocked();
         if (p.supply == 0 || p.airdropPool + p.claimPool > p.supply) revert BadAllocation();
         if ((p.claimPool == 0) != (p.claimEach == 0) || p.claimEach > p.claimPool) {
             revert BadAllocation();
@@ -140,19 +141,18 @@ contract DocksLaunchpad is ReentrancyGuard {
     }
 
     /// @notice Creator sends the airdrop in batches. Friends that are not eligible under the
-    /// airdrop scope, or already received it, are skipped. `vias` as for `claim`.
-    function airdrop(uint256 launchId, uint256[] calldata friendIds, uint256[] calldata vias)
+    /// airdrop scope, or already received it, are skipped.
+    function airdrop(uint256 launchId, uint256[] calldata friendIds)
         external
         nonReentrant
         returns (uint256 sent)
     {
         if (launchId >= _launches.length) revert UnknownLaunch();
-        if (friendIds.length != vias.length) revert LengthMismatch();
         Launch storage l = _launches[launchId];
         if (msg.sender != l.creator) revert NotCreator();
         for (uint256 i; i < friendIds.length && l.airdropRemaining >= l.airdropEach; ++i) {
             uint256 id = friendIds[i];
-            if (airdropped[launchId][id] || !_eligible(l, l.airdropScope, id, vias[i])) continue;
+            if (airdropped[launchId][id] || !_eligible(l, l.airdropScope, id)) continue;
             airdropped[launchId][id] = true;
             l.airdropRemaining -= l.airdropEach;
             IERC20(address(l.token)).safeTransfer(_wallet(id), l.airdropEach);
@@ -173,19 +173,18 @@ contract DocksLaunchpad is ReentrancyGuard {
 
     /// @notice Claim for many Friends you hold in one transaction. Friends that are not
     /// eligible, already claimed, or beyond the pool are skipped; RF is taken only for claims made.
-    function claimMany(uint256 launchId, uint256[] calldata friendIds, uint256[] calldata vias)
+    function claimMany(uint256 launchId, uint256[] calldata friendIds)
         external
         nonReentrant
         returns (uint256 made)
     {
         if (launchId >= _launches.length) revert UnknownLaunch();
-        if (friendIds.length != vias.length) revert LengthMismatch();
         Launch storage l = _launches[launchId];
         if (l.claimEach == 0) revert PoolEmpty();
         for (uint256 i; i < friendIds.length && l.claimRemaining >= l.claimEach; ++i) {
             uint256 id = friendIds[i];
             if (!_controls(msg.sender, id)) revert NotHolder();
-            if (claimed[launchId][id] || !_eligible(l, l.scope, id, vias[i])) continue;
+            if (claimed[launchId][id] || !_eligible(l, l.scope, id)) continue;
             claimed[launchId][id] = true;
             l.claimRemaining -= l.claimEach;
             IERC20(address(l.token)).safeTransfer(_wallet(id), l.claimEach);
@@ -196,14 +195,13 @@ contract DocksLaunchpad is ReentrancyGuard {
     }
 
     /// @notice Claim for a docked Friend you hold (from your wallet or the Friend's wallet).
-    /// @param via For PlotAndNeighbours: a creator Friend next to `friendId`; else ignored.
-    function claim(uint256 launchId, uint256 friendId, uint256 via) external nonReentrant {
+    function claim(uint256 launchId, uint256 friendId) external nonReentrant {
         if (launchId >= _launches.length) revert UnknownLaunch();
         Launch storage l = _launches[launchId];
         if (!_controls(msg.sender, friendId)) revert NotHolder();
         if (claimed[launchId][friendId]) revert AlreadyClaimed();
         if (l.claimRemaining < l.claimEach || l.claimEach == 0) revert PoolEmpty();
-        if (!_eligible(l, l.scope, friendId, via)) revert NotEligible();
+        if (!_eligible(l, l.scope, friendId)) revert NotEligible();
 
         claimed[launchId][friendId] = true;
         l.claimRemaining -= l.claimEach;
@@ -212,31 +210,22 @@ contract DocksLaunchpad is ReentrancyGuard {
         emit Claimed(launchId, friendId, l.claimEach, l.claimPrice);
     }
 
-    function eligible(uint256 launchId, uint256 friendId, uint256 via)
-        public
-        view
-        returns (bool)
-    {
+    function eligible(uint256 launchId, uint256 friendId) public view returns (bool) {
         Launch storage l = _launches[launchId];
-        return _eligible(l, l.scope, friendId, via);
+        return _eligible(l, l.scope, friendId);
     }
 
-    function _eligible(Launch storage l, Scope scope, uint256 friendId, uint256 via)
-        private
-        view
-        returns (bool)
-    {
+    /// @dev Scopes: any Friend on a docked island · the launching island · the launching island
+    /// and every island docked next to it or bridged to it · visitors allowed onto it.
+    function _eligible(Launch storage l, Scope scope, uint256 friendId) private view returns (bool) {
         if (!registry.isValid(friendId)) return false;
-        address holder = generations.ownerOf(friendId);
+        uint256 plot = registry.plotOf(friendId);
+        if (plot == l.creatorPlotId) return true;
+        (,, bool docked,) = registry.berthOf(plot);
+        if (!docked || scope == Scope.HolderPlot) return false;
         if (scope == Scope.AnyDocked) return true;
-        bool onPlot = registry.plotOf(friendId) == l.creatorPlotId;
-        if (scope == Scope.HolderPlot) return onPlot;
-        if (scope == Scope.PlotAndNeighbours) {
-            if (onPlot) return true;
-            return registry.isValid(via) && registry.plotOf(via) == l.creatorPlotId
-                && registry.adjacent(friendId, via);
-        }
-        return onPlot || registry.canVisit(l.creatorPlotId, holder);
+        if (scope == Scope.PlotAndNeighbours) return registry.connected(plot, l.creatorPlotId);
+        return registry.canVisit(l.creatorPlotId, generations.ownerOf(friendId));
     }
 
     function launchCount() external view returns (uint256) {

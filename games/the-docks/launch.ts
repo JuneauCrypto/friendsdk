@@ -1,16 +1,16 @@
 /* Token launches — SIMULATED in this preview. Mirrors contracts/src/docks/DocksLaunchpad.sol:
  * 1,000 RF per launch (500 burned, 500 to the treasury); fixed supply, no owner; airdrops and
  * claims land in the Friend's own wallet; every claim costs the launch's RF price, burned. */
-import { touchesPlot, type Plot, type World } from "./world.js";
+import { connected, type Plot, type World } from "./world.js";
 
 export const LAUNCH_FEE = 1000;
 export const START_RF = 5000;                                   // simulated RF for the preview
 export type Scope = "anyDocked" | "holderPlot" | "plotAndNeighbours" | "visitors";
 export const SCOPES: { id: Scope; label: string; hint: string }[] = [
-  { id: "holderPlot", label: "My plot", hint: "only Friends on the launcher's plot" },
-  { id: "plotAndNeighbours", label: "My plot + docked neighbours", hint: "plus any Friend docked edge to edge with it" },
-  { id: "visitors", label: "Visitors", hint: "anyone allowed to cross the launcher's seam (open plot or approved)" },
-  { id: "anyDocked", label: "Everyone docked", hint: "any Friend on the docks" },
+  { id: "holderPlot", label: "My island", hint: "only Friends on the launching island" },
+  { id: "plotAndNeighbours", label: "My island + neighbours", hint: "plus every island docked next to it or bridged to it" },
+  { id: "visitors", label: "Visitors", hint: "islands allowed onto the launching island (open, or approved)" },
+  { id: "anyDocked", label: "Everyone docked", hint: "any Friend on a docked island" },
 ];
 export type Launch = {
   id: number; name: string; symbol: string; supply: number; creator: Plot; creatorFriend: bigint;
@@ -31,15 +31,10 @@ function credit(e: Economy, id: bigint, symbol: string, amount: number) {
 export function eligibleFriends(w: World, l: Pick<Launch, "scope" | "creator">, canVisit: (p: Plot, host: Plot) => boolean) {
   const out: { plot: Plot; id: bigint }[] = [];
   for (const p of w.plots) {
-    if (!p.docked && !p.mine) continue;
-    for (const pl of p.friends) {
-      let ok = false;
-      if (l.scope === "anyDocked") ok = p.docked;
-      else if (l.scope === "holderPlot") ok = p === l.creator;
-      else if (l.scope === "visitors") ok = p === l.creator || (p.docked && canVisit(p, l.creator));
-      else ok = p === l.creator || (p.docked && touchesPlot(w, pl, l.creator));
-      if (ok) out.push({ plot: p, id: pl.m.id });
-    }
+    const docked = Boolean(p.berth);
+    const ok = p === l.creator || (docked && (l.scope === "anyDocked" || (l.scope === "visitors" && canVisit(p, l.creator))
+      || (l.scope === "plotAndNeighbours" && connected(w, p, l.creator))));
+    if (ok) for (const pl of p.friends) out.push({ plot: p, id: pl.m.id });
   }
   return out;
 }
@@ -52,7 +47,7 @@ export function launch(e: Economy, w: World, input: LaunchInput, canVisit: (p: P
   const name = input.name.trim(), symbol = input.symbol.trim().toUpperCase();
   if (!name || !/^[A-Z0-9]{2,8}$/.test(symbol)) throw new Error("Give it a name and a 2–8 letter ticker.");
   if (e.launches.some(l => l.symbol === symbol)) throw new Error(`$${symbol} already exists here.`);
-  if (!input.creator.docked) throw new Error("Dock and save your plot first: launches come from a Friend on a saved, docked plot.");
+  if (!input.creator.berth) throw new Error("Dock and save your island first: launches come from a Friend on a saved, docked island.");
   if (e.rf < LAUNCH_FEE) throw new Error(`Launching costs ${LAUNCH_FEE.toLocaleString()} RF; you have ${e.rf.toLocaleString()}.`);
   const drop = input.airdropScope === "none" ? [] : eligibleFriends(w, { scope: input.airdropScope, creator: input.creator }, canVisit);
   const dropTotal = drop.length * input.airdropEach;

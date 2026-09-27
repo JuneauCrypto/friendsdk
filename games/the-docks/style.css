@@ -60,9 +60,9 @@
 .docks label{display:block;margin:10px 0}
 .docks-chainmap svg{display:block;width:100%;height:auto;max-height:44vh;background:#000;border:1.5px solid #000}
 .docks-chainmap .mine rect{fill:var(--signal)}.docks-chainmap .open rect{fill:#fff}.docks-chainmap .invite rect{fill:#9a9a9a}
-.docks-chainmap .slot rect{fill:#ccff0040;stroke:#ccff00;stroke-width:.05;cursor:pointer}
+.docks-chainmap .slot rect{fill:#ccff0030;stroke:#ccff00;stroke-width:.04;cursor:pointer}
 .docks-chainmap .slot.hot rect{fill:#ccff00b0}
-.docks-chainmap .slot-num{font:900 2px ui-monospace,monospace;fill:#ccff00;paint-order:stroke;stroke:#000;stroke-width:.4px;pointer-events:none}
+.docks-chainmap .slot-num{font:900 .3px ui-monospace,monospace;fill:#ccff00;paint-order:stroke;stroke:#000;stroke-width:.06px;pointer-events:none}
 .docks-slots{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:6px;margin-top:8px}
 .docks-slots button{font-size:12px;padding:6px;text-align:left}
 
@@ -89,3 +89,13 @@
 .docks-save{display:flex;flex-direction:column;gap:4px;align-items:flex-end}.docks-save small{font-size:10px;color:var(--signal)}
 .docks .docks-nav .docks-arrange-btn{background:var(--signal);color:#000;border-color:var(--signal)}
 .docks-unsaved{width:100%;max-width:420px}.docks-unsaved .docks-act{flex:1}
+.docks-seams .gangway{fill:#2b2b2b;stroke:#555;stroke-width:.3}
+.docks-seams .bridge{fill:#3a3320;stroke:#ccff00;stroke-width:.3}
+.docks-chainmap .isle rect{fill:#9a9a9a;stroke:#000;stroke-width:.04}
+.docks-chainmap .isle.open rect{fill:#fff}.docks-chainmap .isle.mine rect{fill:var(--signal)}.docks-chainmap .isle.mine-other rect{fill:#8fb300}
+.docks-chainmap .isle text{font:700 .32px ui-monospace,monospace;fill:#000;pointer-events:none}
+.docks-chainmap .isle.can-bridge{cursor:pointer}.docks-chainmap .isle.can-bridge rect{stroke:#ccff00;stroke-dasharray:.08 .06;stroke-width:.05}
+.docks-chainmap .bridge-line{stroke:#ccff00;stroke-width:.08;stroke-dasharray:.15 .1}
+.docks-chainmap .slot text{font:900 .3px ui-monospace,monospace}
+.docks-plots{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}.docks-plots button{padding:5px 8px;font-size:11px}
+.docks-friend select{font:inherit;font-size:11px;padding:4px;border:1.5px solid #000;background:#fff;color:#000}

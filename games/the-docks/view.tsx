@@ -4,14 +4,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { spriteFrame, type GenerationSprites, type SpriteFacing } from "@rarefriends/friendsdk/sprites";
 import { fromScreen, toScreen } from "./land.js";
-import { CELL, canEnter, ck, mine, plotBounds, rankOf, tileAt, type Placed, type Plot, type World } from "./world.js";
+import { CELL, canEnter, ck, neighboursOf, plotOf, rankOf, tileAt, type Placed, type Plot, type World } from "./world.js";
 
 export type CrewMember = { id: bigint; sprites: GenerationSprites | null };
 export type ViewApi = { focusOn: (x: number, y: number) => void; position: () => { x: number; y: number }; teleport: (x: number, y: number) => void };
 type Props = {
   world: World; version: number; sprites: GenerationSprites | null; walkerId: bigint;
   zoom: number; paused: boolean; reducedMotion: boolean;
-  arranging: boolean; selected: Placed | null; moveAll: boolean;
+  arranging: boolean; selected: Placed | null;
   crew: CrewMember[];                            // Friends walking behind you (capped by the caller)
   onBlocked: (plot: Plot) => void; onEnterPlot: (plot: Plot | null) => void;
   onPick: (pl: Placed) => void;                  // arrange mode: tap one of your Friends
@@ -25,15 +25,18 @@ const screenDir: Record<string, [number, number]> = {
 };
 const T = (c: number) => c * CELL;                // cells → tiles
 
-/** Walkable tile nearest to a Friend's centre. */
-export function spawnOn(pl: Placed) {
+/** World tile of a Friend's footprint corner. */
+export const worldXY = (w: World, p: Plot, pl: Placed) => { const o = w.origin.get(p) ?? { x: 0, y: 0 }; return { x: o.x + T(pl.x), y: o.y + T(pl.y) }; };
+/** Walkable tile nearest to a Friend's centre (world tiles). */
+export function spawnOn(w: World, pl: Placed) {
+  const p = plotOf(w, pl.m.id); const at = p ? worldXY(w, p, pl) : { x: 0, y: 0 };
   const f = pl.m.friend, W = T(pl.m.cw), Hh = T(pl.m.ch), cx = W / 2, cy = Hh / 2;
-  let best = { x: T(pl.x) + cx, y: T(pl.y) + cy }, bd = Infinity;
+  let best = { x: at.x + cx, y: at.y + cy }, bd = Infinity;
   if (!f) return best;
   for (let j = 0; j < f.h; j++) for (let i = 0; i < f.w; i++) {
     if (!f.tiles[j * f.w + i] || f.blocked[j * f.w + i]) continue;
     const d = Math.hypot(i + 0.5 - cx, j + 0.5 - cy);
-    if (d < bd) { bd = d; best = { x: T(pl.x) + i + 0.5, y: T(pl.y) + j + 0.5 }; }
+    if (d < bd) { bd = d; best = { x: at.x + i + 0.5, y: at.y + j + 0.5 }; }
   }
   return best;
 }
@@ -56,7 +59,7 @@ function drawSprite(cv: HTMLCanvasElement, s: GenerationSprites | null, facing: 
 }
 
 export function DocksView(props: Props) {
-  const { world, version, walkerId, arranging, selected, moveAll, crew, apiRef } = props;
+  const { world, version, walkerId, arranging, selected, crew, apiRef } = props;
   const viewport = useRef<HTMLDivElement>(null), layer = useRef<HTMLDivElement>(null), avatar = useRef<HTMLCanvasElement>(null);
   const crewCanvases = useRef(new Map<string, HTMLCanvasElement>());
   const followers = useRef(new Map<string, Follower>());
@@ -64,14 +67,14 @@ export function DocksView(props: Props) {
   const player = useRef({ x: 0, y: 0, facing: "down" as SpriteFacing, walking: false, target: null as null | { x: number; y: number } });
   const focus = useRef<{ x: number; y: number } | null>(null);
   const keys = useRef(new Set<string>());
-  const [vis, setVis] = useState({ x0: -40, y0: -40, x1: 40, y1: 40 });  // visible box, in cells
+  const [vis, setVis] = useState({ x0: -160, y0: -160, x1: 160, y1: 160 });  // visible box, world tiles
   const state = useRef({ ...props, lastPlot: null as Plot | null, lastBlock: 0, visKey: "" });
   state.current = { ...state.current, ...props };
 
   // initial position: on my walking Friend
   useEffect(() => {
-    const me = mine(world), pl = me.friends.find(p => p.m.id === walkerId) ?? me.friends[0];
-    if (pl) { const s = spawnOn(pl); player.current.x = s.x; player.current.y = s.y; }
+    const p = plotOf(world, walkerId), pl = p?.friends.find(x => x.m.id === walkerId);
+    if (pl) { const s = spawnOn(world, pl); player.current.x = s.x; player.current.y = s.y; }
   }, [walkerId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   apiRef.current = {
@@ -103,8 +106,8 @@ export function DocksView(props: Props) {
     const r = viewport.current.getBoundingClientRect(), m = new DOMMatrixReadOnly(getComputedStyle(layer.current).transform);
     const at = fromScreen((e.clientX - r.left - m.e) / m.a, (e.clientY - r.top - m.f) / m.d);
     if (st.arranging) {
-      const o = st.world.occ.get(ck(Math.floor(at.x / CELL), Math.floor(at.y / CELL)));
-      if (o?.plot.mine) st.onPick(o.placed);
+      const o = tileAt(st.world, at.x, at.y);
+      if (o?.plot?.mine && o.placed) st.onPick(o.placed);
       return;
     }
     player.current.target = at; focus.current = null;
@@ -116,7 +119,7 @@ export function DocksView(props: Props) {
     const walkable = (x: number, y: number) => {
       const o = tileAt(state.current.world, x, y);
       if (!o || o.blocked) return { ok: false as const };
-      if (!canEnter(state.current.world, o.plot)) return { ok: false as const, gate: o.plot };
+      if (o.plot && !canEnter(state.current.world, o.plot)) return { ok: false as const, gate: o.plot };
       return { ok: true as const };
     };
     const R = 0.25;
@@ -181,22 +184,27 @@ export function DocksView(props: Props) {
           p.facing = Math.abs(sx) > Math.abs(sy) ? (sx > 0 ? "right" : "left") : (sy > 0 ? "down" : "up");
         }
         stepCrew(dt);
+        const under = tileAt(st.world, p.x, p.y);
+        if (!under) {                                   // islands re-laid out under us: step back onto my Friend
+          const home = plotOf(st.world, walkerId)?.friends.find(x => x.m.id === walkerId);
+          if (home) { const sp = spawnOn(st.world, home); p.x = sp.x; p.y = sp.y; p.target = null; }
+        }
         const here = tileAt(st.world, p.x, p.y)?.plot ?? null;
         if (here !== st.lastPlot) { st.lastPlot = here; st.onEnterPlot(here); }
       } else p.walking = false;
       // camera
       const vp = viewport.current, ly = layer.current;
       if (vp && ly) {
-        const sel = st.selected;
-        const target = st.arranging && sel ? { x: T(sel.x + sel.m.cw / 2), y: T(sel.y + sel.m.ch / 2) } : focus.current ?? p;
+        const sel = st.selected, sp = sel ? plotOf(st.world, sel.m.id) : null, sw = sel && sp ? worldXY(st.world, sp, sel) : null;
+        const target = st.arranging && sel && sw ? { x: sw.x + T(sel.m.cw) / 2, y: sw.y + T(sel.m.ch) / 2 } : focus.current ?? p;
         const sc = toScreen(target.x, target.y), z = st.zoom;
         const ox = vp.clientWidth / 2 - sc.x * z, oy = vp.clientHeight * 0.55 - sc.y * z;
         ly.style.transform = `translate(${ox.toFixed(1)}px, ${oy.toFixed(1)}px) scale(${z})`;
         // visible box in cells (from the four viewport corners), padded and quantised
         const corners = [[0, 0], [vp.clientWidth, 0], [0, vp.clientHeight], [vp.clientWidth, vp.clientHeight]].map(([x, y]) => fromScreen((x - ox) / z, (y - oy) / z));
-        const q = (v: number, up: boolean) => (up ? Math.ceil : Math.floor)(v / CELL / 6) * 6;
-        const box = { x0: q(Math.min(...corners.map(c => c.x)), false) - 12, y0: q(Math.min(...corners.map(c => c.y)), false) - 12,
-          x1: q(Math.max(...corners.map(c => c.x)), true) + 6, y1: q(Math.max(...corners.map(c => c.y)), true) + 6 };
+        const q = (v: number, up: boolean) => (up ? Math.ceil : Math.floor)(v / 24) * 24;
+        const box = { x0: q(Math.min(...corners.map(c => c.x)), false) - 48, y0: q(Math.min(...corners.map(c => c.y)), false) - 48,
+          x1: q(Math.max(...corners.map(c => c.x)), true) + 24, y1: q(Math.max(...corners.map(c => c.y)), true) + 24 };
         const key = `${box.x0},${box.y0},${box.x1},${box.y1}`;
         if (key !== st.visKey) { st.visKey = key; setVis(box); }
       }
@@ -209,68 +217,74 @@ export function DocksView(props: Props) {
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  // what's near the camera
+  // what's near the camera (world tiles)
+  type Vis = { plot: Plot; pl: Placed; x: number; y: number };
   const visible = useMemo(() => {
-    const out: { plot: Plot; pl: Placed }[] = [];
-    for (const plot of world.plots) for (const pl of plot.friends)
-      if (pl.x + pl.m.cw >= vis.x0 && pl.x <= vis.x1 && pl.y + pl.m.ch >= vis.y0 && pl.y <= vis.y1) out.push({ plot, pl });
-    return out.sort((a, b) => (a.pl.x + a.pl.y + (a.pl.m.cw + a.pl.m.ch) / 2) - (b.pl.x + b.pl.y + (b.pl.m.cw + b.pl.m.ch) / 2));
+    const out: Vis[] = [];
+    for (const plot of world.plots) {
+      const b = world.box.get(plot), o = world.origin.get(plot);
+      if (!b || !o || b.x1 < vis.x0 || b.x0 > vis.x1 || b.y1 < vis.y0 || b.y0 > vis.y1) continue;
+      for (const pl of plot.friends) {
+        const x = o.x + T(pl.x), y = o.y + T(pl.y);
+        if (x + T(pl.m.cw) >= vis.x0 && x <= vis.x1 && y + T(pl.m.ch) >= vis.y0 && y <= vis.y1) out.push({ plot, pl, x, y });
+      }
+    }
+    return out.sort((a, b) => (a.x + a.y + T(a.pl.m.cw + a.pl.m.ch) / 2) - (b.x + b.y + T(b.pl.m.cw + b.pl.m.ch) / 2));
   }, [world, version, vis]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { props.onVisible(visible.map(v => v.pl)); }, [visible]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const boards = useMemo(() => visible.map(({ pl }) => diamond(T(pl.x), T(pl.y), T(pl.x + pl.m.cw), T(pl.y + pl.m.ch))).join(""), [visible]);
-  const seams = useMemo(() => {
-    const open: string[] = [], shut: string[] = [], gates = new Map<string, { x: number; y: number; n: number; plot: Plot }>();
-    for (const { plot, pl } of visible) {
-      if (!plot.docked) continue;
-      const side = (cx: number, cy: number, x0: number, y0: number, x1: number, y1: number) => {
-        const n = world.occ.get(ck(cx, cy));
-        if (!n || n.plot === plot || !n.plot.docked || plot.id > n.plot.id) return;   // each seam drawn once
-        const other = plot.mine ? n.plot : n.plot.mine ? plot : (canEnter(world, plot) ? n.plot : plot);
-        const shutNow = !canEnter(world, plot) || !canEnter(world, n.plot);
-        const a = toScreen(x0, y0), b = toScreen(x1, y1);
-        (shutNow ? shut : open).push(`M${a.x.toFixed(1)} ${a.y.toFixed(1)}L${b.x.toFixed(1)} ${b.y.toFixed(1)}`);
-        const gk = `${plot.id}|${n.plot.id}`, g = gates.get(gk) ?? { x: 0, y: 0, n: 0, plot: other };
-        g.x += (a.x + b.x) / 2; g.y += (a.y + b.y) / 2; g.n++; gates.set(gk, g);
-      };
-      for (let i = 0; i < pl.m.cw; i++) {
-        side(pl.x + i, pl.y - 1, T(pl.x + i), T(pl.y), T(pl.x + i + 1), T(pl.y));
-        side(pl.x + i, pl.y + pl.m.ch, T(pl.x + i), T(pl.y + pl.m.ch), T(pl.x + i + 1), T(pl.y + pl.m.ch));
-      }
-      for (let j = 0; j < pl.m.ch; j++) {
-        side(pl.x - 1, pl.y + j, T(pl.x), T(pl.y + j), T(pl.x), T(pl.y + j + 1));
-        side(pl.x + pl.m.cw, pl.y + j, T(pl.x + pl.m.cw), T(pl.y + j), T(pl.x + pl.m.cw), T(pl.y + j + 1));
+  const boards = useMemo(() => visible.map(v => diamond(v.x, v.y, v.x + T(v.pl.m.cw), v.y + T(v.pl.m.ch))).join(""), [visible]);
+  const walkways = useMemo(() => {
+    const g: string[] = [], br: string[] = [];
+    for (const [k, kind] of world.walk) {
+      const x = Math.floor(k / (1 << 21)) - (1 << 20), y = (k % (1 << 21)) - (1 << 20);
+      if (x < vis.x0 || x > vis.x1 || y < vis.y0 || y > vis.y1) continue;
+      if (tileAt(world, x + 0.5, y + 0.5)?.plot) continue;            // island ground takes precedence
+      (kind === "bridge" ? br : g).push(diamond(x, y, x + 1, y + 1));
+    }
+    return { gangway: g.join(""), bridge: br.join("") };
+  }, [world, version, vis]); // eslint-disable-line react-hooks/exhaustive-deps
+  const gates = useMemo(() => {
+    const out: { x: number; y: number; open: boolean; key: string }[] = [], seen = new Set<string>();
+    for (const p of world.plots) {
+      if (!p.berth) continue;
+      for (const q of neighboursOf(world, p)) {
+        const key = [p.id, q.id].sort().join("|"); if (seen.has(key)) continue; seen.add(key);
+        const a = world.box.get(p)!, b = world.box.get(q)!;
+        const c = toScreen(((a.x0 + a.x1) / 2 + (b.x0 + b.x1) / 2) / 2, ((a.y0 + a.y1) / 2 + (b.y0 + b.y1) / 2) / 2);
+        out.push({ x: c.x, y: c.y, open: canEnter(world, p) && canEnter(world, q), key });
       }
     }
-    return { open: open.join(""), shut: shut.join(""), gates: [...gates.values()].map(g => ({ x: g.x / g.n, y: g.y / g.n, plot: g.plot })) };
-  }, [visible, world, version]); // eslint-disable-line react-hooks/exhaustive-deps
-  const labels = useMemo(() => world.plots.filter(p => p.friends.length).map(p => {
-    const b = plotBounds(p), c = toScreen(T(b.x0), T(b.y0));
+    return out;
+  }, [world, version]); // eslint-disable-line react-hooks/exhaustive-deps
+  const labels = useMemo(() => world.plots.filter(p => p.friends.length && world.box.get(p)).map(p => {
+    const b = world.box.get(p)!, c = toScreen(b.x0, b.y0);
     return { plot: p, x: c.x, y: c.y - 20, rank: rankOf(p).rank };
   }), [world, version]); // eslint-disable-line react-hooks/exhaustive-deps
-  const myVisible = arranging ? visible.filter(v => v.plot.mine) : [];
+  const selPlot = selected ? plotOf(world, selected.m.id) : null;
+  const myVisible = arranging ? visible.filter(v => v.plot === selPlot) : [];
 
   return <div className="docks-viewport" ref={viewport} onPointerDown={onPointer} aria-hidden="true">
     <div className="docks-layer" ref={layer}>
-      <svg className="docks-seams" width="1" height="1" style={{ zIndex: 5 }}><path d={boards} className="pier" /></svg>
-      {visible.map(({ plot, pl }, i) => {
-        const f = pl.m.friend, o = toScreen(T(pl.x), T(pl.y));
-        if (!f) { const c = toScreen(T(pl.x + pl.m.cw / 2), T(pl.y + pl.m.ch / 2));
+      <svg className="docks-seams" width="1" height="1" style={{ zIndex: 5 }}>
+        <path d={walkways.gangway} className="gangway" /><path d={walkways.bridge} className="bridge" /><path d={boards} className="pier" /></svg>
+      {visible.map(({ plot, pl, x, y }, i) => {
+        const f = pl.m.friend, o = toScreen(x, y);
+        if (!f) { const c = toScreen(x + T(pl.m.cw) / 2, y + T(pl.m.ch) / 2);
           return <span key={`${plot.id}-${pl.m.id}`} className="docks-pending" style={{ left: c.x, top: c.y, zIndex: 10 + i }}>#{String(pl.m.id)}</span>; }
         const src = plot.mine && pl.m.id === walkerId ? f.artWithoutPortrait : f.art;
-        return <img key={`${plot.id}-${pl.m.id}`} className={`docks-land ${plot.docked ? "" : "adrift"}`} src={src} alt="" draggable={false}
+        return <img key={`${plot.id}-${pl.m.id}`} className={`docks-land ${plot.berth ? "" : "adrift"}`} src={src} alt="" draggable={false}
           style={{ left: o.x - f.anchor.x, top: o.y - f.anchor.y, zIndex: 10 + i }} />;
       })}
       <svg className="docks-seams" width="1" height="1" style={{ zIndex: 500 }}>
-        <path d={seams.open} className="seam-open" /><path d={seams.shut} className="seam-shut" />
-        {myVisible.map(({ pl }) => <path key={String(pl.m.id)} d={diamond(T(pl.x), T(pl.y), T(pl.x + pl.m.cw), T(pl.y + pl.m.ch))}
-          className={moveAll || pl === selected ? "selected-outline" : "other-outline"} />)}
+        {myVisible.map(({ pl, x, y }) => <path key={String(pl.m.id)} d={diamond(x, y, x + T(pl.m.cw), y + T(pl.m.ch))}
+          className={pl === selected ? "selected-outline" : "other-outline"} />)}
       </svg>
-      {seams.gates.map((g, i) => <span key={i} className={`docks-gate ${canEnter(world, g.plot) ? "open" : "shut"}`} style={{ left: g.x, top: g.y, zIndex: 600 }}>{canEnter(world, g.plot) ? "⇄" : "🔒"}</span>)}
+      {gates.map(g => <span key={g.key} className={`docks-gate ${g.open ? "open" : "shut"}`} style={{ left: g.x, top: g.y, zIndex: 600 }}>{g.open ? "⇄" : "🔒"}</span>)}
       {labels.map(l => <span key={l.plot.id} className={`docks-plot-label ${l.plot.mine ? "mine" : ""}`} style={{ left: l.x, top: l.y, zIndex: 700 }}>
-        {l.plot.name} · {l.rank}{l.plot.mine ? ` · ${l.plot.friends.length}` : l.plot.access === "open" ? " · open" : " · invite"}{l.plot.docked ? "" : " · adrift"}</span>)}
-      {myVisible.length <= 150 && myVisible.map(({ pl }) => { const c = toScreen(T(pl.x + pl.m.cw / 2), T(pl.y + pl.m.ch / 2));
-        return <span key={String(pl.m.id)} className={`docks-friend-tag ${moveAll || pl === selected ? "sel" : ""}`} style={{ left: c.x, top: c.y, zIndex: 800 }}>#{String(pl.m.id)}</span>; })}
+        {l.plot.name} · {l.rank}{l.plot.mine ? ` · ${l.plot.friends.length}` : l.plot.access === "open" ? " · open" : " · invite"}{l.plot.berth ? "" : " · floating"}</span>)}
+      {myVisible.length <= 150 && myVisible.map(({ pl, x, y }) => { const c = toScreen(x + T(pl.m.cw) / 2, y + T(pl.m.ch) / 2);
+        return <span key={String(pl.m.id)} className={`docks-friend-tag ${pl === selected ? "sel" : ""}`} style={{ left: c.x, top: c.y, zIndex: 800 }}>#{String(pl.m.id)}</span>; })}
       {crew.map(m => <canvas key={String(m.id)} ref={el => { if (el) crewCanvases.current.set(String(m.id), el); else crewCanvases.current.delete(String(m.id)); }}
         className="docks-avatar crew" width={36} height={36} style={{ zIndex: 890 }} />)}
       <canvas ref={avatar} className="docks-avatar" width={36} height={36} style={{ zIndex: 900 }} />

@@ -114,20 +114,20 @@ try {
   await page.getByRole("button", { name: /^Friend #7730\b/ }).click();
   if (failImport) { await game.getByText(/Couldn't read your Friend from chain/).waitFor(); await shot("fail-state"); console.log("ok", tag, "(import failure shows retry)"); process.exit(0); }
   await game.locator("img.docks-land").first().waitFor();
-  await game.getByText(many ? /All [\d,]+ of your activated Friends are here/ : /All 2 of your activated Friends are here/).waitFor();
+  await game.getByText(many ? /All [\d,]+ of your activated Friends joined into one floating island/ : /All 2 of your activated Friends joined into one floating island/).waitFor();
   await page.waitForTimeout(1200);
   await shot("start");
   const btn = name => game.getByRole("button", { name, exact: false }).first();
   // dock
   await btn("Docks").click();
-  await game.getByRole("img", { name: /Map: \d+ docked plots/ }).waitFor();
+  await game.getByRole("img", { name: /Map: \d+ docked islands, \d+ loading zones/ }).waitFor();
   await shot("map");
   await game.locator(".docks-slots button").first().click();
-  await game.getByText(/Docked beside \d/).waitFor();
+  await game.getByText(/Your island docked next to .* \(gas only, simulated\)/).waitFor();
   await page.waitForTimeout(600);
   await shot("docked");
   // my other Friends arrived automatically; adding by number is only a fallback
-  await btn("My plot").click();
+  await btn("Islands").click();
   await game.getByText(many ? `${(many + 2).toLocaleString("en-US")} Friends ·` : "2 Friends ·", { exact: false }).first().waitFor();
   await game.getByLabel("Missing one? Add by number").fill("7843");
   await game.getByRole("button", { name: "Add", exact: true }).click();
@@ -157,7 +157,7 @@ try {
     await game.getByText(/Saving burns 55k RF; you have 5,000/).waitFor();
   } else {
     await game.getByRole("button", { name: /Mint plot \+ save · 2 moved · 40 RF/ }).click();
-    await game.getByText(/Saved on chain \(simulated\): Plot #\d+ · 2 Friends moved · 40 RF burned/).waitFor();
+    await game.getByText(/Saved on chain \(simulated\): minted Plot #\d+ · 2 Friends moved · 40 RF burned/).waitFor();
     await shot("saved");
     // one more move is a new draft: only that Friend is charged; Undo returns to the save
     await game.locator(".docks-arrange-btn").click();
@@ -169,7 +169,7 @@ try {
     await btn("Done").click();
     await game.getByText(/touch the rest|Arranged/).first().waitFor().catch(() => {});
     if (await game.getByRole("toolbar", { name: "Arrange your Friends" }).count()) await game.getByRole("button", { name: "Auto-arrange" }).click(), await btn("Done").click();
-    if (await game.getByRole("button", { name: "Undo" }).count()) { await game.getByRole("button", { name: "Undo" }).click(); await game.getByText("Back to your saved arrangement.").waitFor(); }
+    if (await game.getByRole("button", { name: "Undo" }).count()) { await game.getByRole("button", { name: "Undo" }).click(); await game.getByText("Back to your saved islands.").waitFor(); }
   }
   // walk toward neighbours for a bit
   for (const k of ["d", "w", "a", "s"]) { await page.keyboard.down(k); await page.waitForTimeout(900); await page.keyboard.up(k); }
@@ -180,10 +180,10 @@ try {
   // crew: others walk behind (up to 8 by default); send #7573 to stay on the plot
   assert.equal(await game.locator("canvas.docks-avatar.crew").count(), Math.min(8, 1 + many), "crew followers drawn");
   if (many) assert.ok(await game.locator("img.docks-land").count() < 400, "only lands near the camera are drawn");
-  await btn("My plot").click();
+  await btn("Islands").click();
   await game.locator(".docks-friend", { hasText: "#7573" }).getByRole("button", { name: "Walking with you" }).click();
-  await game.locator(".docks-friend", { hasText: "#7573" }).getByRole("button", { name: "Stays on plot" }).waitFor();
-  await game.getByRole("button", { name: "Close My plot" }).click();
+  await game.locator(".docks-friend", { hasText: "#7573" }).getByRole("button", { name: "Stays on island" }).waitFor();
+  await game.getByRole("button", { name: "Close My islands" }).click();
   // tokens: claim the sample $MKT, then launch our own
   await btn("Tokens").click();
   await game.getByRole("button", { name: /^Claim for \d[\d,]* Friends?/ }).first().click();
@@ -192,7 +192,7 @@ try {
   await game.getByLabel("Ticker").fill("DOCK");
   if (many) {                                    // the 10k plot couldn't afford its first save, so it can't launch
     await game.getByRole("button", { name: /Launch for 1,000 RF/ }).click();
-    await game.getByText(/Save your plot on chain first/).waitFor();
+    await game.getByText(/Save your island on chain first/).waitFor();
   } else {
     await game.getByRole("button", { name: /Launch for 1,000 RF/ }).click();
     await game.getByText(/\$DOCK launched \(simulated\)/).waitFor();
@@ -201,6 +201,29 @@ try {
   const rfText = await game.locator(".docks-rf").textContent();
   if (!many) { assert.match(rfText, /Your RF\s*3,950/, "5,000 − 40 save − 2×5 claims − 1,000 launch"); assert.match(rfText, /Burned\s*550/); }
   await game.getByRole("button", { name: "Close Tokens" }).click();
+  if (!many) {
+    // a bridge to an island we aren't docked next to burns RF per berth of distance
+    await btn("Docks").click();
+    const bridge = game.getByRole("button", { name: /^Bridge to / }).first();
+    const cost = Number((await bridge.locator("small").textContent()).replace(/\D/g, ""));
+    assert.ok(cost >= 20 && cost % 10 === 0, `bridge cost ${cost}`);
+    await bridge.click();
+    await game.getByText(new RegExp(`Bridge built from Your island to .* \\(simulated\\): ${cost} RF burned`)).waitFor();
+    await shot("bridge");
+    for (let i = 0; i < 5; i++) await game.getByRole("button", { name: "Zoom out" }).click();
+    await page.waitForTimeout(1500); await shot("world");
+    for (let i = 0; i < 5; i++) await game.getByRole("button", { name: "Zoom in" }).click();
+    // deploy #7573 to a second island: joining a new island counts as a move (Gen 3: 20 RF)
+    await btn("Islands").click();
+    await game.getByRole("button", { name: "＋ New island" }).click();
+    await game.getByRole("tab", { name: /Your island/ }).click();
+    await game.getByLabel("Deploy #7573 to").selectOption({ label: "→ Island 2" });
+    await game.getByText(/#7573 deployed to Island 2/).waitFor();
+    await game.getByRole("button", { name: "Close My islands" }).click();
+    await game.getByRole("button", { name: /Mint plot \+ save · 1 moved · 20 RF/ }).click();
+    await game.getByText(/minted Plot #\d+ · 1 Friend moved · 20 RF burned/).waitFor();
+    await shot("two-islands");
+  }
   const alerts = await game.locator("[role=alert]").allTextContents();
   assert.deepEqual(alerts, [], "No in-game alerts");
   // The SDK fixture only has sprite art for #7730; the crew's sprite reads for others are refused

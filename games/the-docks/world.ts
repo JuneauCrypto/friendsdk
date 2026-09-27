@@ -1,27 +1,28 @@
-/* The Docks — pure logic, no rendering. Built to scale from 1 to 10,000+ Friends per plot.
+/* The Docks — pure logic, no rendering. Floating islands made of activated Friends.
  *
- * - Everything lives on the on-chain grid (DocksPlots): 4 × 4-tile cells. A Friend covers
- *   whole cells at true size by generation, so layout needs no artwork; art loads lazily.
- * - A plot is one holder's Friends. Its Friends must form one connected shape: each touches
- *   another along at least part of a side. Holes are fine.
- * - Plots dock edge to edge; the seam where two plots touch is the walkway between them.
- *   Crossing into someone else's plot needs their approval unless they keep it open. */
+ * - Every Friend is a small floating island. A plot is an island made of Friends joined
+ *   together, laid out on the plot's own grid of 4 × 4-tile cells (true size by generation).
+ *   Each Friend must touch another along part of a side. A holder can deploy their Friends
+ *   across several plots; every plot is an NFT (DocksPlots).
+ * - Islands float on one shared berth grid: one island per berth, whatever its size, so the
+ *   world grows with the number of plots, not their size. An island docks at a free berth
+ *   next to another island (a loading zone). Neighbouring islands are joined by a gangway.
+ * - Bridges (paid in RF, per berth of distance) join islands that aren't neighbours.
+ * - Crossing onto someone else's island needs their approval unless they keep it open.
+ * Built to scale to 10,000+ Friends per island: layout needs no artwork (footprints come from
+ * generation) and occupancy is per cell. */
 import { REWARD_WEIGHT, type Friend } from "./land.js";
 
 export const CELL = 4;                                             // tiles per cell side
+export const GAP = 6;                                              // tiles of water between neighbouring berths
+const MIN_BERTH = 12;                                              // tiles: the smallest berth drawn
 /** Footprint in cells by generation: lands are 30, 20, 18×16, 12, 8 and 4 tiles across. */
 export const FOOTPRINT: Readonly<Record<number, readonly [number, number]>> = { 1: [8, 8], 2: [5, 5], 3: [5, 4], 4: [3, 3], 5: [2, 2], 6: [1, 1] };
-
-/** RF burned per Friend moved when an arrangement is saved on chain (DocksPlots.FEE_GEN1…6). */
+/** RF burned per Friend moved on its island when saved on chain (DocksPlots.FEE_GEN1…6). */
 export const ARRANGE_FEE: Readonly<Record<number, number>> = { 1: 100, 2: 50, 3: 20, 4: 10, 5: 5, 6: 1 };
 export const feeOf = (m: { gen: number }) => ARRANGE_FEE[m.gen] ?? 1;
-/** Friends whose spot differs from the last saved (on-chain) arrangement, and the RF that saving burns. */
-export function pendingChanges(p: Plot, saved: ReadonlyMap<bigint, { x: number; y: number }>) {
-  let rf = 0; const moved: Placed[] = [];
-  for (const pl of p.friends) { const s = saved.get(pl.m.id); if (!s || s.x !== pl.x || s.y !== pl.y) { moved.push(pl); rf += feeOf(pl.m); } }
-  const gone = [...saved.keys()].filter(id => !p.friends.some(pl => pl.m.id === id));
-  return { moved, rf, gone };
-}
+/** RF burned per berth of distance a bridge spans (DocksPlots.BRIDGE_FEE_PER_BERTH). */
+export const BRIDGE_FEE_PER_BERTH = 10;
 
 export type Member = {
   id: bigint; gen: number; tier: number; cw: number; ch: number;
@@ -34,54 +35,121 @@ export const member = (id: bigint, gen: number, tier: number, friend: Friend | n
 export const memberOf = (f: Friend) => member(f.tokenId, Number(f.traits.Generation), Number(f.traits["Activation tier"] ?? 0), f);
 
 export type Access = "open" | "invite";
-export type Placed = { m: Member; x: number; y: number };        // cell position of the footprint's corner
+export type Placed = { m: Member; x: number; y: number };        // cell position on its island's own grid
+export type Berth = { x: number; y: number };
 export type Plot = {
   id: string; name: string; mine: boolean; access: Access;
-  friends: Placed[]; docked: boolean;
+  friends: Placed[];
+  berth: Berth | null;                                             // null: floating free, not docked
   policy?: "approve" | "decline";                                  // sample neighbours' simulated answer
 };
+export type Bridge = { a: Plot; b: Plot; at: [Berth, Berth] };   // breaks if either island moves
 export type Visit = "none" | "pending" | "approved" | "declined";
+export type Box = { x0: number; y0: number; x1: number; y1: number };
 export type World = {
-  plots: Plot[]; visits: Map<string, Visit>; version: number;
-  occ: Map<number, { plot: Plot; placed: Placed }>;                // cell → occupant
+  plots: Plot[]; visits: Map<string, Visit>; version: number; bridges: Bridge[];
+  occ: Map<Plot, Map<number, Placed>>;                             // island cell → Friend
+  berths: Map<number, Plot>;
+  origin: Map<Plot, { x: number; y: number }>;                     // world tile of the island's cell (0, 0)
+  box: Map<Plot, Box>;                                             // island bounds, world tiles
+  cols: { b: number; x0: number; x1: number }[]; rows: { b: number; y0: number; y1: number }[];
+  walk: Map<number, "gangway" | "bridge">;                         // walkway tiles over the water
 };
 
-// Numeric cell keys (fast for large plots). Coordinates stay well inside ±2^20.
-const K = 1 << 21, H = 1 << 20;
-export const ck = (x: number, y: number) => (x + H) * K + (y + H);
-export const mine = (w: World) => w.plots.find(p => p.mine)!;
+// Numeric keys (fast for large islands). Coordinates stay well inside ±2^20.
+const K = 1 << 21, HALF = 1 << 20;
+export const ck = (x: number, y: number) => (x + HALF) * K + (y + HALF);
+const T = (c: number) => c * CELL;
+export const myPlots = (w: World) => w.plots.filter(p => p.mine);
+export const plotOf = (w: World, id: bigint) => w.plots.find(p => p.friends.some(pl => pl.m.id === id)) ?? null;
 
-function occupy(w: World, plot: Plot, pl: Placed) {
-  for (let j = 0; j < pl.m.ch; j++) for (let i = 0; i < pl.m.cw; i++) w.occ.set(ck(pl.x + i, pl.y + j), { plot, placed: pl });
+/* ── building the world ── */
+
+export function emptyWorld(): World {
+  return { plots: [], visits: new Map(), version: 0, bridges: [], occ: new Map(), berths: new Map(), origin: new Map(), box: new Map(), cols: [], rows: [], walk: new Map() };
 }
-function vacate(w: World, pl: Placed) {
-  for (let j = 0; j < pl.m.ch; j++) for (let i = 0; i < pl.m.cw; i++) {
-    const k = ck(pl.x + i, pl.y + j); if (w.occ.get(k)?.placed === pl) w.occ.delete(k);
-  }
-}
+
 export function rebuild(w: World) {
-  w.occ = new Map();
-  for (const plot of w.plots) for (const pl of plot.friends) occupy(w, plot, pl);
+  w.occ = new Map(); w.berths = new Map();
+  for (const p of w.plots) {
+    const m = new Map<number, Placed>();
+    for (const pl of p.friends) for (let j = 0; j < pl.m.ch; j++) for (let i = 0; i < pl.m.cw; i++) m.set(ck(pl.x + i, pl.y + j), pl);
+    w.occ.set(p, m);
+    if (p.berth && p.friends.length) w.berths.set(ck(p.berth.x, p.berth.y), p);
+    else if (p.berth && !p.friends.length) p.berth = null;
+  }
+  w.bridges = w.bridges.filter(b => b.a.berth && b.b.berth && same(b.a.berth, b.at[0]) && same(b.b.berth, b.at[1]));
+  layout(w);
   w.version++;
 }
+const same = (a: Berth, b: Berth) => a.x === b.x && a.y === b.y;
 
-export function createWorld(neighbours: Plot[], myPlot: Plot): World {
-  const w: World = { plots: [], visits: new Map(), version: 0, occ: new Map() };
-  for (const p of neighbours) {                                    // grow the sample community plot by plot
-    if (!w.plots.length) { p.docked = true; w.plots.push(p); rebuild(w); continue; }
-    w.plots.push(p); p.docked = false;
-    const slot = dockSlots(w, p)[0];
-    if (slot) { shiftPlot(p, slot.dx, slot.dy); p.docked = true; }
-    rebuild(w);
+/** Berths become a table: each column as wide as its widest island, each row as tall as its
+ *  tallest, with water between. Islands sit centred in their berth. */
+function layout(w: World) {
+  const docked = w.plots.filter(p => p.berth && p.friends.length);
+  const colW = new Map<number, number>(), rowH = new Map<number, number>();
+  for (const p of docked) {
+    const b = plotBounds(p), bx = p.berth!.x, by = p.berth!.y;
+    colW.set(bx, Math.max(colW.get(bx) ?? MIN_BERTH, T(b.x1 - b.x0)));
+    rowH.set(by, Math.max(rowH.get(by) ?? MIN_BERTH, T(b.y1 - b.y0)));
   }
-  w.plots.unshift(myPlot);
-  placeAdrift(w);
+  const span = (m: Map<number, number>) => { const k = [...m.keys()]; return k.length ? [Math.min(...k), Math.max(...k)] : [0, -1]; };
+  const [cx0, cx1] = span(colW), [ry0, ry1] = span(rowH);
+  w.cols = []; w.rows = [];
+  for (let b = cx0, x = 0; b <= cx1; b++) { const wd = colW.get(b) ?? MIN_BERTH; w.cols.push({ b, x0: x, x1: x + wd }); x += wd + GAP; }
+  for (let b = ry0, y = 0; b <= ry1; b++) { const ht = rowH.get(b) ?? MIN_BERTH; w.rows.push({ b, y0: y, y1: y + ht }); y += ht + GAP; }
+  w.origin = new Map(); w.box = new Map();
+  const place = (p: Plot, left: number, top: number, width: number, height: number) => {
+    const b = plotBounds(p), wT = T(b.x1 - b.x0), hT = T(b.y1 - b.y0);
+    const ox = left + Math.floor((width - wT) / 2) - T(b.x0), oy = top + Math.floor((height - hT) / 2) - T(b.y0);
+    w.origin.set(p, { x: ox, y: oy });
+    w.box.set(p, { x0: ox + T(b.x0), y0: oy + T(b.y0), x1: ox + T(b.x1), y1: oy + T(b.y1) });
+  };
+  for (const p of docked) {
+    const c = w.cols.find(c => c.b === p.berth!.x)!, r = w.rows.find(r => r.b === p.berth!.y)!;
+    place(p, c.x0, r.y0, c.x1 - c.x0, r.y1 - r.y0);
+  }
+  // islands floating free (mine, not docked yet) drift just below the docks
+  let fx = 0; const fy = (w.rows.at(-1)?.y1 ?? 0) + GAP * 2;
+  for (const p of w.plots) if (!p.berth && p.friends.length) {
+    const b = plotBounds(p), wT = T(b.x1 - b.x0), hT = T(b.y1 - b.y0);
+    place(p, fx, fy, wT, hT); fx += wT + GAP * 2;
+  }
+  // walkways: gangways between neighbouring berths, bridges wherever built
+  w.walk = new Map();
+  const centre = (p: Plot) => { const b = w.box.get(p)!; return { x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2 }; };
+  for (const p of docked) for (const [dx, dy] of [[1, 0], [0, 1]]) {
+    const q = w.berths.get(ck(p.berth!.x + dx, p.berth!.y + dy)); if (!q) continue;
+    const a = centre(p), b = centre(q);
+    if (dx) { const y = Math.floor(w.rows.find(r => r.b === p.berth!.y)!.y0 + (w.rows.find(r => r.b === p.berth!.y)!.y1 - w.rows.find(r => r.b === p.berth!.y)!.y0) / 2);
+      for (let x = Math.floor(a.x); x <= Math.ceil(b.x); x++) for (const yy of [y - 1, y]) w.walk.set(ck(x, yy), "gangway"); }
+    else { const col = w.cols.find(c => c.b === p.berth!.x)!, x = Math.floor(col.x0 + (col.x1 - col.x0) / 2);
+      for (let y = Math.floor(a.y); y <= Math.ceil(b.y); y++) for (const xx of [x - 1, x]) w.walk.set(ck(xx, y), "gangway"); }
+  }
+  for (const br of w.bridges) {
+    const a = centre(br.a), b = centre(br.b), len = Math.hypot(b.x - a.x, b.y - a.y);
+    for (let t = 0; t <= len; t += 0.5) {
+      const x = a.x + (b.x - a.x) * t / len, y = a.y + (b.y - a.y) * t / len;
+      for (const [ox, oy] of [[-0.7, -0.7], [0.7, -0.7], [-0.7, 0.7], [0.7, 0.7]]) {
+        const k = ck(Math.floor(x + ox), Math.floor(y + oy)); if (!w.walk.has(k)) w.walk.set(k, "bridge");
+      }
+    }
+  }
+}
+
+/** Sample neighbours float at their berths; my islands start floating free until docked. */
+export function createWorld(neighbours: Plot[], mineToo: Plot[]): World {
+  const w = emptyWorld();
+  w.plots = [...mineToo, ...neighbours];
+  rebuild(w);
   return w;
 }
 
-/* ── auto-arrange: one connected block, biggest Friends first ──
- * Shelf packing: rows of Friends flush side by side; each row starts with its tallest Friend
- * and sits flush under the previous row, so every Friend touches another along a side. */
+/* ── an island's own grid ── */
+
+/** One connected block, biggest Friends first: rows flush side by side, each row flush under
+ *  the one before and starting with its tallest Friend, so every Friend touches another. */
 export function autoArrange(members: Member[]): Placed[] {
   const list = [...members].sort((a, b) => b.cw * b.ch - a.cw * a.ch || b.ch - a.ch || (a.id < b.id ? -1 : 1));
   const area = list.reduce((s, m) => s + m.cw * m.ch, 0);
@@ -94,161 +162,67 @@ export function autoArrange(members: Member[]): Placed[] {
   }
   return out;
 }
-
-/** Friends not connected to the first one (each must touch another along part of a side). */
-export function disconnected(w: World, p: Plot): Placed[] {
-  if (p.friends.length < 2) return [];
-  const seen = new Set<Placed>([p.friends[0]]), queue = [p.friends[0]];
-  while (queue.length) {
-    const pl = queue.pop()!;
-    for (const [nx, ny] of edgeCells(pl)) {
-      const o = w.occ.get(ck(nx, ny));
-      if (o && o.plot === p && !seen.has(o.placed)) { seen.add(o.placed); queue.push(o.placed); }
-    }
-  }
-  return p.friends.filter(pl => !seen.has(pl));
-}
-/** Cells just outside a Friend's footprint, along its four sides. */
 function* edgeCells(pl: Placed): Generator<[number, number]> {
   for (let i = 0; i < pl.m.cw; i++) { yield [pl.x + i, pl.y - 1]; yield [pl.x + i, pl.y + pl.m.ch]; }
   for (let j = 0; j < pl.m.ch; j++) { yield [pl.x - 1, pl.y + j]; yield [pl.x + pl.m.cw, pl.y + j]; }
 }
-
-/* ── plot geometry ── */
-export function plotBounds(p: Plot) {
+/** Friends not joined to the first one (each must touch another along part of a side). */
+export function disconnected(w: World, p: Plot): Placed[] {
+  if (p.friends.length < 2) return [];
+  const occ = w.occ.get(p)!, seen = new Set<Placed>([p.friends[0]]), queue = [p.friends[0]];
+  while (queue.length) {
+    const pl = queue.pop()!;
+    for (const [nx, ny] of edgeCells(pl)) { const o = occ.get(ck(nx, ny)); if (o && !seen.has(o)) { seen.add(o); queue.push(o); } }
+  }
+  return p.friends.filter(pl => !seen.has(pl));
+}
+export function plotBounds(p: Plot): Box {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const pl of p.friends) { x0 = Math.min(x0, pl.x); y0 = Math.min(y0, pl.y); x1 = Math.max(x1, pl.x + pl.m.cw); y1 = Math.max(y1, pl.y + pl.m.ch); }
-  return { x0, y0, x1, y1 };
+  return p.friends.length ? { x0, y0, x1, y1 } : { x0: 0, y0: 0, x1: 1, y1: 1 };
 }
-export function communityBounds(w: World) {
-  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (const p of w.plots) { if (!p.docked || !p.friends.length) continue; const b = plotBounds(p); x0 = Math.min(x0, b.x0); y0 = Math.min(y0, b.y0); x1 = Math.max(x1, b.x1); y1 = Math.max(y1, b.y1); }
-  return { x0, y0, x1, y1 };
+export function moveGroup(w: World, p: Plot, group: Placed[], dx: number, dy: number) {
+  if (!group.length) return false;
+  const occ = w.occ.get(p)!, inGroup = new Set(group);
+  for (const pl of group) for (let j = 0; j < pl.m.ch; j++) for (let i = 0; i < pl.m.cw; i++) {
+    const o = occ.get(ck(pl.x + dx + i, pl.y + dy + j)); if (o && !inGroup.has(o)) return false;
+  }
+  for (const pl of group) { pl.x += dx; pl.y += dy; }
+  rebuild(w); return true;
 }
-export function shiftPlot(p: Plot, dx: number, dy: number) { for (const pl of p.friends) { pl.x += dx; pl.y += dy; } }
-
-/** Float my plot just off the community until I dock it. */
-export function placeAdrift(w: World) {
-  const me = mine(w), others = { ...w, plots: w.plots.filter(p => p !== me) }, c = communityBounds(others);
-  me.docked = false;
-  if (!me.friends.length) { rebuild(w); return; }
-  const b = plotBounds(me);
-  const cx = Number.isFinite(c.x0) ? Math.round((c.x0 + c.x1) / 2 - (b.x1 - b.x0) / 2) : 0;
-  const cy = Number.isFinite(c.y1) ? c.y1 + 3 : 0;
-  shiftPlot(me, cx - b.x0, cy - b.y0);
+/** In a packed island: stepping onto a same-size Friend swaps the two. */
+export function swapInto(w: World, p: Plot, pl: Placed, dx: number, dy: number) {
+  const other = w.occ.get(p)!.get(ck(pl.x + dx, pl.y + dy));
+  if (!other || other === pl || other.x !== pl.x + dx || other.y !== pl.y + dy || other.m.cw !== pl.m.cw || other.m.ch !== pl.m.ch) return false;
+  [other.x, other.y, pl.x, pl.y] = [pl.x, pl.y, other.x, other.y];
+  rebuild(w); return true;
+}
+/** Attach a Friend flush against an island (first free spot touching it). */
+export function addToPlot(w: World, p: Plot, m: Member) {
+  const placed: Placed = { m, x: 0, y: 0 };
+  if (!p.friends.length) { p.friends.push(placed); rebuild(w); return placed; }
+  const occ = w.occ.get(p)!, b = plotBounds(p);
+  for (let r = 0; r < 512; r++) for (const [x, y] of [[b.x1, b.y0 + r], [b.x0 + r, b.y1], [b.x0 - m.cw, b.y0 + r], [b.x0 + r, b.y0 - m.ch]]) {
+    let free = true;
+    for (let j = 0; j < m.ch && free; j++) for (let i = 0; i < m.cw; i++) if (occ.has(ck(x + i, y + j))) { free = false; break; }
+    if (!free) continue;
+    placed.x = x; placed.y = y;
+    for (const [nx, ny] of edgeCells(placed)) if (occ.has(ck(nx, ny))) { p.friends.push(placed); rebuild(w); return placed; }
+  }
+  placed.x = b.x1; placed.y = b.y0; p.friends.push(placed); rebuild(w); return placed;
+}
+export function removeFromPlot(w: World, id: bigint) {
+  for (const p of w.plots) if (p.friends.some(pl => pl.m.id === id)) p.friends = p.friends.filter(pl => pl.m.id !== id);
   rebuild(w);
 }
-
-/* ── docking ── */
-export type Slot = { dx: number; dy: number; touches: Plot[]; seam: number };
-/** Cells of a plot, boundary cells first (overlaps are nearly always found there). */
-function cellsOf(p: Plot) {
-  const own = new Set<number>(), edge: [number, number][] = [], inner: [number, number][] = [];
-  for (const pl of p.friends) for (let j = 0; j < pl.m.ch; j++) for (let i = 0; i < pl.m.cw; i++) own.add(ck(pl.x + i, pl.y + j));
-  for (const pl of p.friends) for (let j = 0; j < pl.m.ch; j++) for (let i = 0; i < pl.m.cw; i++) {
-    const x = pl.x + i, y = pl.y + j;
-    const inside = [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([ox, oy]) => own.has(ck(x + ox, y + oy)));
-    (inside ? inner : edge).push([x, y]);
-  }
-  return { edge, all: [...edge, ...inner] };
+/** Deploy one of my Friends to another of my islands. */
+export function deploy(w: World, id: bigint, to: Plot) {
+  const from = plotOf(w, id), pl = from?.friends.find(x => x.m.id === id);
+  if (!from || !pl || from === to) return false;
+  from.friends = from.friends.filter(x => x !== pl); rebuild(w);
+  addToPlot(w, to, pl.m); return true;
 }
-function evaluate(w: World, p: Plot, cells: ReturnType<typeof cellsOf>, dx: number, dy: number) {
-  // only docked plots (and never p itself) can block a spot; adrift plots float elsewhere
-  for (const [x, y] of cells.all) { const o = w.occ.get(ck(x + dx, y + dy)); if (o && o.plot !== p && o.plot.docked) return null; }
-  const touches = new Set<Plot>(); let seam = 0;
-  for (const [x, y] of cells.edge) for (const [ox, oy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-    const n = w.occ.get(ck(x + dx + ox, y + dy + oy));
-    if (n && n.plot !== p && n.plot.docked) { touches.add(n.plot); seam++; }
-  }
-  return { touches: [...touches], seam };
-}
-/** Spots where the plot docks flush against the community (slides in along each side of each docked plot). */
-export function dockSlots(w: World, p: Plot): Slot[] {
-  if (!p.friends.length) return [];
-  const cells = cellsOf(p);
-  const pb = plotBounds(p), pw = pb.x1 - pb.x0, ph = pb.y1 - pb.y0, out = new Map<number, Slot>();
-  for (const q of w.plots) {
-    if (q === p || !q.docked || !q.friends.length) continue;
-    const qb = plotBounds(q), qw = qb.x1 - qb.x0, qh = qb.y1 - qb.y0;
-    const stepY = Math.max(1, Math.round((ph + qh) / 16)), stepX = Math.max(1, Math.round((pw + qw) / 16));
-    const tries: [number, number, number, number][] = [];
-    for (let o = -ph + 1; o < qh; o += stepY) { tries.push([qb.x1, qb.y0 + o, -1, 0]); tries.push([qb.x0 - pw, qb.y0 + o, 1, 0]); }
-    for (let o = -pw + 1; o < qw; o += stepX) { tries.push([qb.x0 + o, qb.y1, 0, -1]); tries.push([qb.x0 + o, qb.y0 - ph, 0, 1]); }
-    for (const [tx, ty, sx, sy] of tries) {
-      let dx = tx - pb.x0, dy = ty - pb.y0;
-      let best = evaluate(w, p, cells, dx, dy);
-      if (!best) continue;
-      for (let s = 0; s < 12 && best && best.seam === 0; s++) { const n = evaluate(w, p, cells, dx + sx, dy + sy); if (!n) break; dx += sx; dy += sy; best = n; }
-      if (!best || best.seam < 1) continue;
-      const k = ck(dx, dy);
-      if (!out.has(k)) out.set(k, { dx, dy, touches: best.touches, seam: best.seam });
-    }
-  }
-  const sorted = [...out.values()].sort((a, b) => b.touches.length - a.touches.length || b.seam - a.seam);
-  const picked: Slot[] = [];
-  for (const s of sorted) {
-    if (picked.some(q => Math.abs(q.dx - s.dx) < pw * 0.6 && Math.abs(q.dy - s.dy) < ph * 0.6)) continue;
-    picked.push(s); if (picked.length >= 8) break;
-  }
-  return picked;
-}
-export function dock(w: World, slot: Slot) { const me = mine(w); shiftPlot(me, slot.dx, slot.dy); me.docked = true; rebuild(w); }
-export function undock(w: World) { placeAdrift(w); }
-export function neighboursOf(w: World, p: Plot) {
-  const set = new Set<Plot>();
-  if (!p.docked) return [];
-  for (const pl of p.friends) for (const [x, y] of edgeCells(pl)) {
-    const n = w.occ.get(ck(x, y)); if (n && n.plot !== p && n.plot.docked) set.add(n.plot);
-  }
-  return [...set];
-}
-/** Whether a Friend touches any Friend of `host` along a side (the on-chain `adjacent`). */
-export function touchesPlot(w: World, pl: Placed, host: Plot) {
-  for (const [x, y] of edgeCells(pl)) if (w.occ.get(ck(x, y))?.plot === host) return true;
-  return false;
-}
-
-/* ── arranging my own Friends (any shape, connected, no overlaps) ── */
-export function moveGroup(w: World, group: Placed[], dx: number, dy: number) {
-  if (!group.length) return false;
-  const inGroup = new Set(group);
-  for (const pl of group) for (let j = 0; j < pl.m.ch; j++) for (let i = 0; i < pl.m.cw; i++) {
-    const o = w.occ.get(ck(pl.x + dx + i, pl.y + dy + j));
-    if (o && !inGroup.has(o.placed)) return false;
-  }
-  const plot = w.occ.get(ck(group[0].x, group[0].y))?.plot;
-  for (const pl of group) vacate(w, pl);
-  for (const pl of group) { pl.x += dx; pl.y += dy; if (plot) occupy(w, plot, pl); }
-  w.version++; return true;
-}
-export const moveFriend = (w: World, pl: Placed, dx: number, dy: number) => moveGroup(w, [pl], dx, dy);
-/** In a packed plot: stepping onto a same-size Friend of the same plot swaps the two. */
-export function swapInto(w: World, pl: Placed, dx: number, dy: number) {
-  const o = w.occ.get(ck(pl.x + dx, pl.y + dy));
-  if (!o || o.placed === pl) return false;
-  const other = o.placed;
-  if (other.x !== pl.x + dx || other.y !== pl.y + dy || other.m.cw !== pl.m.cw || other.m.ch !== pl.m.ch) return false;
-  if (w.occ.get(ck(pl.x, pl.y))?.plot !== o.plot) return false;
-  [other.x, other.y, pl.x, pl.y] = [pl.x, pl.y, other.x, other.y];
-  occupy(w, o.plot, pl); occupy(w, o.plot, other); w.version++;
-  return true;
-}
-export function removeFromPlot(w: World, id: bigint) { const me = mine(w); me.friends = me.friends.filter(p => p.m.id !== id); rebuild(w); }
-/** Attach a Friend flush against my plot (first free spot touching it). */
-export function addToPlot(w: World, m: Member) {
-  const me = mine(w), placed: Placed = { m, x: 0, y: 0 };
-  if (!me.friends.length) { me.friends.push(placed); placeAdrift(w); return placed; }
-  const b = plotBounds(me);
-  me.friends.push(placed);
-  for (let r = 0; r < 256; r++) for (const [x, y] of [[b.x1, b.y0 + r], [b.x0 + r, b.y1], [b.x0 - m.cw, b.y0 + r], [b.x0 + r, b.y0 - m.ch]]) {
-    placed.x = x; placed.y = y;
-    let free = true;
-    for (let j = 0; j < m.ch && free; j++) for (let i = 0; i < m.cw; i++) if (w.occ.has(ck(x + i, y + j))) { free = false; break; }
-    if (free && touchesPlot(w, placed, me)) { occupy(w, me, placed); w.version++; return placed; }
-  }
-  placed.x = b.x1; placed.y = b.y0; rebuild(w); return placed;
-}
-/** Fresh art/traits after an on-chain check. Returns false if the footprint changed and it must be re-placed. */
+/** Fresh art/traits after an on-chain check. Returns false if the generation (footprint) changed. */
 export function refreshMember(w: World, fresh: Friend) {
   for (const p of w.plots) for (const pl of p.friends) if (pl.m.id === fresh.tokenId) {
     pl.m.friend = fresh; pl.m.tier = Number(fresh.traits["Activation tier"] ?? 0);
@@ -258,18 +232,77 @@ export function refreshMember(w: World, fresh: Friend) {
   return true;
 }
 
-/* ── walking & access ── */
-export type TileInfo = { plot: Plot; placed: Placed; blocked: boolean; pier: boolean };
+/* ── docking (gas only) and bridges (RF) ── */
+
+const around = (b: Berth) => [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) => ({ x: b.x + dx, y: b.y + dy }));
+/** Free berths next to a docked island, where `p` can dock. The first island docks anywhere. */
+export function loadingZones(w: World, p: Plot): Berth[] {
+  const out = new Map<number, Berth>();
+  for (const q of w.plots) if (q !== p && q.berth && q.friends.length)
+    for (const b of around(q.berth)) { const o = w.berths.get(ck(b.x, b.y)); if (!o || o === p) out.set(ck(b.x, b.y), b); }
+  if (!out.size && ![...w.berths.values()].some(q => q !== p)) out.set(ck(0, 0), { x: 0, y: 0 });
+  return [...out.values()];
+}
+export function dockAt(w: World, p: Plot, b: Berth) {
+  const o = w.berths.get(ck(b.x, b.y));
+  if (o && o !== p) return false;
+  if (!loadingZones(w, p).some(z => same(z, b))) return false;
+  p.berth = { ...b }; rebuild(w); return true;
+}
+export function undock(w: World, p: Plot) { p.berth = null; rebuild(w); }
+const dist = (a: Berth, b: Berth) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+export const hasBridge = (w: World, a: Plot, b: Plot) => w.bridges.some(x => (x.a === a && x.b === b) || (x.a === b && x.b === a));
+export function connected(w: World, a: Plot, b: Plot) {
+  if (!a.berth || !b.berth || a === b) return false;
+  return dist(a.berth, b.berth) === 1 || hasBridge(w, a, b);
+}
+export function neighboursOf(w: World, p: Plot) { return w.plots.filter(q => q.friends.length && connected(w, p, q)); }
+export function bridgeCost(a: Plot, b: Plot) { return a.berth && b.berth ? dist(a.berth, b.berth) * BRIDGE_FEE_PER_BERTH : 0; }
+export function addBridge(w: World, a: Plot, b: Plot) {
+  if (!a.berth || !b.berth || connected(w, a, b)) return false;
+  w.bridges.push({ a, b, at: [{ ...a.berth }, { ...b.berth }] }); rebuild(w); return true;
+}
+
+/* ── walking & access (world tiles) ── */
+
+export type TileInfo = { plot: Plot | null; placed: Placed | null; blocked: boolean; walkway?: "gangway" | "bridge" };
+const find = <T extends { x0?: number; x1?: number; y0?: number; y1?: number }>(list: T[], v: number, lo: keyof T, hi: keyof T) => {
+  let a = 0, b = list.length - 1;
+  while (a <= b) { const m = (a + b) >> 1, it = list[m]; if (v < (it[lo] as number)) b = m - 1; else if (v >= (it[hi] as number)) a = m + 1; else return it; }
+  return null;
+};
+function islandTile(w: World, p: Plot, x: number, y: number): TileInfo | null {
+  const o = w.origin.get(p); if (!o) return null;
+  const lx = x - o.x, ly = y - o.y, pl = w.occ.get(p)?.get(ck(Math.floor(lx / CELL), Math.floor(ly / CELL)));
+  if (!pl) return null;
+  const f = pl.m.friend, i = lx - T(pl.x), j = ly - T(pl.y);
+  if (!f) return { plot: p, placed: pl, blocked: false };           // art not loaded yet: walkable ground
+  const land = i < f.w && j < f.h && f.tiles[j * f.w + i];
+  return { plot: p, placed: pl, blocked: land ? f.blocked[j * f.w + i] : false };
+}
 export function tileAt(w: World, x: number, y: number): TileInfo | undefined {
   const tx = Math.floor(x), ty = Math.floor(y);
-  const o = w.occ.get(ck(Math.floor(tx / CELL), Math.floor(ty / CELL)));
-  if (!o) return undefined;
-  const f = o.placed.m.friend, i = tx - o.placed.x * CELL, j = ty - o.placed.y * CELL;
-  if (!f) return { ...o, blocked: false, pier: false };           // art not loaded yet: walkable ground
-  const land = i < f.w && j < f.h && f.tiles[j * f.w + i];
-  return { ...o, blocked: land ? f.blocked[j * f.w + i] : false, pier: !land };
+  const c = find(w.cols, tx, "x0", "x1"), r = find(w.rows, ty, "y0", "y1");
+  if (c && r) { const p = w.berths.get(ck(c.b, r.b)); const t = p && islandTile(w, p, tx, ty); if (t) return t; }
+  for (const p of w.plots) if (!p.berth && p.friends.length) { const t = islandTile(w, p, tx, ty); if (t) return t; }
+  const k = w.walk.get(ck(tx, ty));
+  return k ? { plot: null, placed: null, blocked: false, walkway: k } : undefined;
 }
 export function canEnter(w: World, p: Plot) { return p.mine || p.access === "open" || w.visits.get(p.id) === "approved"; }
+
+/* ── saving on chain: RF burned per Friend moved on its island ── */
+
+export type Saved = ReadonlyMap<bigint, { plot: string; x: number; y: number }>;
+export function pendingChanges(w: World, saved: Saved) {
+  let rf = 0; const moved: Placed[] = []; const plots = new Set<Plot>();
+  for (const p of myPlots(w)) for (const pl of p.friends) {
+    const s = saved.get(pl.m.id);
+    if (!s || s.plot !== p.id || s.x !== pl.x || s.y !== pl.y) { moved.push(pl); rf += feeOf(pl.m); plots.add(p); }
+  }
+  const all = new Set(myPlots(w).flatMap(p => p.friends.map(pl => pl.m.id)));
+  const gone = [...saved.keys()].filter(id => !all.has(id));
+  return { moved, rf, gone, plots: [...plots] };
+}
 
 /* ── rank from the Rare Friends reward system ── */
 export const RANKS = [

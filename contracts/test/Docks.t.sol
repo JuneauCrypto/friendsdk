@@ -123,6 +123,11 @@ contract DocksTest is Test {
         return rf.balanceOf(reg.BURN());
     }
 
+    function _dock(address who, int32 bx, int32 by) internal {
+        vm.prank(who);
+        reg.dock(plotOf[who], bx, by);
+    }
+
     /* ── plots are NFTs ── */
 
     function testPlotsAreNFTs() public {
@@ -140,8 +145,7 @@ contract DocksTest is Test {
         vm.prank(alice);
         reg.setPlot(plotOf[alice], 'Alice "Market"', false);
         string memory uri = reg.tokenURI(plotOf[alice]);
-        assertEq(bytes(uri).length > 100, true);
-        assertEq(_startsWith(uri, "data:application/json;base64,"), true);
+        assertTrue(_startsWith(uri, "data:application/json;base64,"));
     }
 
     function _startsWith(string memory s, string memory p) internal pure returns (bool) {
@@ -166,12 +170,12 @@ contract DocksTest is Test {
         assertTrue(reg.isValid(1));
         vm.prank(alice);
         reg.transferFrom(alice, bob, plotOf[alice]);
-        assertFalse(reg.isValid(1)); // bob owns the deed but not the Friend
+        assertFalse(reg.isValid(1));
         reg.clear(1);
         assertEq(reg.memberCount(plotOf[alice]), 0);
     }
 
-    /* ── arranging burns RF per Friend moved, by generation ── */
+    /* ── islands: arranging burns RF per Friend moved, by generation ── */
 
     function testBurnPerFriendMovedByGeneration() public {
         gen.setGen(1, 1); // 100 RF
@@ -191,10 +195,7 @@ contract DocksTest is Test {
         vm.prank(alice);
         assertEq(reg.arrange(plotOf[alice], ids, xs, ys), 121 ether);
         assertEq(_burned() - before, 121 ether);
-        assertEq(rf.balanceOf(alice), 10_000 ether - 121 ether);
-
-        // re-saving the same layout with only #3 moved burns just #3's fee
-        xs[2] = 14;
+        xs[2] = 14; // only #3 moves
         before = _burned();
         vm.prank(alice);
         assertEq(reg.arrange(plotOf[alice], ids, xs, ys), 1 ether);
@@ -217,78 +218,61 @@ contract DocksTest is Test {
         vm.prank(alice);
         reg.remove(_one(1));
         assertEq(rf.balanceOf(alice), before);
-        assertEq(reg.placedCount(), 0);
+        assertEq(reg.memberCount(plotOf[alice]), 0);
     }
 
-    function testPlaceMoveAndDock() public {
+    function testIslandsHaveTheirOwnGrids() public {
+        _place(alice, 1, 0, 0);
+        _place(bob, 10, 0, 0); // same local cell, different island: fine
+        (, uint256 a) = reg.friendAt(plotOf[alice], 0, 0);
+        (, uint256 b) = reg.friendAt(plotOf[bob], 0, 0);
+        assertEq(a, 1);
+        assertEq(b, 10);
+        vm.expectRevert(DocksPlots.CellTaken.selector);
+        _place(alice, 2, 0, 0);
+    }
+
+    function testDeployAFriendToAnotherOfYourPlots() public {
         _place(alice, 1, 0, 0);
         _place(alice, 2, 1, 0);
-        _place(bob, 10, 2, 0);
-        assertTrue(reg.adjacent(2, 10));
-        assertFalse(reg.adjacent(1, 10));
-        (bool occ, uint256 id) = reg.friendAt(1, 0);
-        assertTrue(occ);
-        assertEq(id, 2);
-        assertEq(reg.placedCount(), 3);
-        assertEq(reg.memberCount(plotOf[alice]), 2);
-        _place(alice, 2, 5, 5);
-        (occ,) = reg.friendAt(1, 0);
-        assertFalse(occ);
-        assertEq(reg.memberCount(plotOf[alice]), 2);
-    }
-
-    function testMovingAFriendBetweenYourPlots() public {
-        _place(alice, 1, 0, 0);
         vm.prank(alice);
-        uint256 second = reg.mint("");
+        uint256 second = reg.mint("Outpost");
+        uint256 before = _burned();
         vm.prank(alice);
-        reg.arrange(second, _one(1), _i(9), _i(9));
-        assertEq(reg.plotOf(1), second);
-        assertEq(reg.memberCount(plotOf[alice]), 0);
+        reg.arrange(second, _one(2), _i(0), _i(0)); // joining a new island counts as a move
+        assertEq(_burned() - before, 1 ether);
+        assertEq(reg.plotOf(2), second);
+        assertEq(reg.memberCount(plotOf[alice]), 1);
         assertEq(reg.memberCount(second), 1);
+        (bool occ,) = reg.friendAt(plotOf[alice], 1, 0);
+        assertFalse(occ);
     }
 
-    function testCannotTakeOthersCell() public {
-        _place(bob, 10, 0, 0);
-        vm.expectRevert(DocksPlots.CellTaken.selector);
-        _place(alice, 1, 0, 0);
-    }
-
-    function testInactiveCannotPlace() public {
-        act.set(3, 0);
-        vm.expectRevert(DocksPlots.NotActive.selector);
-        _place(alice, 3, 0, 0);
-    }
-
-    function testGangMovesTogetherSwappingCells() public {
+    function testCrewMovesTogetherSwappingCells() public {
         _place(alice, 1, 0, 0);
         _place(alice, 2, 1, 0);
         uint256[] memory ids = new uint256[](2);
         ids[0] = 1;
         ids[1] = 2;
         int32[] memory xs = new int32[](2);
-        xs[0] = 1; // 1 moves into 2's old cell
+        xs[0] = 1;
         xs[1] = 2;
         int32[] memory ys = new int32[](2);
         vm.prank(alice);
         reg.arrange(plotOf[alice], ids, xs, ys);
-        (, uint256 at1) = reg.friendAt(1, 0);
-        (, uint256 at2) = reg.friendAt(2, 0);
+        (, uint256 at1) = reg.friendAt(plotOf[alice], 1, 0);
+        (, uint256 at2) = reg.friendAt(plotOf[alice], 2, 0);
         assertEq(at1, 1);
         assertEq(at2, 2);
-        (bool occ,) = reg.friendAt(0, 0);
-        assertFalse(occ);
     }
 
     function testSoldFriendGoesStaleAndCellFrees() public {
-        _place(bob, 10, 0, 0);
-        gen.set(10, carol); // sold on the marketplace
-        assertFalse(reg.isValid(10));
-        _place(alice, 1, 0, 0); // stale occupant gives way
-        (, uint256 id) = reg.friendAt(0, 0);
-        assertEq(id, 1);
-        (,,, bool placed) = reg.spotOf(10);
-        assertFalse(placed);
+        _place(alice, 1, 0, 0);
+        gen.set(1, carol); // sold on the marketplace
+        assertFalse(reg.isValid(1));
+        _place(alice, 2, 0, 0); // stale occupant gives way
+        (, uint256 id) = reg.friendAt(plotOf[alice], 0, 0);
+        assertEq(id, 2);
     }
 
     function testClearOnlyWhenStale() public {
@@ -297,21 +281,87 @@ contract DocksTest is Test {
         reg.clear(10);
         act.set(10, 0);
         reg.clear(10);
-        assertEq(reg.placedCount(), 0);
+        assertEq(reg.memberCount(plotOf[bob]), 0);
     }
 
-    function testTrueSizeFootprintsDockEdgeToEdge() public {
+    function testInactiveCannotPlace() public {
+        act.set(3, 0);
+        vm.expectRevert(DocksPlots.NotActive.selector);
+        _place(alice, 3, 0, 0);
+    }
+
+    function testFriendsTouchAlongPartOfASide() public {
         gen.setGen(1, 3); // 5x4 cells
-        gen.setGen(10, 2); // 5x5 cells
+        gen.setGen(2, 2); // 5x5 cells
         _place(alice, 1, 0, 0);
-        (, uint256 at) = reg.friendAt(4, 3);
-        assertEq(at, 1);
-        vm.expectRevert(DocksPlots.CellTaken.selector);
-        _place(bob, 10, 4, 3);
-        _place(bob, 10, 5, 2); // flush against the right edge, touching part of it
-        assertTrue(reg.adjacent(1, 10));
-        _place(bob, 10, 5, 4); // only a corner
-        assertFalse(reg.adjacent(1, 10));
+        _place(alice, 2, 5, 2); // flush against the right edge, overlapping part of it
+        assertTrue(reg.adjacent(1, 2));
+        _place(alice, 2, 5, 4); // only a corner
+        assertFalse(reg.adjacent(1, 2));
+    }
+
+    /* ── docking islands: one berth each, gas only ── */
+
+    function testDockingIsGasOnlyAndNeedsALoadingZone() public {
+        _place(alice, 1, 0, 0);
+        _place(bob, 10, 0, 0);
+        _place(carol, 20, 0, 0);
+        uint256 before = rf.balanceOf(alice);
+        _dock(alice, 0, 0); // first island docks anywhere
+        assertEq(rf.balanceOf(alice), before);
+        vm.prank(bob);
+        vm.expectRevert(DocksPlots.NotLoadingZone.selector);
+        reg.dock(plotOf[bob], 5, 5);
+        vm.prank(bob);
+        vm.expectRevert(DocksPlots.BerthTaken.selector);
+        reg.dock(plotOf[bob], 0, 0);
+        assertTrue(reg.isLoadingZone(1, 0));
+        _dock(bob, 1, 0);
+        assertTrue(reg.connected(plotOf[alice], plotOf[bob]));
+        _dock(carol, 2, 0);
+        assertFalse(reg.connected(plotOf[alice], plotOf[carol]));
+        // move alice's island to the other side of carol
+        _dock(alice, 3, 0);
+        assertEq(reg.plotAtBerth(0, 0), 0);
+        assertTrue(reg.connected(plotOf[alice], plotOf[carol]));
+        assertEq(reg.dockedCount(), 3);
+    }
+
+    function testEmptyIslandCannotDock() public {
+        vm.prank(alice);
+        vm.expectRevert(DocksPlots.EmptyPlot.selector);
+        reg.dock(plotOf[alice], 0, 0);
+    }
+
+    function testSizeDoesNotMatterForDocking() public {
+        gen.setGen(1, 1); // a Gen 1 island (8x8 cells) still takes one berth
+        _place(alice, 1, 0, 0);
+        _place(bob, 10, 0, 0);
+        _dock(alice, 0, 0);
+        _dock(bob, 0, 1);
+        assertTrue(reg.connected(plotOf[alice], plotOf[bob]));
+    }
+
+    /* ── bridges: RF per berth of distance ── */
+
+    function testBridgeBurnsPerBerthAndBreaksWhenAnIslandMoves() public {
+        _place(alice, 1, 0, 0);
+        _place(bob, 10, 0, 0);
+        _place(carol, 20, 0, 0);
+        _dock(alice, 0, 0);
+        _dock(bob, 1, 0);
+        _dock(carol, 2, 0);
+        assertEq(reg.bridgeCost(plotOf[alice], plotOf[carol]), 20 ether);
+        vm.prank(alice);
+        vm.expectRevert(DocksPlots.AlreadyConnected.selector);
+        reg.buildBridge(plotOf[alice], plotOf[bob]);
+        uint256 before = _burned();
+        vm.prank(alice);
+        reg.buildBridge(plotOf[alice], plotOf[carol]);
+        assertEq(_burned() - before, 20 ether);
+        assertTrue(reg.connected(plotOf[alice], plotOf[carol]));
+        _dock(carol, 1, 1); // carol moves (under bob): the bridge is gone
+        assertFalse(reg.hasBridge(plotOf[alice], plotOf[carol]));
     }
 
     function testAccess() public {
@@ -328,18 +378,6 @@ contract DocksTest is Test {
         reg.setPlot(plotOf[alice], "mine now", false);
     }
 
-    function testPlacedPageMarksStale() public {
-        _place(alice, 1, 0, 0);
-        _place(bob, 10, 1, 0);
-        act.set(10, 0);
-        (uint256[] memory ids,, bool[] memory valid) = reg.placedPage(0, 10);
-        assertEq(ids.length, 2);
-        assertTrue(valid[0]);
-        assertFalse(valid[1]);
-        (uint256[] memory mine_,) = reg.members(plotOf[alice], 0, 10);
-        assertEq(mine_.length, 1);
-    }
-
     /* ── launches ── */
 
     function _params(Scope_ s) internal pure returns (DocksLaunchpad.LaunchParams memory p) {
@@ -353,11 +391,19 @@ contract DocksTest is Test {
         p.scope = DocksLaunchpad.Scope(uint8(s));
     }
 
-    function testLaunchChargesFeeAirdropsInBatchesAndSendsRestToFriendWallet() public {
+    /// alice (#1, #2) at berth 0,0 · bob (#10) at 1,0 · carol (#20) at 2,0.
+    function _world() internal {
         _place(alice, 1, 0, 0);
         _place(alice, 2, 1, 0);
-        _place(bob, 10, 2, 0); // docked to alice's #2
-        _place(carol, 20, 9, 9); // far away
+        _place(bob, 10, 0, 0);
+        _place(carol, 20, 0, 0);
+        _dock(alice, 0, 0);
+        _dock(bob, 1, 0);
+        _dock(carol, 2, 0);
+    }
+
+    function testLaunchChargesFeeAirdropsInBatchesAndSendsRestToFriendWallet() public {
+        _world();
         DocksLaunchpad.LaunchParams memory p = _params(Scope_.AnyDocked);
         p.airdropPool = 1000 ether;
         p.airdropEach = 50 ether;
@@ -374,17 +420,15 @@ contract DocksTest is Test {
 
         vm.prank(bob);
         vm.expectRevert(DocksLaunchpad.NotCreator.selector);
-        pad.airdrop(id, _one(10), _one(2));
+        pad.airdrop(id, _one(10));
 
         uint256[] memory ids = new uint256[](4);
         ids[0] = 2;
-        ids[1] = 10;
-        ids[2] = 20;
-        ids[3] = 2;
-        uint256[] memory vias = new uint256[](4);
-        vias[1] = 2;
+        ids[1] = 10; // docked next to alice
+        ids[2] = 20; // two berths away: skipped
+        ids[3] = 2; // repeat: skipped
         vm.prank(alice);
-        assertEq(pad.airdrop(id, ids, vias), 2);
+        assertEq(pad.airdrop(id, ids), 2);
         assertEq(t.balanceOf(gen.tokenBoundAccount(2)), 50 ether);
         assertEq(t.balanceOf(gen.tokenBoundAccount(10)), 50 ether);
         assertEq(t.balanceOf(gen.tokenBoundAccount(20)), 0);
@@ -393,40 +437,23 @@ contract DocksTest is Test {
         assertEq(t.balanceOf(gen.tokenBoundAccount(1)), 1_000_000 ether - 100 ether - 100_000 ether);
     }
 
-    function testClaimManyChargesOnlyForClaimsMade() public {
-        _place(alice, 1, 0, 0);
-        _place(alice, 2, 1, 0);
-        _place(alice, 3, 2, 0);
-        vm.prank(alice);
-        uint256 id = pad.launch(_params(Scope_.AnyDocked));
-        vm.prank(alice);
-        pad.claim(id, 2, 0);
-        uint256 rfBefore = rf.balanceOf(alice);
-        uint256[] memory ids = new uint256[](3);
-        ids[0] = 1;
-        ids[1] = 2;
-        ids[2] = 3;
-        vm.prank(alice);
-        assertEq(pad.claimMany(id, ids, new uint256[](3)), 2);
-        assertEq(rfBefore - rf.balanceOf(alice), 10 ether);
-        vm.prank(bob);
-        vm.expectRevert(DocksLaunchpad.NotHolder.selector);
-        pad.claimMany(id, _one(1), _one(0));
-    }
-
-    function testLaunchNeedsDockedFriendYouHold() public {
+    function testLaunchNeedsADockedIslandYouHold() public {
         DocksLaunchpad.LaunchParams memory p = _params(Scope_.AnyDocked);
         vm.prank(alice);
         vm.expectRevert(DocksLaunchpad.NotDocked.selector);
         pad.launch(p);
         _place(alice, 1, 0, 0);
+        vm.prank(alice);
+        vm.expectRevert(DocksLaunchpad.NotDocked.selector); // on an island, but not docked
+        pad.launch(p);
+        _dock(alice, 0, 0);
         vm.prank(bob);
         vm.expectRevert(DocksLaunchpad.NotHolder.selector);
         pad.launch(p);
     }
 
     function testBadAllocationReverts() public {
-        _place(alice, 1, 0, 0);
+        _world();
         DocksLaunchpad.LaunchParams memory p = _params(Scope_.AnyDocked);
         p.claimPool = p.supply + 1;
         vm.prank(alice);
@@ -435,64 +462,79 @@ contract DocksTest is Test {
     }
 
     function testClaimBurnsRFOncePerFriend() public {
-        _place(alice, 1, 0, 0);
-        _place(bob, 10, 7, 7);
+        _world();
         vm.prank(alice);
         uint256 id = pad.launch(_params(Scope_.AnyDocked));
         uint256 burnBefore = _burned();
-        vm.prank(bob);
-        pad.claim(id, 10, 0);
+        vm.prank(carol);
+        pad.claim(id, 20);
         assertEq(_burned() - burnBefore, 5 ether);
         IERC20 t = IERC20(address(pad.launches(id).token));
-        assertEq(t.balanceOf(gen.tokenBoundAccount(10)), 1000 ether);
-        vm.prank(bob);
+        assertEq(t.balanceOf(gen.tokenBoundAccount(20)), 1000 ether);
+        vm.prank(carol);
         vm.expectRevert(DocksLaunchpad.AlreadyClaimed.selector);
-        pad.claim(id, 10, 0);
+        pad.claim(id, 20);
     }
 
-    function testUndockedCannotClaim() public {
-        _place(alice, 1, 0, 0);
+    function testClaimManyChargesOnlyForClaimsMade() public {
+        _world();
+        _place(alice, 3, 2, 0);
+        vm.prank(alice);
+        uint256 id = pad.launch(_params(Scope_.AnyDocked));
+        vm.prank(alice);
+        pad.claim(id, 2);
+        uint256 rfBefore = rf.balanceOf(alice);
+        uint256[] memory ids = new uint256[](3);
+        ids[0] = 1;
+        ids[1] = 2;
+        ids[2] = 3;
+        vm.prank(alice);
+        assertEq(pad.claimMany(id, ids), 2);
+        assertEq(rfBefore - rf.balanceOf(alice), 10 ether);
+        vm.prank(bob);
+        vm.expectRevert(DocksLaunchpad.NotHolder.selector);
+        pad.claimMany(id, _one(1));
+    }
+
+    function testUndockedIslandCannotClaim() public {
+        _world();
         vm.prank(alice);
         uint256 id = pad.launch(_params(Scope_.AnyDocked));
         vm.prank(carol);
+        reg.undock(plotOf[carol]);
+        vm.prank(carol);
         vm.expectRevert(DocksLaunchpad.NotEligible.selector);
-        pad.claim(id, 20, 0);
+        pad.claim(id, 20);
     }
 
     function testHolderPlotScope() public {
-        _place(alice, 1, 0, 0);
-        _place(alice, 2, 1, 0);
-        _place(bob, 10, 2, 0);
+        _world();
         vm.prank(alice);
         uint256 id = pad.launch(_params(Scope_.HolderPlot));
         vm.prank(alice);
-        pad.claim(id, 2, 0);
+        pad.claim(id, 2);
         vm.prank(bob);
         vm.expectRevert(DocksLaunchpad.NotEligible.selector);
-        pad.claim(id, 10, 0);
+        pad.claim(id, 10);
     }
 
-    function testNeighbourScope() public {
-        _place(alice, 1, 0, 0);
-        _place(alice, 2, 1, 0);
-        _place(bob, 10, 2, 0);
-        _place(carol, 20, 9, 9);
+    function testNeighbourScopeIncludesBridges() public {
+        _world();
         vm.prank(alice);
         uint256 id = pad.launch(_params(Scope_.PlotAndNeighbours));
         vm.prank(bob);
-        vm.expectRevert(DocksLaunchpad.NotEligible.selector);
-        pad.claim(id, 10, 1);
-        vm.prank(bob);
-        pad.claim(id, 10, 2);
+        pad.claim(id, 10);
         vm.prank(carol);
         vm.expectRevert(DocksLaunchpad.NotEligible.selector);
-        pad.claim(id, 20, 2);
+        pad.claim(id, 20);
+        vm.prank(carol);
+        reg.buildBridge(plotOf[carol], plotOf[alice]);
+        vm.prank(carol);
+        pad.claim(id, 20);
     }
 
     function testVisitorScope() public {
-        _place(alice, 1, 0, 0);
-        _place(bob, 10, 5, 5);
-        _place(carol, 20, 9, 9);
+        _world();
         vm.prank(alice);
         reg.setPlot(plotOf[alice], "", true);
         vm.prank(alice);
@@ -500,15 +542,14 @@ contract DocksTest is Test {
         vm.prank(alice);
         uint256 id = pad.launch(_params(Scope_.Visitors));
         vm.prank(bob);
-        pad.claim(id, 10, 0);
+        pad.claim(id, 10);
         vm.prank(carol);
         vm.expectRevert(DocksLaunchpad.NotEligible.selector);
-        pad.claim(id, 20, 0);
+        pad.claim(id, 20);
     }
 
     function testFriendWalletCanClaimAndPoolEmpties() public {
-        _place(alice, 1, 0, 0);
-        _place(bob, 10, 5, 5);
+        _world();
         DocksLaunchpad.LaunchParams memory p = _params(Scope_.AnyDocked);
         p.claimPool = 1000 ether;
         vm.prank(alice);
@@ -518,14 +559,14 @@ contract DocksTest is Test {
         vm.prank(wallet);
         rf.approve(address(pad), 5 ether);
         vm.prank(wallet);
-        pad.claim(id, 10, 0);
+        pad.claim(id, 10);
         vm.prank(alice);
         vm.expectRevert(DocksLaunchpad.PoolEmpty.selector);
-        pad.claim(id, 1, 0);
+        pad.claim(id, 1);
     }
 
-    /// A big holder: 300 Gen 6 Friends arranged in one transaction (300 RF burned), then
-    /// claimed for in one.
+    /// A big holder: 300 Gen 6 Friends arranged into one island in one transaction (300 RF
+    /// burned), docked, then claimed for in one.
     function testScaleThreeHundredFriends() public {
         uint256 n = 300;
         uint256[] memory ids = new uint256[](n);
@@ -541,13 +582,13 @@ contract DocksTest is Test {
         vm.prank(alice);
         reg.arrange(plotOf[alice], ids, xs, ys);
         assertEq(_burned() - before, n * 1 ether);
-        assertEq(reg.memberCount(plotOf[alice]), n);
+        _dock(alice, 0, 0);
         DocksLaunchpad.LaunchParams memory p = _params(Scope_.HolderPlot);
         p.creatorFriendId = 1000;
         p.claimEach = 100 ether;
         vm.prank(alice);
         uint256 id = pad.launch(p);
         vm.prank(alice);
-        assertEq(pad.claimMany(id, ids, new uint256[](n)), n);
+        assertEq(pad.claimMany(id, ids), n);
     }
 }

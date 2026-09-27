@@ -39,7 +39,7 @@ contract DocksForkTest is Test {
         vm.prank(a);
         uint256 id = pad.launch(p);
         vm.prank(b);
-        pad.claim(id, 7153, 67111);
+        pad.claim(id, 7153);
         IERC20 t = IERC20(address(pad.launches(id).token));
         assertEq(t.balanceOf(gen.tokenBoundAccount(7153)), 100 ether);
         assertEq(t.balanceOf(gen.tokenBoundAccount(67111)), 990_000 ether);
@@ -58,17 +58,19 @@ contract DocksForkTest is Test {
         uint256 plotA = reg.mint("Market");
         uint256 burnBefore = IERC20(RF).balanceOf(reg.BURN());
         reg.arrange(plotA, ids, xs, ys); // Gen 2: burns 50 RF
+        reg.dock(plotA, 0, 0);
         vm.stopPrank();
         assertEq(IERC20(RF).balanceOf(reg.BURN()) - burnBefore, 50 ether);
         ids[0] = 7153;
-        xs[0] = 5; // #67111 is Gen 2: 5 cells wide
+        xs[0] = 0; // its own island's grid
         vm.startPrank(b);
         IERC20(RF).approve(address(reg), type(uint256).max);
         IERC20(RF).approve(address(pad), type(uint256).max);
         uint256 plotB = reg.mint("Reading Row");
         reg.arrange(plotB, ids, xs, ys); // Gen 3: burns 20 RF
+        reg.dock(plotB, 1, 0); // loading zone next to the Market island
         vm.stopPrank();
-        assertTrue(reg.adjacent(67111, 7153));
+        assertTrue(reg.connected(plotA, plotB));
         assertEq(reg.ownerOf(plotA), a);
     }
 }

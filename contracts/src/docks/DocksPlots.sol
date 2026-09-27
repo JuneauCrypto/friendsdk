@@ -23,19 +23,25 @@ interface IDocksActivation {
         returns (uint8 tier, uint256 amount);
 }
 
-/// @notice The Docks: every plot is an NFT. A plot is an arrangement of activated Friends,
-/// held by the plot's owner, on one shared grid of 4x4-tile cells. Each Friend covers the
-/// cells of its land at true size (Gen 1: 8x8 cells ... Gen 6: 1x1). Friends of different
-/// plots in edge-touching cells are docked. Plots are open or invite-only.
+/// @notice The Docks: floating islands made of activated Rare Friends. Every plot is an NFT.
 ///
-/// Arranging is the core action and it is paid for in RF: saving an arrangement burns RF for
-/// every Friend whose spot changes (new to the plot or moved), scaled by generation. Friends
-/// that stay put cost nothing; taking a Friend off a plot is free.
+/// - Island: a plot's Friends, arranged on the plot's own grid of 4x4-tile cells (each Friend
+///   covers its land at true size: Gen 1 8x8 cells ... Gen 6 1x1). A Friend is on at most one
+///   plot; a holder can deploy their Friends across as many plots as they like.
+/// - Arranging is the core action and is paid in RF: saving burns RF for every Friend whose
+///   spot on its island changes (new to the plot or moved), by generation. Unmoved Friends
+///   are free; taking a Friend off is free.
+/// - Docking: islands float on one shared berth grid, one island per berth whatever its size,
+///   so the world grows with the number of plots, not their size. An island docks at a free
+///   berth next to an existing island (a loading zone); islands on neighbouring berths are
+///   docked to each other. Docking and moving an island cost only gas.
+/// - Bridges: link your island to one you can't dock next to, for RF burned per berth of
+///   distance. A bridge lasts until either island moves.
+/// - Access: each plot is open or invite-only with approved visitors.
 ///
 /// @dev A Friend counts on its plot only while it is activated and held by the plot NFT's
-/// owner. Selling a Friend (which also clears its activation) or transferring the plot NFT
-/// without the Friends leaves stale placements; anyone can clear those. Friends are never
-/// escrowed: moving a Friend's ownership would clear its activation.
+/// owner; stale placements can be cleared by anyone. Friends are never escrowed: a Rare
+/// Friends transfer clears activation, so a plot NFT can't carry its Friends with it.
 contract DocksPlots is ERC721 {
     using SafeERC20 for IERC20;
     using Strings for uint256;
@@ -47,14 +53,23 @@ contract DocksPlots is ERC721 {
         bool placed;
     }
 
+    struct Berth {
+        int32 x;
+        int32 y;
+        bool docked;
+        uint64 epoch;
+    }
+
     address public constant BURN = 0x000000000000000000000000000000000000dEaD;
-    /// @notice RF burned per Friend moved, by generation (Gen 1 ... Gen 6).
+    /// @notice RF burned per Friend moved on its island, by generation (Gen 1 ... Gen 6).
     uint256 public constant FEE_GEN1 = 100 ether;
     uint256 public constant FEE_GEN2 = 50 ether;
     uint256 public constant FEE_GEN3 = 20 ether;
     uint256 public constant FEE_GEN4 = 10 ether;
     uint256 public constant FEE_GEN5 = 5 ether;
     uint256 public constant FEE_GEN6 = 1 ether;
+    /// @notice RF burned per berth of distance a bridge spans.
+    uint256 public constant BRIDGE_FEE_PER_BERTH = 10 ether;
 
     error NotPlotOwner();
     error NotHolder();
@@ -63,11 +78,19 @@ contract DocksPlots is ERC721 {
     error NotPlaced();
     error StillValid();
     error LengthMismatch();
+    error EmptyPlot();
+    error BerthTaken();
+    error NotLoadingZone();
+    error NotDocked();
+    error AlreadyConnected();
 
     event PlotMinted(uint256 indexed plotId, address indexed owner, string name);
     event Arranged(uint256 indexed plotId, uint256 moved, uint256 rfBurned);
     event Placed(uint256 indexed friendId, uint256 indexed plotId, int32 x, int32 y);
     event Removed(uint256 indexed friendId, uint256 indexed plotId);
+    event Docked(uint256 indexed plotId, int32 x, int32 y);
+    event Undocked(uint256 indexed plotId);
+    event BridgeBuilt(uint256 indexed from, uint256 indexed to, uint256 rfBurned);
     event PlotUpdated(uint256 indexed plotId, string name, bool inviteOnly);
     event VisitorSet(uint256 indexed plotId, address indexed visitor, bool approved);
     event VisitRequested(uint256 indexed plotId, address indexed visitor);
@@ -76,16 +99,19 @@ contract DocksPlots is ERC721 {
     IERC20 public immutable rf;
 
     uint256 public totalPlots;
+    uint256 public dockedCount;
     mapping(uint256 plotId => string) public plotName;
     mapping(uint256 plotId => bool) public inviteOnly;
     mapping(uint256 plotId => mapping(address visitor => bool)) public approved;
 
     mapping(uint256 friendId => Spot) public spotOf;
-    mapping(bytes32 cell => uint256 friendIdPlusOne) private _cell;
-    uint256[] private _placed;
-    mapping(uint256 friendId => uint256 indexPlusOne) private _index;
+    mapping(bytes32 plotCell => uint256 friendIdPlusOne) private _cell;
     mapping(uint256 plotId => uint256[]) private _members;
     mapping(uint256 friendId => uint256 indexPlusOne) private _memberIndex;
+
+    mapping(uint256 plotId => Berth) public berthOf;
+    mapping(bytes32 berth => uint256 plotIdPlusOne) private _berth;
+    mapping(bytes32 pair => uint128 epochs) private _bridge;
 
     constructor(IDocksGenerations generations_, IERC20 rf_) ERC721("The Docks Plot", "PLOT") {
         generations = generations_;
@@ -120,11 +146,10 @@ contract DocksPlots is ERC721 {
     }
 
     function canVisit(uint256 plotId, address visitor) public view returns (bool) {
-        address owner = _ownerOf(plotId);
-        return owner == visitor || !inviteOnly[plotId] || approved[plotId][visitor];
+        return _ownerOf(plotId) == visitor || !inviteOnly[plotId] || approved[plotId][visitor];
     }
 
-    /* ── arranging (the core action) ── */
+    /* ── arranging an island (the core action) ── */
 
     /// @notice RF burned per Friend moved, by generation.
     function feeOf(uint256 friendId) public view returns (uint256) {
@@ -153,9 +178,9 @@ contract DocksPlots is ERC721 {
         }
     }
 
-    /// @notice Save positions for Friends you hold on a plot you own. Friends whose spot
-    /// changes (new to this plot, or moved) burn their generation's RF fee; the rest are free.
-    /// One call can move a whole crew, and cells vacated earlier in the call can be reused.
+    /// @notice Save island positions for Friends you hold on a plot you own (also deploys a
+    /// Friend from another of your plots). Friends whose spot changes burn their generation's
+    /// fee; the rest are free. Cells vacated earlier in the call can be reused.
     function arrange(
         uint256 plotId,
         uint256[] calldata friendIds,
@@ -200,6 +225,81 @@ contract DocksPlots is ERC721 {
         _remove(friendId);
     }
 
+    /* ── docking islands (gas only) ── */
+
+    /// @notice Dock (or move) your island at a free berth next to another island. The first
+    /// island in the world may dock anywhere.
+    function dock(uint256 plotId, int32 x, int32 y) external {
+        _onlyPlotOwner(plotId);
+        if (_members[plotId].length == 0) revert EmptyPlot();
+        bytes32 key = _key(x, y);
+        uint256 there = _berth[key];
+        if (there != 0 && there != plotId + 1) revert BerthTaken();
+        Berth storage b = berthOf[plotId];
+        if (b.docked) {
+            delete _berth[_key(b.x, b.y)];
+            --dockedCount;
+        }
+        if (dockedCount > 0 && !_nextToIsland(x, y)) revert NotLoadingZone();
+        _berth[key] = plotId + 1;
+        berthOf[plotId] = Berth(x, y, true, b.epoch + 1);
+        ++dockedCount;
+        emit Docked(plotId, x, y);
+    }
+
+    function undock(uint256 plotId) external {
+        _onlyPlotOwner(plotId);
+        _undock(plotId);
+    }
+
+    /// @notice Anyone can undock an island whose Friends have all been cleared.
+    function undockEmpty(uint256 plotId) external {
+        if (_members[plotId].length != 0) revert StillValid();
+        _undock(plotId);
+    }
+
+    /// @notice Whether a free berth is a loading zone: next to a docked island.
+    function isLoadingZone(int32 x, int32 y) external view returns (bool) {
+        return _berth[_key(x, y)] == 0 && (dockedCount == 0 || _nextToIsland(x, y));
+    }
+
+    function plotAtBerth(int32 x, int32 y) external view returns (uint256) {
+        uint256 v = _berth[_key(x, y)];
+        return v == 0 ? 0 : v - 1;
+    }
+
+    /* ── bridges (RF burned per berth of distance) ── */
+
+    function bridgeCost(uint256 from, uint256 to) public view returns (uint256) {
+        Berth storage a = berthOf[from];
+        Berth storage b = berthOf[to];
+        if (!a.docked || !b.docked) revert NotDocked();
+        return _distance(a, b) * BRIDGE_FEE_PER_BERTH;
+    }
+
+    /// @notice Build a bridge from your island to one you aren't docked next to.
+    function buildBridge(uint256 from, uint256 to) external returns (uint256 burned) {
+        _onlyPlotOwner(from);
+        if (connected(from, to) || from == to) revert AlreadyConnected();
+        burned = bridgeCost(from, to);
+        _bridge[_pair(from, to)] = _epochs(from, to);
+        rf.safeTransferFrom(msg.sender, BURN, burned);
+        emit BridgeBuilt(from, to, burned);
+    }
+
+    function hasBridge(uint256 a, uint256 b) public view returns (bool) {
+        uint128 e = _bridge[_pair(a, b)];
+        return e != 0 && e == _epochs(a, b) && berthOf[a].docked && berthOf[b].docked;
+    }
+
+    /// @notice Islands you can walk between: docked on neighbouring berths, or bridged.
+    function connected(uint256 a, uint256 b) public view returns (bool) {
+        Berth storage ba = berthOf[a];
+        Berth storage bb = berthOf[b];
+        if (!ba.docked || !bb.docked || a == b) return false;
+        return _distance(ba, bb) == 1 || hasBridge(a, b);
+    }
+
     /* ── reads ── */
 
     function isActive(uint256 friendId) public view returns (bool) {
@@ -227,16 +327,16 @@ contract DocksPlots is ERC721 {
         return (1, 1);
     }
 
-    function friendAt(int32 x, int32 y) public view returns (bool occupied, uint256 friendId) {
-        uint256 value = _cell[_key(x, y)];
+    function friendAt(uint256 plotId, int32 x, int32 y) public view returns (bool occupied, uint256 friendId) {
+        uint256 value = _cell[_cellKey(plotId, x, y)];
         return (value != 0, value == 0 ? 0 : value - 1);
     }
 
-    /// @notice Whether two placed Friends' footprints share (part of) an edge.
+    /// @notice Whether two Friends on the same island share (part of) an edge.
     function adjacent(uint256 a, uint256 b) public view returns (bool) {
         Spot storage sa = spotOf[a];
         Spot storage sb = spotOf[b];
-        if (!sa.placed || !sb.placed) return false;
+        if (!sa.placed || !sb.placed || sa.plotId != sb.plotId) return false;
         (int32 aw, int32 ah) = footprint(a);
         (int32 bw, int32 bh) = footprint(b);
         bool xTouch = sa.x + aw == sb.x || sb.x + bw == sa.x;
@@ -254,7 +354,7 @@ contract DocksPlots is ERC721 {
         return _members[plotId].length;
     }
 
-    /// @notice Page through one plot's Friends.
+    /// @notice Page through one island's Friends.
     function members(uint256 plotId, uint256 start, uint256 count)
         external
         view
@@ -271,46 +371,12 @@ contract DocksPlots is ERC721 {
         }
     }
 
-    function placedCount() external view returns (uint256) {
-        return _placed.length;
-    }
-
-    /// @notice Page through every placement in the world, for discovery.
-    function placedPage(uint256 start, uint256 count)
-        external
-        view
-        returns (uint256[] memory ids, Spot[] memory spots, bool[] memory valid)
-    {
-        uint256 end = start + count > _placed.length ? _placed.length : start + count;
-        uint256 n = end > start ? end - start : 0;
-        ids = new uint256[](n);
-        spots = new Spot[](n);
-        valid = new bool[](n);
-        for (uint256 i; i < n; ++i) {
-            ids[i] = _placed[start + i];
-            spots[i] = spotOf[ids[i]];
-            valid[i] = _validOrFalse(ids[i]);
-        }
-    }
-
-    /// @notice Fully on-chain metadata: a top-down map of the plot's Friends.
+    /// @notice Fully on-chain metadata: a top-down map of the island's Friends.
     function tokenURI(uint256 plotId) public view override returns (string memory) {
         _requireOwned(plotId);
         uint256[] storage list = _members[plotId];
         uint256 shown = list.length > 400 ? 400 : list.length;
-        int256 x0 = type(int256).max;
-        int256 y0 = type(int256).max;
-        int256 x1 = type(int256).min;
-        int256 y1 = type(int256).min;
-        for (uint256 i; i < shown; ++i) {
-            Spot storage s = spotOf[list[i]];
-            (int32 w, int32 h) = footprint(list[i]);
-            if (s.x < x0) x0 = s.x;
-            if (s.y < y0) y0 = s.y;
-            if (s.x + w > x1) x1 = s.x + w;
-            if (s.y + h > y1) y1 = s.y + h;
-        }
-        if (shown == 0) (x0, y0, x1, y1) = (0, 0, 1, 1);
+        (int256 x0, int256 y0, int256 x1, int256 y1) = _bounds(list, shown);
         bytes memory rects;
         for (uint256 i; i < shown; ++i) {
             Spot storage s = spotOf[list[i]];
@@ -327,10 +393,12 @@ contract DocksPlots is ERC721 {
             _u(y1 - y0 + 2), '"><rect x="-1" y="-1" width="100%" height="100%" fill="#000"/>',
             rects, "</svg>"
         ));
+        Berth storage b = berthOf[plotId];
         string memory json = string(abi.encodePacked(
-            '{"name":"', _name(plotId), '","description":"A plot on The Docks: activated Rare Friends arranged side by side.",',
+            '{"name":"', _name(plotId), '","description":"A floating island on The Docks, made of activated Rare Friends.",',
             '"attributes":[{"trait_type":"Friends","value":', list.length.toString(),
-            '},{"trait_type":"Access","value":"', inviteOnly[plotId] ? "Invite only" : "Open", '"}],',
+            '},{"trait_type":"Access","value":"', inviteOnly[plotId] ? "Invite only" : "Open",
+            '"},{"trait_type":"Docked","value":"', b.docked ? "Yes" : "No", '"}],',
             '"image":"data:image/svg+xml;base64,', Base64.encode(bytes(svg)), '"}'
         ));
         return string(abi.encodePacked("data:application/json;base64,", Base64.encode(bytes(json))));
@@ -349,11 +417,12 @@ contract DocksPlots is ERC721 {
 
     function _place(uint256 plotId, uint256 friendId, int32 x, int32 y) private {
         Spot storage old = spotOf[friendId];
-        if (old.placed && old.plotId != plotId) _leavePlot(friendId, old.plotId);
+        bool wasOnPlot = old.placed && old.plotId == plotId;
+        if (old.placed && !wasOnPlot) _leavePlot(friendId, old.plotId);
         (int32 w, int32 h) = footprint(friendId);
         for (int32 j; j < h; ++j) {
             for (int32 i; i < w; ++i) {
-                bytes32 key = _key(x + i, y + j);
+                bytes32 key = _cellKey(plotId, x + i, y + j);
                 uint256 occupant = _cell[key];
                 if (occupant != 0) {
                     // A stale occupant (sold or deactivated) gives way; a valid one does not.
@@ -363,15 +432,10 @@ contract DocksPlots is ERC721 {
                 _cell[key] = friendId + 1;
             }
         }
-        bool wasOnPlot = old.placed && old.plotId == plotId;
         spotOf[friendId] = Spot(plotId, x, y, true);
         if (!wasOnPlot) {
             _members[plotId].push(friendId);
             _memberIndex[friendId] = _members[plotId].length;
-        }
-        if (_index[friendId] == 0) {
-            _placed.push(friendId);
-            _index[friendId] = _placed.length;
         }
         emit Placed(friendId, plotId, x, y);
     }
@@ -381,7 +445,7 @@ contract DocksPlots is ERC721 {
         (int32 w, int32 h) = footprint(friendId);
         for (int32 j; j < h; ++j) {
             for (int32 i; i < w; ++i) {
-                bytes32 key = _key(spot.x + i, spot.y + j);
+                bytes32 key = _cellKey(spot.plotId, spot.x + i, spot.y + j);
                 if (_cell[key] == friendId + 1) delete _cell[key];
             }
         }
@@ -403,15 +467,55 @@ contract DocksPlots is ERC721 {
         _clearCells(friendId);
         _leavePlot(friendId, plotId);
         delete spotOf[friendId];
-        uint256 index = _index[friendId];
-        if (index != 0) {
-            uint256 last = _placed[_placed.length - 1];
-            _placed[index - 1] = last;
-            _index[last] = index;
-            _placed.pop();
-            delete _index[friendId];
-        }
         emit Removed(friendId, plotId);
+    }
+
+    function _undock(uint256 plotId) private {
+        Berth storage b = berthOf[plotId];
+        if (!b.docked) revert NotDocked();
+        delete _berth[_key(b.x, b.y)];
+        b.docked = false;
+        ++b.epoch;
+        --dockedCount;
+        emit Undocked(plotId);
+    }
+
+    function _nextToIsland(int32 x, int32 y) private view returns (bool) {
+        return _berth[_key(x + 1, y)] != 0 || _berth[_key(x - 1, y)] != 0
+            || _berth[_key(x, y + 1)] != 0 || _berth[_key(x, y - 1)] != 0;
+    }
+
+    function _distance(Berth storage a, Berth storage b) private view returns (uint256) {
+        int256 dx = int256(a.x) - int256(b.x);
+        int256 dy = int256(a.y) - int256(b.y);
+        return uint256(dx < 0 ? -dx : dx) + uint256(dy < 0 ? -dy : dy);
+    }
+
+    function _pair(uint256 a, uint256 b) private pure returns (bytes32) {
+        return a < b ? keccak256(abi.encode(a, b)) : keccak256(abi.encode(b, a));
+    }
+
+    /// @dev Both islands' berth epochs, low id first; a bridge is live while they match.
+    function _epochs(uint256 a, uint256 b) private view returns (uint128) {
+        (uint256 lo, uint256 hi) = a < b ? (a, b) : (b, a);
+        return (uint128(berthOf[lo].epoch) << 64) | uint128(berthOf[hi].epoch);
+    }
+
+    function _bounds(uint256[] storage list, uint256 shown)
+        private
+        view
+        returns (int256 x0, int256 y0, int256 x1, int256 y1)
+    {
+        if (shown == 0) return (0, 0, 1, 1);
+        (x0, y0, x1, y1) = (type(int256).max, type(int256).max, type(int256).min, type(int256).min);
+        for (uint256 i; i < shown; ++i) {
+            Spot storage s = spotOf[list[i]];
+            (int32 w, int32 h) = footprint(list[i]);
+            if (s.x < x0) x0 = s.x;
+            if (s.y < y0) y0 = s.y;
+            if (s.x + w > x1) x1 = s.x + w;
+            if (s.y + h > y1) y1 = s.y + h;
+        }
     }
 
     function _holds(address holder, uint256 friendId) private view returns (bool) {
@@ -422,16 +526,12 @@ contract DocksPlots is ERC721 {
         }
     }
 
-    function _validOrFalse(uint256 friendId) private view returns (bool) {
-        try this.isValid(friendId) returns (bool valid) {
-            return valid;
-        } catch {
-            return false;
-        }
-    }
-
     function _key(int32 x, int32 y) private pure returns (bytes32) {
         return keccak256(abi.encode(x, y));
+    }
+
+    function _cellKey(uint256 plotId, int32 x, int32 y) private pure returns (bytes32) {
+        return keccak256(abi.encode(plotId, x, y));
     }
 
     function _u(int256 v) private pure returns (string memory) {
