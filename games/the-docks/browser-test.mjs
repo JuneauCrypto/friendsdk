@@ -143,6 +143,12 @@ try {
     await game.getByRole("button", { name: "Move down-right" }).click();
     await game.getByText(/Moving #7730/).waitFor();
   } else {
+    await game.getByRole("button", { name: "All", exact: true }).click();
+    await game.getByText("Moving all 2").waitFor();
+    await game.getByRole("button", { name: "Move up-left" }).click();          // the whole island shape moves: nothing to pay
+    await game.getByRole("button", { name: "Pick several" }).click();           // back to one at a time
+    for (let i = 0; i < 3 && !(await game.getByText("Moving #7730").count()); i++) await game.getByRole("button", { name: "Next Friend" }).click();
+    await game.getByText("Moving #7730").waitFor();
     for (let i = 0; i < 12; i++) await game.getByRole("button", { name: "Move up-left" }).click();
     await shot("arrange");
     await btn("Done").click();
@@ -177,13 +183,32 @@ try {
   // manual on-chain check
   await btn("Check").click();
   await game.getByText(/On-chain check:.*#7573 updated \(G3 T1 → G3 T2\)/).waitFor();
-  // crew: others walk behind (up to 8 by default); send #7573 to stay on the plot
-  assert.equal(await game.locator("canvas.docks-avatar.crew").count(), Math.min(8, 1 + many), "crew followers drawn");
+  // crew: everyone starts on their own land; the lead calls them all over
+  assert.equal(await game.locator("canvas.docks-avatar.crew").count(), 0, "nobody follows yet");
   if (many) assert.ok(await game.locator("img.docks-land").count() < 400, "only lands near the camera are drawn");
+  await btn("Crew").click();
+  await game.getByRole("button", { name: "📣 Call all" }).click();
+  await game.getByText(new RegExp(`#7730 called all ${(1 + many).toLocaleString("en-US")} Friends over`)).waitFor();
+  assert.equal(await game.locator("canvas.docks-avatar.crew").count(), Math.min(40, 1 + many), "crew drawn walking");
+  await page.waitForTimeout(1500);
+  // pick #7573 on the map and leave it here, walk on, then take it over as the lead
+  const box = await game.locator("canvas.docks-avatar.crew").first().boundingBox();
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await game.getByText(/tap Friends to pick \(1\)/).waitFor();
+  await game.getByRole("button", { name: "Leave picked here" }).click();
+  await game.getByText(/1 Friend left here\./).waitFor();
+  await btn("Done").click();
+  for (const k of ["d", "s"]) { await page.keyboard.down(k); await page.waitForTimeout(700); await page.keyboard.up(k); }
+  await shot("crew");
   await btn("Islands").click();
-  await game.locator(".docks-friend", { hasText: "#7573" }).getByRole("button", { name: "Walking with you" }).click();
-  await game.locator(".docks-friend", { hasText: "#7573" }).getByRole("button", { name: "Stays on island" }).waitFor();
-  await game.getByRole("button", { name: "Close My islands" }).click();
+  await game.locator(".docks-friend", { hasText: many ? "#900000" : "#7573" }).getByRole("button", { name: "Lead" }).click();
+  await game.getByText(new RegExp(`You're leading #${many ? 900000 : 7573} now`)).waitFor();
+  await game.locator(".docks-hud").getByText(new RegExp(`#${many ? 900000 : 7573}`)).first().waitFor();
+  await btn("Crew").click();
+  await game.getByText(new RegExp(`Leading #${many ? 900000 : 7573}`)).waitFor();
+  await game.getByRole("button", { name: "All go home" }).click();
+  await game.getByText("Everyone went back to their own land.").waitFor();
+  await btn("Done").click();
   // tokens: claim the sample $MKT, then launch our own
   await btn("Tokens").click();
   await game.getByRole("button", { name: /^Claim for \d[\d,]* Friends?/ }).first().click();

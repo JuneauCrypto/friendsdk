@@ -102,3 +102,12 @@
 .docks-seams .hole{fill:#050505;stroke:#ff5d5d;stroke-width:.6;stroke-dasharray:1.5 1.2}
 .docks-hole-tag{position:absolute;transform:translate(-50%,-50%);font-size:6px;color:#ff5d5d;white-space:nowrap;pointer-events:none}
 .docks-hole{border-left:3px solid #ff5d5d;padding-left:8px}
+.docks-avatar.parked{opacity:.85}
+.docks-avatar.picked{filter:drop-shadow(0 0 1.5px #ccff00) drop-shadow(0 0 1.5px #ccff00)}
+.docks-crewbar{position:absolute;left:50%;bottom:50px;transform:translateX(-50%);display:flex;align-items:center;gap:6px;background:#000d;border:1.5px solid var(--signal);padding:8px;max-width:calc(100% - 20px);flex-wrap:wrap;justify-content:center}
+.docks-crewbar button{padding:5px 8px;font-size:11px}
+.docks-crewbar .docks-arrange-info{min-width:0}
+@media (max-aspect-ratio:1/1){
+  .docks-crewbar{bottom:46px;gap:3px;padding:5px}.docks-crewbar button{padding:4px 6px;font-size:10px}
+  .docks-crewbar .docks-arrange-info{width:100%;text-align:center}.docks-crewbar .docks-arrange-info strong{font-size:11px}.docks-crewbar .docks-arrange-info small{font-size:9px}
+}

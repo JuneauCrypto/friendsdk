@@ -20,7 +20,7 @@ import "./style.css";
 
 type Menu = "plot" | "docks" | "tokens" | "help" | "settings" | null;
 const CHECK_EVERY_MS = 60_000;
-const MAX_FOLLOWING = 24;                         // sprites walking behind you at once
+const MAX_DRAWN = 40;                             // crew sprites drawn at once (the rest are counted)
 const ART_CONCURRENCY = 6, ART_CACHE = 500;       // lazy on-chain art: parallel reads, Friends kept in memory
 const PAGE = 50;
 
@@ -46,11 +46,16 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const [zoom, setZoom] = useState(() => (window.innerWidth < 600 ? 1.5 : 2.2));
   const [reducedMotion, setReducedMotion] = useState(false);
   const [islandId, setIslandId] = useState("me-1");            // the island being arranged / docked
-  const [arranging, setArranging] = useState(false), [selected, setSelected] = useState<Placed | null>(null);
+  const [arranging, setArranging] = useState(false), [selected, setSelected] = useState<Placed[]>([]), [pickMany, setPickMany] = useState(false);
   const [here, setHere] = useState<Plot | null>(null);
   const [gate, setGate] = useState<Plot | null>(null);
   const [roster, setRoster] = useState<{ state: "loading" | "done" | "error"; done: number; total: number; error?: string }>({ state: "loading", done: 0, total: 0 });
-  const [following, setFollowing] = useState<bigint[]>([]);
+  // Your Friends as walkers: the lead (you control it), a crew that follows it, and Friends left
+  // standing somewhere. Everyone else stands on their own land (as the on-chain art shows).
+  const [lead, setLead] = useState<bigint>(friendId);
+  const [crewModes, setCrewModes] = useState<Map<bigint, "follow" | "park">>(new Map());
+  const [crewSel, setCrewSel] = useState<Set<bigint>>(new Set());
+  const [crewBar, setCrewBar] = useState(false);
   const [crewSprites, setCrewSprites] = useState<Map<bigint, GenerationSprites>>(new Map());
   const [page, setPage] = useState(1);
   const [addId, setAddId] = useState(""), [adding, setAdding] = useState(false), [addError, setAddError] = useState("");
@@ -102,7 +107,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         const home: Plot = { id: "me-1", name: "Your island", mine: true, access: "invite", friends: [{ m: walker, x: 0, y: 0 }], berth: null };
         plotSeq.current = 1;
         world.current = createWorld(samples.filter(s => s.friends.length), [home]);
-        econ.current = createEconomy(); setFollowing([]); setApprovedVisitors([]); setRequests([]); onChain.current = new Map(); savedRef.current = new Map(); simGone.current = new Set(); setIslandId("me-1");
+        econ.current = createEconomy(); setLead(friendId); setCrewModes(new Map()); setCrewSel(new Set()); setCrewBar(false); setApprovedVisitors([]); setRequests([]); onChain.current = new Map(); savedRef.current = new Map(); simGone.current = new Set(); setIslandId("me-1");
         const market = world.current.plots.find(p => p.id === "s4" && p.friends.length);
         if (market) seedLaunch(econ.current, { name: "Market Coin", symbol: "MKT", supply: 1_000_000, creator: market, creatorFriend: market.friends[0].m.id,
           scope: "anyDocked", claimEach: 500, claimPrice: 5, claimRemaining: 50_000 });
@@ -138,7 +143,6 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         const members = [...held.values()].map(l => have.get(l.id)?.m ?? member(l.id, l.gen, l.tier));
         const h = home(); h.friends = autoArrange(members); rebuild(w);
         const sp = spawnOn(w, h.friends.find(p => p.m.id === friendId)!); api.current?.teleport(sp.x, sp.y);
-        setFollowing(members.filter(m => m.id !== friendId).slice(0, 8).map(m => m.id));
         say(members.length > 1 ? `All ${members.length.toLocaleString()} of your activated Friends joined into one floating island. Open Docks to find a loading zone.`
           : "Your Friend is a floating island. Open Docks to find a loading zone next to the others.");
       } else {
@@ -164,7 +168,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   /** A Friend left the wallet (or was deactivated). Saved on an island: its spot burns into a hole. */
   function friendLeft(id: bigint) {
     const w = world.current!, s = savedRef.current.get(id);
-    setFollowing(f => f.filter(x => x !== id));
+    setCrewModes(c => { const n = new Map(c); n.delete(id); return n; });
+    if (id === lead) setLead(friendId);
     if (s) {
       const r = burnHole(w, id); savedRef.current.delete(id);
       return r ? `#${id} left your wallet: a hole opened on ${r.plot.name}` : `#${id} left your wallet`;
@@ -275,12 +280,38 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     return () => window.clearInterval(id);
   }); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ── crew sprites (only for the Friends walking behind you) ── */
+  /* ── sprites for the lead and the crew that's drawn ── */
+  const drawnCrew = () => {
+    const out: bigint[] = []; let follow = 0;
+    for (const [id, mode] of crewModes) { if (mode === "follow") { if (follow++ < MAX_DRAWN) out.push(id); } else if (out.length < MAX_DRAWN * 4) out.push(id); }
+    return out;
+  };
   useEffect(() => {
-    for (const id of following) if (!crewSprites.has(id)) {
+    for (const id of [lead, ...drawnCrew()]) if (id !== friendId && !crewSprites.has(id)) {
       void createFriendReader().read(id).then(s => setCrewSprites(m => new Map(m).set(id, s))).catch(() => {});
     }
-  }, [following]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [crewModes, lead]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* ── the crew: call, break off, leave, take over ── */
+  const setModes = (ids: Iterable<bigint>, mode: "follow" | "park" | "home") => setCrewModes(c => {
+    const n = new Map(c); for (const id of ids) { if (id === lead) continue; if (mode === "home") n.delete(id); else n.set(id, mode); } return n;
+  });
+  function callAll() {
+    const ids = myPlots(world.current!).flatMap(p => p.friends.map(x => x.m.id)).filter(id => id !== lead);
+    setModes(ids, "follow");
+    say(ids.length ? `#${lead} called all ${ids.length.toLocaleString()} Friends over. They're on their way${ids.length > MAX_DRAWN ? ` (${MAX_DRAWN} shown walking, the rest counted)` : ""}.` : "No other Friends to call.");
+  }
+  function takeOver(id: bigint) {
+    if (id === lead) return;
+    const old = lead;
+    setCrewModes(c => { const n = new Map(c); n.delete(id); n.set(old, "park"); return n; });
+    setLead(id); setCrewSel(new Set());
+    say(`You're leading #${id} now. #${old} stays where it was; call it back any time.`);
+  }
+  function onWalkerTap(id: bigint) {
+    setCrewBar(true);
+    setCrewSel(s => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  }
 
   /* ── simulated visit requests to my islands (until real players exist) ── */
   useEffect(() => {
@@ -296,7 +327,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
 
   /* ── actions ── */
   function goTo(p: Plot) {
-    const w = world.current!, pl = p.friends.find(x => x.m.id === friendId) ?? p.friends[0];
+    const w = world.current!, pl = p.friends.find(x => x.m.id === lead) ?? p.friends[0];
     if (pl) { const sp = spawnOn(w, pl); api.current?.teleport(sp.x, sp.y); }
   }
   function askToVisit(p: Plot) {
@@ -342,38 +373,41 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   function startArranging() {
     const p = island();
     setMenu(null); setArranging(true);
-    setSelected(p.friends.find(x => x.m.id === friendId) ?? p.friends[0] ?? null);
-    say(`Arranging ${p.name}: tap any of its Friends, then move it. Each Friend must touch another along part of a side.`);
+    const first = p.friends.find(x => x.m.id === lead) ?? p.friends[0];
+    setSelected(first ? [first] : []); setPickMany(false);
+    say(`Arranging ${p.name}: tap a Friend to move it, turn on "Pick several" to move a group, or All. Each Friend must touch another along part of a side.`);
   }
   function nudge(dx: number, dy: number) {
-    const w = world.current; if (!w || !arranging || !selected) return;
-    const p = plotOf(w, selected.m.id); if (!p) return;
-    const ok = moveGroup(w, p, [selected], dx, dy) || swapInto(w, p, selected, selected.m.cw * dx, selected.m.ch * dy);
-    if (!ok) say("That spot overlaps a different-size Friend. Move that one first, or swap with a same-size neighbour.");
+    const w = world.current; if (!w || !arranging || !selected.length) return;
+    const p = plotOf(w, selected[0].m.id); if (!p) return;
+    const group = selected.filter(x => p.friends.includes(x));
+    const one = group.length === 1 ? group[0] : null;
+    const ok = moveGroup(w, p, group, dx, dy) || (one ? swapInto(w, p, one, one.m.cw * dx, one.m.ch * dy) : false);
+    if (!ok) say(one ? "That spot overlaps a different-size Friend. Move that one first, or swap with a same-size neighbour." : "Something else is in the way of this group.");
     bump();
   }
   function reArrange() {
     const w = world.current!, p = island();
     p.friends = autoArrange(p.friends.map(x => x.m)); rebuild(w);
-    setSelected(p.friends.find(x => x.m.id === friendId) ?? p.friends[0] ?? null);
+    setSelected([]);
     bump(); say(`Auto-arranged ${p.name} into one connected block.`);
   }
   function finishArranging() {
     const w = world.current!, p = island();
     const loose = disconnected(w, p);
     if (loose.length) {
-      setSelected(loose[0]);
+      setSelected([loose[0]]);
       say(`${loose.length.toLocaleString()} Friend${loose.length === 1 ? " doesn't" : "s don't"} touch the rest (#${loose[0].m.id} selected). Every Friend must touch another along part of a side, or tap Auto-arrange.`);
       return;
     }
-    setArranging(false); setSelected(null); goTo(home()); bump();
+    setArranging(false); setSelected([]); goTo(home()); bump();
   }
   /** Save every changed island on chain (simulated): create islands as needed, burn RF per Friend moved. */
   async function saveOnChain() {
     const w = world.current!;
     for (const p of myPlots(w)) {
       const loose = disconnected(w, p);
-      if (loose.length) { setIslandId(p.id); setArranging(true); setSelected(loose[0]); say(`Can't save yet: on ${p.name}, ${loose.length.toLocaleString()} Friend${loose.length === 1 ? " doesn't" : "s don't"} touch the rest.`); return; }
+      if (loose.length) { setIslandId(p.id); setArranging(true); setSelected([loose[0]]); say(`Can't save yet: on ${p.name}, ${loose.length.toLocaleString()} Friend${loose.length === 1 ? " doesn't" : "s don't"} touch the rest.`); return; }
     }
     const c = pendingChanges(w, savedRef.current);
     if (!c.moved.length && !c.gone.length) { say("Nothing to save: your islands match the chain."); return; }
@@ -384,7 +418,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     for (const p of myPlots(w)) if (p.friends.length && !onChain.current.has(p.id)) { const n = 1 + Math.floor(Math.random() * 900); onChain.current.set(p.id, n); minted.push(n); }
     econ.current.rf -= c.rf; econ.current.burned += c.rf;
     savedRef.current = new Map(myPlots(w).flatMap(p => p.friends.map(pl => [pl.m.id, { plot: p.id, x: pl.x, y: pl.y }] as const)));
-    setSaving(false); setArranging(false); setSelected(null);
+    setSaving(false); setArranging(false); setSelected([]);
     const txs = Math.max(1, c.plots.length, Math.ceil(c.moved.length / 100));
     say(`Saved on chain (simulated)${minted.length ? `: created Island #${minted.join(", #")} on chain` : ""} · ${c.moved.length.toLocaleString()} Friend${c.moved.length === 1 ? "" : "s"} moved · ${fmt(c.rf)} RF burned · ${txs} transaction${txs === 1 ? "" : "s"} + gas.`);
   }
@@ -402,7 +436,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     }
     rebuild(w);
     for (const m of unsaved) addToPlot(w, home() ?? mine[0], m);
-    goTo(home()); setArranging(false); setSelected(null); bump(); say("Back to your saved islands.");
+    goTo(home()); setArranging(false); setSelected([]); bump(); say("Back to your saved islands.");
   }
   function dockIsland(b: Berth) {
     const w = world.current!, p = island();
@@ -463,9 +497,12 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const saved = savedRef.current;
   const pending = pendingChanges(w, saved), dirty = pending.moved.length > 0 || pending.gone.length > 0;
   const uiBlocked = Boolean(menu) || paused;
-  const label = sprites ? `${sprites.familyName} #${friendId}` : `Friend #${friendId}`;
+  const leadSprites = lead === friendId ? sprites : crewSprites.get(lead) ?? null;
+  const label = leadSprites ? `${leadSprites.familyName} #${lead}` : `Friend #${lead}`;
+  const following = [...crewModes].filter(([, m]) => m === "follow").length, parked = crewModes.size - following;
   const visit = gate ? w.visits.get(gate.id) ?? "none" : "none";
-  const crew: CrewMember[] = following.filter(id => allMine.some(p => p.m.id === id)).map(id => ({ id, sprites: crewSprites.get(id) ?? null }));
+  const crew: CrewMember[] = drawnCrew().map(id => ({ id, sprites: crewSprites.get(id) ?? null, mode: crewModes.get(id)! }));
+  const offLand = new Set<bigint>([lead, ...crewModes.keys()]);
   const byGen = [1, 2, 3, 4, 5, 6].map(g => [g, isl.friends.filter(p => p.m.gen === g).length] as const).filter(([, n]) => n);
   const rosterNote = roster.state === "loading" ? (roster.total ? `finding your Friends ${roster.done.toLocaleString()} / ${roster.total.toLocaleString()}` : "finding your Friends…")
     : roster.state === "error" ? "couldn't list your Friends" : "";
@@ -476,9 +513,11 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
        {p.name} · {p.friends.length.toLocaleString()}{p.berth ? "" : " · floating"}</button>)}</div>;
 
   return <section className="docks" aria-label={definition.name}>
-    <DocksView world={w} version={w.version} sprites={sprites} walkerId={friendId} zoom={zoom} paused={uiBlocked} reducedMotion={reducedMotion}
-      arranging={arranging} selected={selected} crew={crew} apiRef={api} onVisible={onVisible}
-      onPick={pl => { const p = plotOf(w, pl.m.id); if (p) setIslandId(p.id); setSelected(pl); }}
+    <DocksView world={w} version={w.version} sprites={leadSprites} walkerId={lead} offLand={offLand} zoom={zoom} paused={uiBlocked} reducedMotion={reducedMotion}
+      arranging={arranging} selected={selected} crew={crew} crewSel={crewSel} onWalkerTap={onWalkerTap} apiRef={api} onVisible={onVisible}
+      onPick={pl => { const p = plotOf(w, pl.m.id); if (!p) return;
+        if (pickMany && selected[0] && plotOf(w, selected[0].m.id) === p) setSelected(s => s.includes(pl) ? s.filter(x => x !== pl) : [...s, pl]);
+        else { setIslandId(p.id); setSelected([pl]); } }}
       onBlocked={p => { setGate(p); if (!menu) say(`${p.name} is invite-only.`); }} onEnterPlot={p => { setHere(p); if (p && p !== gate) setGate(null); }} />
 
     <div className="docks-hud" inert={uiBlocked || undefined}>
@@ -497,7 +536,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     <p className="docks-toast" role="status" aria-live="polite">{toast}</p>
 
     {arranging ? <div className="docks-arrange" role="toolbar" aria-label="Arrange your Friends">
-      <div className="docks-arrange-info"><strong>{selected ? `Moving #${selected.m.id}` : "Tap a Friend"}</strong>
+      <div className="docks-arrange-info"><strong>{selected.length === 0 ? "Tap a Friend" : selected.length === 1 ? `Moving #${selected[0].m.id}` : selected.length === isl.friends.length ? `Moving all ${selected.length.toLocaleString()}` : `Moving ${selected.length.toLocaleString()} Friends`}</strong>
         <small>{isl.name} · tap your Friends to pick one</small></div>
       <div className="docks-pad">
         <button type="button" aria-label="Move up-left" onClick={() => nudge(-1, 0)}>↖</button>
@@ -506,6 +545,11 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <button type="button" aria-label="Move down-right" onClick={() => nudge(1, 0)}>↘</button>
       </div>
       <div className="docks-chips">
+        {isl.friends.length > 1 && <button type="button" aria-label="Next Friend" onClick={() => {
+          const i = selected.length ? isl.friends.indexOf(selected[selected.length - 1]) : -1, next = isl.friends[(i + 1) % isl.friends.length];
+          setSelected(pickMany && !selected.includes(next) ? [...selected, next] : [next]); }}>Next ▸</button>}
+        {isl.friends.length > 1 && <button type="button" aria-pressed={pickMany} onClick={() => setPickMany(v => !v)}>Pick several</button>}
+        {isl.friends.length > 1 && <button type="button" onClick={() => { setSelected([...isl.friends]); setPickMany(true); }}>All</button>}
         {isl.friends.length > 1 && <button type="button" onClick={reArrange}>Auto-arrange</button>}
       </div>
       <div className="docks-save">
@@ -515,6 +559,16 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           <button type="button" className="rf-frame-primary" disabled={!dirty || saving} onClick={() => void saveOnChain()}>{saving ? "Saving…" : nftOf(isl) ? "⛓ Save on chain" : "⛓ Save on chain"}</button>
         </div>
       </div>
+    </div> : crewBar ? <div className="docks-crewbar" role="toolbar" aria-label="Your crew">
+      <div className="docks-arrange-info"><strong>Leading #{String(lead)}</strong>
+        <small>{following.toLocaleString()} with you · {parked.toLocaleString()} left around · tap Friends to pick ({crewSel.size})</small></div>
+      <button type="button" className="rf-frame-primary" onClick={callAll}>📣 Call all</button>
+      <button type="button" disabled={!crewSel.size} onClick={() => { setModes(crewSel, "follow"); say(`${crewSel.size} Friend${crewSel.size === 1 ? "" : "s"} walking with you.`); setCrewSel(new Set()); }}>Bring picked</button>
+      <button type="button" disabled={!crewSel.size} onClick={() => { setModes(crewSel, "park"); say(`${crewSel.size} Friend${crewSel.size === 1 ? "" : "s"} left here.`); setCrewSel(new Set()); }}>Leave picked here</button>
+      <button type="button" disabled={crewSel.size !== 1} onClick={() => takeOver([...crewSel][0])}>Take over</button>
+      <button type="button" disabled={!following} onClick={() => { setModes([...crewModes].filter(([, m]) => m === "follow").map(([id]) => id), "park"); say("Your crew waits here."); }}>Everyone wait</button>
+      <button type="button" disabled={!crewModes.size} onClick={() => { setModes([...crewModes.keys()], "home"); setCrewSel(new Set()); say("Everyone went back to their own land."); }}>All go home</button>
+      <button type="button" onClick={() => { setCrewBar(false); setCrewSel(new Set()); }}>Done</button>
     </div> : <div className="docks-bar" inert={uiBlocked || undefined}>
       {gate && !canEnter(w, gate) ? <button type="button" className="docks-act ready" disabled={visit === "pending"} onClick={() => askToVisit(gate)}>
         {visit === "pending" ? `Waiting for ${gate.name}…` : visit === "declined" ? `${gate.name} declined · ask again` : `Ask to visit ${gate.name}`}</button>
@@ -524,6 +578,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         : <span className="docks-hint">WASD / arrows or tap to walk · gangways (⇄) join docked islands</span>}
       <div className="docks-nav">
         <button type="button" className="docks-arrange-btn" onClick={startArranging} disabled={uiBlocked}>✥<span>Arrange</span></button>
+        <button type="button" onClick={() => setCrewBar(true)} disabled={uiBlocked}>👥<span>Crew</span></button>
         <button type="button" onClick={() => { setPage(1); setMenu("plot"); }} disabled={uiBlocked}>🏝<span>Islands</span></button>
         <button type="button" onClick={() => setMenu("docks")} disabled={uiBlocked}>⚓<span>Docks</span></button>
         <button type="button" onClick={() => setMenu("tokens")} disabled={uiBlocked}>🚀<span>Tokens</span></button>
@@ -563,21 +618,22 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
               <small>{same.length ? `${same.length} Gen ${hl.gen} Friend${same.length === 1 ? "" : "s"} could fill it` : `No Gen ${hl.gen} Friend to fill it right now`}</small></span>
               {same.length > 0 && <select aria-label={`Fill hole of #${hl.id}`} value="" onChange={e => { if (e.target.value) doFillHole(isl, hl, BigInt(e.target.value)); }}>
                 <option value="">Fill with…</option>{same.slice(0, 200).map(x => <option key={String(x.m.id)} value={String(x.m.id)}>#{String(x.m.id)} · {x.m.id === hl.id ? "free" : `${feeOf(x.m)} RF`}</option>)}</select>}</div>; })}</>}
-        <h3>Friends on {isl.name} <small className="docks-note">· {crew.length} walking with you (up to {MAX_FOLLOWING})</small></h3>
+        <h3>Friends on {isl.name} <small className="docks-note">· leading #{String(lead)} · {following.toLocaleString()} with you · {parked.toLocaleString()} left around</small></h3>
+        <div className="docks-row"><button type="button" onClick={() => { setMenu(null); callAll(); }}>📣 Call all to #{String(lead)}</button>
+          <button type="button" disabled={!crewModes.size} onClick={() => { setModes([...crewModes.keys()], "home"); say("Everyone went back to their own land."); }}>All go home</button></div>
         {!isl.friends.length && <p className="docks-note">No Friends here yet. Deploy some from another island's list.</p>}
         <div className="docks-list">
-          {isl.friends.slice(0, page * PAGE).map(p => { const id = p.m.id, f: Friend | null = p.m.friend, walking = following.includes(id);
+          {isl.friends.slice(0, page * PAGE).map(p => { const id = p.m.id, f: Friend | null = p.m.friend, mode = id === lead ? "lead" : crewModes.get(id) ?? "home";
             return <div className="docks-friend" key={String(id)}>
               <div className="crop">{f ? <img src={f.art} alt={`Friend #${id} on-chain artwork`} loading="lazy" /> : <span className="docks-note">#{String(id)}</span>}</div>
-              <span><strong>#{String(id)}{id === friendId ? " · you" : ""}</strong>
+              <span><strong>#{String(id)}{id === lead ? " · leading" : ""}</strong>
                 <small>Gen {p.m.gen} · Tier {p.m.tier}{f ? ` · ${f.traits.Scenery}` : ""} · weight {fmtW(weightOf(p.m))}</small></span>
               <span className="docks-row tight">
                 {mine.length > 1 && <select aria-label={`Deploy #${id} to`} value={isl.id} onChange={e => deployTo(id, e.target.value)}>
                   {mine.map(q => <option key={q.id} value={q.id}>{q === isl ? "On this island" : `→ ${q.name}`}</option>)}</select>}
-                {id !== friendId && <button type="button" aria-pressed={walking} onClick={() => {
-                  if (!walking && following.length >= MAX_FOLLOWING) { say(`Up to ${MAX_FOLLOWING} Friends can walk with you at once.`); return; }
-                  setFollowing(fl => walking ? fl.filter(x => x !== id) : [...fl, id]);
-                }}>{walking ? "Walking with you" : "Stays on island"}</button>}</span>
+                {id !== lead && <select aria-label={`#${id} does`} value={mode} onChange={e => setModes([id], e.target.value as "follow" | "park" | "home")}>
+                  <option value="home">On its land</option><option value="follow">With #{String(lead)}</option>{mode === "park" && <option value="park">Left around</option>}</select>}
+                {id !== lead && <button type="button" onClick={() => { setMenu(null); takeOver(id); }}>Lead</button>}</span>
             </div>; })}
           {isl.friends.length > page * PAGE && <div className="docks-row"><button type="button" onClick={() => setPage(n => n + 1)}>Show {Math.min(PAGE, isl.friends.length - page * PAGE)} more of {(isl.friends.length - page * PAGE).toLocaleString()}</button></div>}
         </div>
@@ -642,11 +698,11 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       </> : menu === "help" ? <ul className="docks-help">
         <li><strong>Islands:</strong> every activated Friend is a small floating island; joined, they make one big island. Every activated Friend in your wallet joins automatically, from 1 to 10,000+. Keep them together or deploy them to more islands (＋ New island). Islands are saved to your wallet and can't be sold; the only NFTs are your Friends.</li>
         <li><strong>Holes:</strong> if a saved Friend leaves your wallet (sending it clears its activation) or is deactivated, its spot becomes a hole in the island. The hole stays until that Friend comes back (it heals for free) or you fill it with another activated Friend of the same generation (normal arrange fee).</li>
-        <li><strong>Arranging is the game:</strong> Arrange → tap a Friend, move it; each must touch another along part of a side. Save on chain burns RF for every Friend whose spot changed ({Object.entries(ARRANGE_FEE).map(([g, f]) => `Gen ${g}: ${f}`).join(", ")}), plus gas. Unmoved Friends are free; Undo returns to your last save.</li>
+        <li><strong>Arranging is the game:</strong> Arrange → tap a Friend and move it, or <em>Pick several</em> / <em>All</em> to move a group together; each Friend must touch another along part of a side. Save on chain burns RF for every Friend whose spot changed ({Object.entries(ARRANGE_FEE).map(([g, f]) => `Gen ${g}: ${f}`).join(", ")}), plus gas. Unmoved Friends are free; Undo returns to your last save.</li>
         <li><strong>Dock:</strong> Docks → pick a loading zone next to another island. Every island takes one berth whatever its size, so how far you can roam depends on how many islands there are. Docking and moving cost only gas. Neighbours are joined by a gangway.</li>
         <li><strong>Bridges:</strong> can't dock next to an island? Build a bridge to it: {BRIDGE_FEE_PER_BERTH} RF per berth of distance, burned. It lasts until either island moves.</li>
         <li><strong>Visit:</strong> open islands (⇄) let you walk straight in. Invite-only islands (🔒) need approval: walk up the gangway and choose Ask to visit.</li>
-        <li><strong>Your crew:</strong> pick up to {MAX_FOLLOWING} Friends to walk behind you.</li>
+        <li><strong>Your crew:</strong> you lead one Friend; everyone else stands on their own land. 👥 Crew → <em>Call all</em> brings every Friend to your lead. Tap Friends on the map to pick them, then <em>Bring picked</em>, <em>Leave picked here</em> (break off and walk on without them) or <em>Take over</em> to lead that Friend instead. <em>All go home</em> sends everyone back to their land.</li>
         <li><strong>Tokens:</strong> launch a token for 1,000 RF, airdrop it into Friend wallets and open a claim pool; claims burn RF.</li>
         <li><strong>Always on-chain:</strong> every Friend is its real on-chain artwork, loaded as you get near it. Re-checked every minute (or tap Check): new Friends join, upgrades update, sold or deactivated Friends leave.</li>
         <li>This preview doesn't save: reloading starts fresh. RF, saves, docking, bridges, launches and claims are simulated.</li>

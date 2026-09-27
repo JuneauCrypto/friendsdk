@@ -328,9 +328,19 @@ export function canEnter(w: World, p: Plot) { return p.mine || p.access === "ope
 export type Saved = ReadonlyMap<bigint, { plot: string; x: number; y: number }>;
 export function pendingChanges(w: World, saved: Saved) {
   let rf = 0; const moved: Placed[] = []; const plots = new Set<Plot>();
-  for (const p of myPlots(w)) for (const pl of p.friends) {
-    const s = saved.get(pl.m.id);
-    if (!s || s.plot !== p.id || s.x !== pl.x || s.y !== pl.y) { moved.push(pl); rf += feeOf(pl.m); plots.add(p); }
+  for (const p of myPlots(w)) {
+    // Moving a whole island shape together isn't a rearrangement: measure against the most
+    // common shift (unless holes pin the island's grid, in which case every shift counts).
+    const shifts = new Map<string, number>();
+    if (!p.holes?.length) for (const pl of p.friends) {
+      const s = saved.get(pl.m.id); if (!s || s.plot !== p.id) continue;
+      const k = `${pl.x - s.x},${pl.y - s.y}`; shifts.set(k, (shifts.get(k) ?? 0) + 1);
+    }
+    const [sx, sy] = ([...shifts].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "0,0").split(",").map(Number);
+    for (const pl of p.friends) {
+      const s = saved.get(pl.m.id);
+      if (!s || s.plot !== p.id || s.x + sx !== pl.x || s.y + sy !== pl.y) { moved.push(pl); rf += feeOf(pl.m); plots.add(p); }
+    }
   }
   const all = new Set(myPlots(w).flatMap(p => p.friends.map(pl => pl.m.id)));
   const gone = [...saved.keys()].filter(id => !all.has(id));

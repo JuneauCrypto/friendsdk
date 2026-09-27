@@ -25,8 +25,9 @@ is a saved layout that belongs to the wallet that built it, and it can't be sold
 - **Your whole wallet, automatically.** Every activated Friend in the same wallet joins,
   from 1 to 10,000+. The game keeps re-checking the chain, so **upgrades show up** and
   sold or deactivated Friends leave.
-- **Crew and tokens.** Every Friend is its own wallet (its canonical token-bound
-  account): pick who walks behind you, and launch a token from your island for 1,000 RF
+- **Lead and crew.** Lead any of your Friends; call them all to you, break some off and
+  leave them around, or take over another Friend as the lead.
+- **Tokens.** Every Friend is its own wallet (its canonical token-bound account): launch a token from your island for 1,000 RF
   with airdrops and an RF-burning claim pool.
 
 Everything economic is **simulated** in this preview; the contracts are below.
@@ -62,10 +63,10 @@ app's built-in browser (the SDK has no WalletConnect).
 | **Bridges** | On the berth map, tap an island you aren't next to (or **Bridge to …**): 10 RF per berth of distance, burned. The bridge is a walkway over the water and lasts until either island moves. |
 | **Access** | Gangways and bridges are open water; stepping onto an invite-only island (🔒) needs approval: **Ask to visit**. Your islands: **Open / Invite only** in Islands; incoming requests appear there. |
 | **Your whole wallet** | `roster.ts` reads the wallet that holds your Friend (`ownerOf`), its owner-filtered `Transfer` history (the same account-filtered method the SDK runtime's picker uses; no collection scan) and then generation + activation tier for every held Friend through Multicall3, 250 per call. Inactive Friends are left out. Re-run every minute, so bought, sold, activated or upgraded Friends join, leave or update. Adding by number stays as a fallback. |
-| **Arrange** | ✥ Arrange → tap any Friend on the island and step it one cell (↖ ↗ ↙ ↘ or arrow keys). Stepping onto a same-size neighbour swaps them, so packed islands can be reshuffled. **Auto-arrange** packs the island into one connected block. **Done** / **Save** refuse an island where a Friend doesn't touch another along part of a side. The bar shows how many Friends moved and the RF that saving burns. |
+| **Arrange** | ✥ Arrange → tap any Friend on the island (or **Next ▸**) and step it one cell (↖ ↗ ↙ ↘ or arrow keys); **Pick several** to move a group together, **All** for the whole island shape (moving the whole shape together costs nothing). Stepping onto a same-size neighbour swaps them, so packed islands can be reshuffled. **Auto-arrange** packs the island into one connected block. **Done** / **Save** refuse an island where a Friend doesn't touch another along part of a side. The bar shows how many Friends moved and the RF that saving burns. |
 | **Scale** | Layout needs no artwork: footprints come from generation. Occupancy is per 4 × 4-tile cell. Only Friends near the camera are drawn; their on-chain art loads lazily (6 at a time, 500 kept in memory). The crew shows up to 24 walkers. Tested with 10,002 Friends on desktop and phone. |
 | **Chain checks** | Every 60 s and on **Check**: re-read every Friend's tokenURI; if its art or traits changed (e.g. tier upgrade) the art, footprint and rank update. Deactivated Friends leave the docks; Friends no longer held by your wallet leave your plot. |
-| **Crew** | Your other Friends walk behind you (canonical on-chain sprites): 8 by default, pick up to 24 in Islands (**Walking with you** / **Stays on island**). |
+| **Lead & crew** | You lead one Friend (the one you walk as); every other Friend stands on its own land, as the on-chain art shows. 👥 Crew → **Call all** brings every Friend over to the lead (40 drawn walking, the rest counted). Tap Friends on the map to pick them, then **Bring picked**, **Leave picked here** (break off and walk on without them), **Take over** (lead that Friend instead; the old lead stays where it was), **Everyone wait** or **All go home**. The Islands list has the same per Friend (*On its land / With the lead / Lead*). |
 | **Tokens** *(simulated)* | 🚀 Tokens → launch: name, ticker, supply; airdrop scope and amount; claim pool, per-claim amount, claim price. Costs **1,000 RF** (500 burned, 500 treasury). Airdrops and claims land in each Friend's own wallet. Every claim burns the launch's RF price. A sample plot's `$MKT` is there to claim. |
 | **Rank** | Sum of the official reward weight (Generation × Activation tier, per rarefriends.com/docs/generations) of a plot's Friends: Speck 0+ · Hamlet 5+ · Village 50+ · Town 500+ · City 5,000+ · Capital 50,000+. |
 

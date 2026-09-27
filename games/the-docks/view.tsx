@@ -6,13 +6,18 @@ import { spriteFrame, type GenerationSprites, type SpriteFacing } from "@rarefri
 import { fromScreen, toScreen } from "./land.js";
 import { CELL, canEnter, ck, neighboursOf, plotOf, rankOf, tileAt, type Placed, type Plot, type World } from "./world.js";
 
-export type CrewMember = { id: bigint; sprites: GenerationSprites | null };
+/** A Friend walking around off its land: following the lead, or left standing somewhere. */
+export type CrewMember = { id: bigint; sprites: GenerationSprites | null; mode: "follow" | "park" };
 export type ViewApi = { focusOn: (x: number, y: number) => void; position: () => { x: number; y: number }; teleport: (x: number, y: number) => void };
 type Props = {
-  world: World; version: number; sprites: GenerationSprites | null; walkerId: bigint;
+  world: World; version: number; sprites: GenerationSprites | null;
+  walkerId: bigint;                              // the lead: the Friend you control
+  offLand: Set<bigint>;                          // Friends away from their land (lead + crew): their land art drops the standing figure
   zoom: number; paused: boolean; reducedMotion: boolean;
-  arranging: boolean; selected: Placed | null;
-  crew: CrewMember[];                            // Friends walking behind you (capped by the caller)
+  arranging: boolean; selected: Placed[];
+  crew: CrewMember[];                            // Friends walking behind you or left somewhere (capped by the caller)
+  crewSel: Set<bigint>;                          // crew picked on the map
+  onWalkerTap: (id: bigint) => void;
   onBlocked: (plot: Plot) => void; onEnterPlot: (plot: Plot | null) => void;
   onPick: (pl: Placed) => void;                  // arrange mode: tap one of your Friends
   onVisible: (pls: Placed[]) => void;            // Friends near the camera (for lazy art loading)
@@ -59,7 +64,7 @@ function drawSprite(cv: HTMLCanvasElement, s: GenerationSprites | null, facing: 
 }
 
 export function DocksView(props: Props) {
-  const { world, version, walkerId, arranging, selected, crew, apiRef } = props;
+  const { world, version, walkerId, arranging, selected, crew, crewSel, offLand, apiRef } = props;
   const viewport = useRef<HTMLDivElement>(null), layer = useRef<HTMLDivElement>(null), avatar = useRef<HTMLCanvasElement>(null);
   const crewCanvases = useRef(new Map<string, HTMLCanvasElement>());
   const followers = useRef(new Map<string, Follower>());
@@ -71,10 +76,15 @@ export function DocksView(props: Props) {
   const state = useRef({ ...props, lastPlot: null as Plot | null, lastBlock: 0, visKey: "" });
   state.current = { ...state.current, ...props };
 
-  // initial position: on my walking Friend
+  // the lead: start on its land; when you take over another Friend, swap places with it
+  const prevLead = useRef<bigint | null>(null);
   useEffect(() => {
-    const p = plotOf(world, walkerId), pl = p?.friends.find(x => x.m.id === walkerId);
-    if (pl) { const s = spawnOn(world, pl); player.current.x = s.x; player.current.y = s.y; }
+    const pc = player.current, old = prevLead.current;
+    const f = followers.current.get(String(walkerId));
+    if (old !== null && old !== walkerId) followers.current.set(String(old), { x: pc.x, y: pc.y, facing: pc.facing, walking: false });
+    if (f) { pc.x = f.x; pc.y = f.y; followers.current.delete(String(walkerId)); }
+    else { const p = plotOf(world, walkerId), pl = p?.friends.find(x => x.m.id === walkerId); if (pl) { const s = spawnOn(world, pl); pc.x = s.x; pc.y = s.y; } }
+    pc.target = null; trail.current = []; focus.current = null; prevLead.current = walkerId;
   }, [walkerId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   apiRef.current = {
@@ -82,7 +92,8 @@ export function DocksView(props: Props) {
     position: () => ({ x: player.current.x, y: player.current.y }),
     teleport: (x, y) => {
       player.current.x = x; player.current.y = y; player.current.target = null; focus.current = null; trail.current = [];
-      for (const f of followers.current.values()) { f.x = x; f.y = y; }
+      const follow = new Set(state.current.crew.filter(m => m.mode === "follow").map(m => String(m.id)));
+      for (const [k, f] of followers.current) if (follow.has(k)) { f.x = x; f.y = y; }
     },
   };
 
@@ -110,6 +121,15 @@ export function DocksView(props: Props) {
       if (o?.plot?.mine && o.placed) st.onPick(o.placed);
       return;
     }
+    // tapping one of your walking Friends picks it (to lead it, leave it or bring it along)
+    const sx = (e.clientX - r.left - m.e) / m.a, sy = (e.clientY - r.top - m.f) / m.d;
+    let hit: bigint | null = null, best = 12;
+    for (const c of st.crew) {
+      const f = followers.current.get(String(c.id)); if (!f) continue;
+      const s = toScreen(f.x, f.y), d = Math.hypot(s.x - sx, s.y - 10 - sy);
+      if (d < best) { best = d; hit = c.id; }
+    }
+    if (hit !== null) { st.onWalkerTap(hit); return; }
     player.current.target = at; focus.current = null;
   };
 
@@ -141,11 +161,18 @@ export function DocksView(props: Props) {
     const stepCrew = (dt: number) => {
       const p = player.current, tr = trail.current, lastPt = tr[tr.length - 1];
       if (!lastPt || Math.hypot(lastPt.x - p.x, lastPt.y - p.y) > 0.3) { tr.push({ x: p.x, y: p.y }); if (tr.length > 400) tr.shift(); }
-      state.current.crew.forEach((m, n) => {
+      let n = 0;
+      state.current.crew.forEach(m => {
         const key = String(m.id);
         let f = followers.current.get(key);
-        if (!f) { f = { x: p.x, y: p.y, facing: "down", walking: false }; followers.current.set(key, f); }
-        const goal = tr[Math.max(0, tr.length - 1 - (n + 1) * 4)] ?? p;
+        if (!f) {                                     // called away from its land: set off from there
+          const home = plotOf(state.current.world, m.id)?.friends.find(x => x.m.id === m.id);
+          const s = home ? spawnOn(state.current.world, home) : { x: p.x, y: p.y };
+          f = { x: s.x, y: s.y, facing: "down", walking: false }; followers.current.set(key, f);
+        }
+        if (m.mode === "park") { f.walking = false; return; }
+        n++;
+        const goal = tr[Math.max(0, tr.length - 1 - n * 4)] ?? p;
         const dx = goal.x - f.x, dy = goal.y - f.y, d = Math.hypot(dx, dy);
         f.walking = d > 0.15;
         if (f.walking) {
@@ -184,9 +211,10 @@ export function DocksView(props: Props) {
           p.facing = Math.abs(sx) > Math.abs(sy) ? (sx > 0 ? "right" : "left") : (sy > 0 ? "down" : "up");
         }
         stepCrew(dt);
+        for (const k of followers.current.keys()) if (!st.crew.some(c => String(c.id) === k)) followers.current.delete(k);   // sent home
         const under = tileAt(st.world, p.x, p.y);
         if (!under) {                                   // islands re-laid out under us: step back onto my Friend
-          const home = plotOf(st.world, walkerId)?.friends.find(x => x.m.id === walkerId);
+          const home = plotOf(st.world, st.walkerId)?.friends.find(x => x.m.id === st.walkerId);
           if (home) { const sp = spawnOn(st.world, home); p.x = sp.x; p.y = sp.y; p.target = null; }
         }
         const here = tileAt(st.world, p.x, p.y)?.plot ?? null;
@@ -195,10 +223,10 @@ export function DocksView(props: Props) {
       // camera
       const vp = viewport.current, ly = layer.current;
       if (vp && ly) {
-        const sel = st.selected, sp = sel ? plotOf(st.world, sel.m.id) : null, sw = sel && sp ? worldXY(st.world, sp, sel) : null;
+        const sel = st.selected[0] ?? null, sp = sel ? plotOf(st.world, sel.m.id) : null, sw = sel && sp ? worldXY(st.world, sp, sel) : null;
         const target = st.arranging && sel && sw ? { x: sw.x + T(sel.m.cw) / 2, y: sw.y + T(sel.m.ch) / 2 } : focus.current ?? p;
         const sc = toScreen(target.x, target.y), z = st.zoom;
-        const ox = vp.clientWidth / 2 - sc.x * z, oy = vp.clientHeight * 0.55 - sc.y * z;
+        const ox = vp.clientWidth / 2 - sc.x * z, oy = vp.clientHeight * (vp.clientHeight > vp.clientWidth ? 0.38 : 0.55) - sc.y * z;
         ly.style.transform = `translate(${ox.toFixed(1)}px, ${oy.toFixed(1)}px) scale(${z})`;
         // visible box in cells (from the four viewport corners), padded and quantised
         const corners = [[0, 0], [vp.clientWidth, 0], [0, vp.clientHeight], [vp.clientWidth, vp.clientHeight]].map(([x, y]) => fromScreen((x - ox) / z, (y - oy) / z));
@@ -274,7 +302,8 @@ export function DocksView(props: Props) {
     const b = world.box.get(p)!, c = toScreen(b.x0, b.y0);
     return { plot: p, x: c.x, y: c.y - 20, rank: rankOf(p).rank };
   }), [world, version]); // eslint-disable-line react-hooks/exhaustive-deps
-  const selPlot = selected ? plotOf(world, selected.m.id) : null;
+  const selSet = new Set(selected);
+  const selPlot = selected[0] ? plotOf(world, selected[0].m.id) : null;
   const myVisible = arranging ? visible.filter(v => v.plot === selPlot) : [];
 
   return <div className="docks-viewport" ref={viewport} onPointerDown={onPointer} aria-hidden="true">
@@ -287,21 +316,21 @@ export function DocksView(props: Props) {
         const f = pl.m.friend, o = toScreen(x, y);
         if (!f) { const c = toScreen(x + T(pl.m.cw) / 2, y + T(pl.m.ch) / 2);
           return <span key={`${plot.id}-${pl.m.id}`} className="docks-pending" style={{ left: c.x, top: c.y, zIndex: 10 + i }}>#{String(pl.m.id)}</span>; }
-        const src = plot.mine && pl.m.id === walkerId ? f.artWithoutPortrait : f.art;
+        const src = plot.mine && (pl.m.id === walkerId || offLand.has(pl.m.id)) ? f.artWithoutPortrait : f.art;
         return <img key={`${plot.id}-${pl.m.id}`} className={`docks-land ${plot.berth ? "" : "adrift"}`} src={src} alt="" draggable={false}
           style={{ left: o.x - f.anchor.x, top: o.y - f.anchor.y, zIndex: 10 + i }} />;
       })}
       <svg className="docks-seams" width="1" height="1" style={{ zIndex: 500 }}>
         {myVisible.map(({ pl, x, y }) => <path key={String(pl.m.id)} d={diamond(x, y, x + T(pl.m.cw), y + T(pl.m.ch))}
-          className={pl === selected ? "selected-outline" : "other-outline"} />)}
+          className={selSet.has(pl) ? "selected-outline" : "other-outline"} />)}
       </svg>
       {gates.map(g => <span key={g.key} className={`docks-gate ${g.open ? "open" : "shut"}`} style={{ left: g.x, top: g.y, zIndex: 600 }}>{g.open ? "⇄" : "🔒"}</span>)}
       {labels.map(l => <span key={l.plot.id} className={`docks-plot-label ${l.plot.mine ? "mine" : ""}`} style={{ left: l.x, top: l.y, zIndex: 700 }}>
         {l.plot.name} · {l.rank}{l.plot.mine ? ` · ${l.plot.friends.length}` : l.plot.access === "open" ? " · open" : " · invite"}{l.plot.berth ? "" : " · floating"}</span>)}
       {myVisible.length <= 150 && myVisible.map(({ pl, x, y }) => { const c = toScreen(x + T(pl.m.cw) / 2, y + T(pl.m.ch) / 2);
-        return <span key={String(pl.m.id)} className={`docks-friend-tag ${pl === selected ? "sel" : ""}`} style={{ left: c.x, top: c.y, zIndex: 800 }}>#{String(pl.m.id)}</span>; })}
+        return <span key={String(pl.m.id)} className={`docks-friend-tag ${selSet.has(pl) ? "sel" : ""}`} style={{ left: c.x, top: c.y, zIndex: 800 }}>#{String(pl.m.id)}</span>; })}
       {crew.map(m => <canvas key={String(m.id)} ref={el => { if (el) crewCanvases.current.set(String(m.id), el); else crewCanvases.current.delete(String(m.id)); }}
-        className="docks-avatar crew" width={36} height={36} style={{ zIndex: 890 }} />)}
+        className={`docks-avatar crew${m.mode === "park" ? " parked" : ""}${crewSel.has(m.id) ? " picked" : ""}`} width={36} height={36} style={{ zIndex: 890 }} />)}
       <canvas ref={avatar} className="docks-avatar" width={36} height={36} style={{ zIndex: 900 }} />
     </div>
   </div>;
