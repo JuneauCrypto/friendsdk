@@ -60,7 +60,13 @@ function displaySvg(svg: string, withoutPortrait: boolean) {
   let out = svg.replace(/<rect width="512" height="512" fill="#000"\/>/, "");
   if (withoutPortrait && typeof DOMParser !== "undefined") {
     const doc = new DOMParser().parseFromString(out, "image/svg+xml");
-    doc.getElementById("portrait")?.remove();
+    // The standing Friend is a <use> of #portrait (still) plus #friend, which walks its land
+    // cycling through several pose frames (#portrait, #portrait-…). Remove every one of them.
+    doc.getElementById("friend")?.remove();
+    for (const u of Array.from(doc.querySelectorAll("use"))) {
+      const href = u.getAttribute("href") ?? u.getAttribute("xlink:href") ?? "";
+      if (href.startsWith("#portrait")) (u.closest(".rf-still") ?? u).remove();
+    }
     out = new XMLSerializer().serializeToString(doc);
   }
   return out;

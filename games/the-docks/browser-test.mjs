@@ -190,7 +190,13 @@ try {
   await game.getByRole("button", { name: "📣 Call all" }).click();
   await game.getByText(new RegExp(`#7730 called all ${(1 + many).toLocaleString("en-US")} Friends over`)).waitFor();
   assert.equal(await game.locator("canvas.docks-avatar.crew").count(), Math.min(40, 1 + many), "crew drawn walking");
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(1500); await shot("called-all");
+  // every called Friend walked off: its land keeps no standing figure (no pose frames, no still)
+  const figures = await game.locator("img.docks-land").evaluateAll(imgs => imgs.map(i => { const t = atob(i.getAttribute("src").split(",")[1]); return /id="friend"|href="#portrait/.test(t); }));
+  if (!many) {
+    assert.deepEqual(figures.slice(0, 2), [false, false], "my lands show no standing Friend while they walk");
+    assert.ok(figures.slice(2).every(Boolean), "neighbours' Friends stay on their land");
+  }
   // pick #7573 on the map and leave it here, walk on, then take it over as the lead
   const box = await game.locator("canvas.docks-avatar.crew").first().boundingBox();
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
