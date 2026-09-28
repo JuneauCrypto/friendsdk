@@ -24,6 +24,25 @@ const validId = (value: unknown): value is bigint => typeof value === "bigint" &
 const MAX_TRANSFER_LOGS = 100_000;
 const MAX_OWNED_FRIENDS = 10_000;
 
+/** Largest block span per `eth_getLogs` request; public RPCs cap the range (Robinhood Chain: 10,000,000). */
+export const LOG_WINDOW_BLOCKS = 5_000_000n;
+
+/** One owner-filtered Transfer query, split into block windows the RPC accepts. */
+async function ownerLogs(client: OwnedFriendsClient, generations: Address, toBlock: bigint, args: { to: Address } | { from: Address }) {
+  const windows: [bigint, bigint][] = [];
+  for (let from = 0n; from <= toBlock; from += LOG_WINDOW_BLOCKS) {
+    const to = from + LOG_WINDOW_BLOCKS - 1n;
+    windows.push([from, to < toBlock ? to : toBlock]);
+  }
+  const out = [];
+  for (let i = 0; i < windows.length; i += 4) {
+    const parts = await Promise.all(windows.slice(i, i + 4).map(([fromBlock, to]) =>
+      client.getLogs({ address: generations, event: TRANSFER, fromBlock, toBlock: to, strict: true, args })));
+    for (const p of parts) out.push(...p);
+  }
+  return out;
+}
+
 /**
  * Read-only discovery using two indexed, owner-filtered Transfer queries. The
  * canonical Generations contract has no ERC721Enumerable owner enumeration.
@@ -62,10 +81,9 @@ export async function readOwnedFriends(
     return Object.freeze({ friends: Object.freeze([]), blockNumber, hiddenCount: 0 });
   }
 
-  const query = { address: deployment.generations, event: TRANSFER, fromBlock: 0n, toBlock: blockNumber, strict: true } as const;
   const [received, sent] = await Promise.all([
-    client.getLogs({ ...query, args: { to: account } }),
-    client.getLogs({ ...query, args: { from: account } }),
+    ownerLogs(client, deployment.generations, blockNumber, { to: account }),
+    ownerLogs(client, deployment.generations, blockNumber, { from: account }),
   ]).catch(cause => {
     active();
     throw new Error("Could not load this account's Friend transfers. Retry with an RPC that supports owner-filtered history; the SDK will not scan the collection.", { cause });

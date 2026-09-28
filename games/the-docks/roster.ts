@@ -25,8 +25,17 @@ export type OwnedLand = { id: bigint; gen: number; tier: number };
 export async function readOwnedLands(owner: string, onProgress?: (done: number, total: number) => void): Promise<OwnedLand[]> {
   const c = client(), account = owner as Address;
   const block = await c.getBlockNumber();
-  const q = { address: G, event: TRANSFER, fromBlock: 0n, toBlock: block, strict: true } as const;
-  const [inn, out] = await Promise.all([c.getLogs({ ...q, args: { to: account } }), c.getLogs({ ...q, args: { from: account } })]);
+  // Public RPCs cap eth_getLogs block ranges (Robinhood Chain: 10,000,000), so query in windows.
+  const logs = async (args: { to: Address } | { from: Address }) => {
+    const W = 5_000_000n, all = [];
+    for (let from = 0n; from <= block; from += W * 4n) {
+      const parts = await Promise.all([0n, 1n, 2n, 3n].map(k => from + k * W).filter(f => f <= block).map(f =>
+        c.getLogs({ address: G, event: TRANSFER, fromBlock: f, toBlock: f + W - 1n < block ? f + W - 1n : block, strict: true, args })));
+      for (const p of parts) all.push(...p);
+    }
+    return all;
+  };
+  const [inn, out] = await Promise.all([logs({ to: account }), logs({ from: account })]);
   const seen = new Map<string, (typeof inn)[number]>();
   for (const l of [...inn, ...out]) seen.set(`${l.blockNumber}:${l.logIndex}`, l);
   const held = new Set<bigint>();
