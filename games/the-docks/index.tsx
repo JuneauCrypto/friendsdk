@@ -12,7 +12,7 @@ import {
   refreshMember, removeFromPlot, swapInto, undock, weightOf, burnHole, fillHole, holesOf, feeOf,
   type Access, type Berth, type Hole, type Member, type Placed, type Plot, type World,
 } from "./world.js";
-import { DocksView, spawnOn, type CrewMember, type ViewApi } from "./view.js";
+import { DocksView, clampZoom, spawnOn, type CrewMember, type ViewApi } from "./view.js";
 import { ChainMap } from "./chainmap.js";
 import { LAUNCH_FEE, SCOPES, claimAll, createEconomy, eligibleFriends, fmt, launch, seedLaunch, type Economy, type Launch, type Scope } from "./launch.js";
 import "@rarefriends/friendsdk/frame.css";
@@ -514,7 +514,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
 
   return <section className="docks" aria-label={definition.name}>
     <DocksView world={w} version={w.version} sprites={leadSprites} walkerId={lead} offLand={offLand} zoom={zoom} paused={uiBlocked} reducedMotion={reducedMotion}
-      arranging={arranging} selected={selected} crew={crew} crewSel={crewSel} onWalkerTap={onWalkerTap} apiRef={api} onVisible={onVisible}
+      arranging={arranging} selected={selected} crew={crew} crewSel={crewSel} onWalkerTap={onWalkerTap} apiRef={api} onVisible={onVisible} onZoom={z => setZoom(clampZoom(z))}
       onPick={pl => { const p = plotOf(w, pl.m.id); if (!p) return;
         if (pickMany && selected[0] && plotOf(w, selected[0].m.id) === p) setSelected(s => s.includes(pl) ? s.filter(x => x !== pl) : [...s, pl]);
         else { setIslandId(p.id); setSelected([pl]); } }}
@@ -583,8 +583,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <button type="button" onClick={() => setMenu("docks")} disabled={uiBlocked}>⚓<span>Docks</span></button>
         <button type="button" onClick={() => setMenu("tokens")} disabled={uiBlocked}>🚀<span>Tokens</span></button>
         <button type="button" onClick={() => void checkChain(true)} disabled={uiBlocked || checking}>{checking ? "⏳" : "🔄"}<span>Check</span></button>
-        <button type="button" onClick={() => setZoom(z => Math.min(4, +(z + 0.4).toFixed(1)))} disabled={uiBlocked} aria-label="Zoom in">＋</button>
-        <button type="button" onClick={() => setZoom(z => Math.max(0.2, +(z > 0.6 ? z - 0.4 : z - 0.1).toFixed(1)))} disabled={uiBlocked} aria-label="Zoom out">－</button>
+        <button type="button" onClick={() => setZoom(z => clampZoom(z * 1.4))} disabled={uiBlocked} aria-label="Zoom in">＋</button>
+        <button type="button" onClick={() => setZoom(z => clampZoom(z / 1.4))} disabled={uiBlocked} aria-label="Zoom out">－</button>
+        <button type="button" onClick={() => api.current?.fitAll()} disabled={uiBlocked} aria-label="Fit all islands">⤢</button>
+        <button type="button" onClick={() => api.current?.recenter()} disabled={uiBlocked} aria-label="Center on lead">⌖</button>
         <button type="button" onClick={() => setMenu("settings")} disabled={uiBlocked}>⚙️<span>More</span></button>
       </div>
     </div>}

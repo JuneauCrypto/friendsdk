@@ -8,7 +8,13 @@ import { CELL, canEnter, ck, neighboursOf, plotOf, rankOf, tileAt, type Placed, 
 
 /** A Friend walking around off its land: following the lead, or left standing somewhere. */
 export type CrewMember = { id: bigint; sprites: GenerationSprites | null; mode: "follow" | "park" };
-export type ViewApi = { focusOn: (x: number, y: number) => void; position: () => { x: number; y: number }; teleport: (x: number, y: number) => void };
+export type ViewApi = {
+  focusOn: (x: number, y: number) => void; position: () => { x: number; y: number }; teleport: (x: number, y: number) => void;
+  fitAll: () => void;                            // zoom out to show every island
+  recenter: () => void;                          // camera back on the lead
+};
+export const ZOOM_MIN = 0.06, ZOOM_MAX = 5;
+export const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
 type Props = {
   world: World; version: number; sprites: GenerationSprites | null;
   walkerId: bigint;                              // the lead: the Friend you control
@@ -21,6 +27,7 @@ type Props = {
   onBlocked: (plot: Plot) => void; onEnterPlot: (plot: Plot | null) => void;
   onPick: (pl: Placed) => void;                  // arrange mode: tap one of your Friends
   onVisible: (pls: Placed[]) => void;            // Friends near the camera (for lazy art loading)
+  onZoom: (z: number) => void;                   // wheel, pinch and +/− keys
   apiRef: React.MutableRefObject<ViewApi | null>;
 };
 
@@ -87,8 +94,21 @@ export function DocksView(props: Props) {
     pc.target = null; trail.current = []; focus.current = null; prevLead.current = walkerId;
   }, [walkerId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const camTarget = useRef({ x: 0, y: 0 });
   apiRef.current = {
     focusOn: (x, y) => { focus.current = { x, y }; },
+    recenter: () => { focus.current = null; },
+    fitAll: () => {
+      const vp = viewport.current; if (!vp) return;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const b of state.current.world.box.values()) for (const [x, y] of [[b.x0, b.y0], [b.x1, b.y0], [b.x0, b.y1], [b.x1, b.y1]]) {
+        const sc = toScreen(x, y); x0 = Math.min(x0, sc.x); x1 = Math.max(x1, sc.x); y0 = Math.min(y0, sc.y); y1 = Math.max(y1, sc.y);
+      }
+      if (!Number.isFinite(x0)) return;
+      const z = clampZoom(Math.min(vp.clientWidth / (x1 - x0 + 60), vp.clientHeight * 0.7 / (y1 - y0 + 80)));
+      focus.current = fromScreen((x0 + x1) / 2, (y0 + y1) / 2);
+      state.current.onZoom(z);
+    },
     position: () => ({ x: player.current.x, y: player.current.y }),
     teleport: (x, y) => {
       player.current.x = x; player.current.y = y; player.current.target = null; focus.current = null; trail.current = [];
@@ -102,6 +122,8 @@ export function DocksView(props: Props) {
     const down = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLElement && e.target.closest("input,select,.rf-frame-menu")) return;
       const k = e.key.toLowerCase();
+      if (k === "+" || k === "=") { state.current.onZoom(clampZoom(state.current.zoom * 1.25)); return; }
+      if (k === "-" || k === "_") { state.current.onZoom(clampZoom(state.current.zoom / 1.25)); return; }
       if (screenDir[k] && !state.current.arranging) { e.preventDefault(); keys.current.add(k); player.current.target = null; focus.current = null; }
     };
     const up = (e: KeyboardEvent) => keys.current.delete(e.key.toLowerCase());
@@ -111,7 +133,47 @@ export function DocksView(props: Props) {
     return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); window.removeEventListener("blur", stop); document.removeEventListener("visibilitychange", stop); };
   }, []);
 
-  const onPointer = (e: React.PointerEvent) => {
+  // gestures: tap (walk / pick), drag (pan), pinch (zoom); mouse wheel zooms
+  const pointers = useRef(new Map<number, { x: number; y: number }>());
+  const gesture = useRef<{ x: number; y: number; moved: boolean; cam: { x: number; y: number }; pinch?: number; zoom?: number } | null>(null);
+  useEffect(() => {
+    const vp = viewport.current; if (!vp) return;
+    const wheel = (e: WheelEvent) => { e.preventDefault(); if (state.current.paused) return; state.current.onZoom(clampZoom(state.current.zoom * Math.exp(-e.deltaY * 0.0015))); };
+    vp.addEventListener("wheel", wheel, { passive: false });
+    return () => vp.removeEventListener("wheel", wheel);
+  }, []);
+  const onDown = (e: React.PointerEvent) => {
+    if (state.current.paused) return;
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const pts = [...pointers.current.values()];
+    if (pts.length === 1) gesture.current = { x: e.clientX, y: e.clientY, moved: false, cam: { ...camTarget.current } };
+    else if (pts.length === 2 && gesture.current) {
+      gesture.current.moved = true; gesture.current.pinch = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y); gesture.current.zoom = state.current.zoom;
+    }
+  };
+  const onMove = (e: React.PointerEvent) => {
+    const g = gesture.current; if (!g || !pointers.current.has(e.pointerId)) return;
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const pts = [...pointers.current.values()];
+    if (pts.length >= 2 && g.pinch) {
+      const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      state.current.onZoom(clampZoom((g.zoom ?? 1) * d / g.pinch)); return;
+    }
+    const dx = e.clientX - g.x, dy = e.clientY - g.y;
+    if (!g.moved && Math.hypot(dx, dy) > 8) g.moved = true;
+    if (g.moved) {                                   // drag pans the camera
+      const c = toScreen(g.cam.x, g.cam.y), z = state.current.zoom;
+      focus.current = fromScreen(c.x - dx / z, c.y - dy / z);
+    }
+  };
+  const onUp = (e: React.PointerEvent) => {
+    pointers.current.delete(e.pointerId);
+    const g = gesture.current;
+    if (pointers.current.size === 0) { gesture.current = null; if (g && !g.moved) onTap(e); }
+  };
+
+  const onTap = (e: React.PointerEvent) => {
     const st = state.current;
     if (st.paused || !viewport.current || !layer.current) return;
     const r = viewport.current.getBoundingClientRect(), m = new DOMMatrixReadOnly(getComputedStyle(layer.current).transform);
@@ -224,7 +286,8 @@ export function DocksView(props: Props) {
       const vp = viewport.current, ly = layer.current;
       if (vp && ly) {
         const sel = st.selected[0] ?? null, sp = sel ? plotOf(st.world, sel.m.id) : null, sw = sel && sp ? worldXY(st.world, sp, sel) : null;
-        const target = st.arranging && sel && sw ? { x: sw.x + T(sel.m.cw) / 2, y: sw.y + T(sel.m.ch) / 2 } : focus.current ?? p;
+        const target = focus.current ?? (st.arranging && sel && sw ? { x: sw.x + T(sel.m.cw) / 2, y: sw.y + T(sel.m.ch) / 2 } : p);
+        camTarget.current = { x: target.x, y: target.y };
         const sc = toScreen(target.x, target.y), z = st.zoom;
         const ox = vp.clientWidth / 2 - sc.x * z, oy = vp.clientHeight * (vp.clientHeight > vp.clientWidth ? 0.38 : 0.55) - sc.y * z;
         ly.style.transform = `translate(${ox.toFixed(1)}px, ${oy.toFixed(1)}px) scale(${z})`;
@@ -259,7 +322,9 @@ export function DocksView(props: Props) {
     }
     return out.sort((a, b) => (a.x + a.y + T(a.pl.m.cw + a.pl.m.ch) / 2) - (b.x + b.y + T(b.pl.m.cw + b.pl.m.ch) / 2));
   }, [world, version, vis]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { props.onVisible(visible.map(v => v.pl)); }, [visible]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Zoomed far out: draw the islands' outlines only and don't fetch art for thousands of lands.
+  const simple = visible.length > 600 || props.zoom < 0.2;
+  useEffect(() => { if (!simple) props.onVisible(visible.map(v => v.pl)); }, [visible, simple]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const boards = useMemo(() => visible.map(v => diamond(v.x, v.y, v.x + T(v.pl.m.cw), v.y + T(v.pl.m.ch))).join(""), [visible]);
   const holes = useMemo(() => {
@@ -306,13 +371,13 @@ export function DocksView(props: Props) {
   const selPlot = selected[0] ? plotOf(world, selected[0].m.id) : null;
   const myVisible = arranging ? visible.filter(v => v.plot === selPlot) : [];
 
-  return <div className="docks-viewport" ref={viewport} onPointerDown={onPointer} aria-hidden="true">
+  return <div className="docks-viewport" ref={viewport} onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp} aria-hidden="true">
     <div className="docks-layer" ref={layer}>
       <svg className="docks-seams" width="1" height="1" style={{ zIndex: 5 }}>
         <path d={walkways.gangway} className="gangway" /><path d={walkways.bridge} className="bridge" /><path d={boards} className="pier" />
         {holes.map(h => <path key={h.key} d={h.d} className="hole" />)}</svg>
       {holes.map(h => <span key={h.key} className="docks-hole-tag" style={{ left: h.x, top: h.y, zIndex: 9 }}>hole · #{String(h.id)}</span>)}
-      {visible.map(({ plot, pl, x, y }, i) => {
+      {!simple && visible.map(({ plot, pl, x, y }, i) => {
         const f = pl.m.friend, o = toScreen(x, y);
         if (!f) { const c = toScreen(x + T(pl.m.cw) / 2, y + T(pl.m.ch) / 2);
           return <span key={`${plot.id}-${pl.m.id}`} className="docks-pending" style={{ left: c.x, top: c.y, zIndex: 10 + i }}>#{String(pl.m.id)}</span>; }

@@ -238,6 +238,11 @@ try {
     for (let i = 0; i < 5; i++) await game.getByRole("button", { name: "Zoom out" }).click();
     await page.waitForTimeout(1500); await shot("world");
     for (let i = 0; i < 5; i++) await game.getByRole("button", { name: "Zoom in" }).click();
+    await game.getByRole("button", { name: "Fit all islands" }).click();
+    await page.waitForTimeout(1200); await shot("fit-all");
+    const vp = await game.locator(".docks-viewport, [class*=viewport]").first().boundingBox();
+    if (vp) { await page.mouse.move(vp.x + vp.width / 2, vp.y + vp.height / 2); await page.mouse.wheel(0, -600); await page.waitForTimeout(400); }
+    await game.getByRole("button", { name: "Center on lead" }).click();
     // deploy #7573 to a second island: joining a new island counts as a move (Gen 3: 20 RF)
     await btn("Islands").click();
     await game.getByRole("button", { name: "＋ New island" }).click();
