@@ -227,6 +227,29 @@ try {
   await game.getByRole("button", { name: "All go home" }).click();
   await game.getByText("Everyone went back to their own land.").waitFor();
   await btn("Done").click();
+  if (!many) {
+    // a mayor: a second Friend that stays home (Call all leaves it), never the captain
+    await btn("Islands").click();
+    assert.ok(!(await game.getByLabel("Mayor of Your island").locator("option", { hasText: "#7730" }).count()), "the captain can't be mayor");
+    await game.getByLabel("Mayor of Your island").selectOption("7573");
+    await game.getByText(/#7573 is Your island's mayor/).waitFor();
+    await game.getByRole("button", { name: "Close My islands" }).click();
+    await btn("Crew").click();
+    await game.getByText(/mayor #7573/).waitFor();
+    await game.getByRole("button", { name: "🔄 Change Friend" }).click();
+    await game.locator(".docks-friend", { hasText: "#7730" }).getByRole("button", { name: "Control" }).click();
+    await game.getByRole("button", { name: "⭐ Make #7730 primary leader" }).click();
+    await game.getByRole("button", { name: "📣 Call all" }).click();
+    await game.getByText(/No one to call: the mayor stays home to greet visitors\./).waitFor();
+    // names: public, set by the holder
+    await game.getByRole("button", { name: "🔄 Change Friend" }).click();
+    await game.getByRole("button", { name: "Name #7730" }).click();
+    await game.getByLabel("Name for #7730").fill("Skipper");
+    await game.getByRole("button", { name: "Save name" }).click();
+    await game.getByText(/#7730 is now named “Skipper”/).waitFor();
+    await game.getByText(/Controlling Skipper \(#7730\)/).waitFor();
+    await btn("Done").click();
+  }
   // tokens: claim the sample $MKT, then launch our own
   await btn("Tokens").click();
   await game.getByRole("button", { name: /^Claim for \d[\d,]* Friends?/ }).first().click();

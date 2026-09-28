@@ -7,7 +7,8 @@ import type { GenerationDeployment } from "./identity.js";
  * on-chain artwork. These never gate play (eligibility stays generation ≥ 1, checked fresh by
  * the runtime); they only help a player recognize and order their Friends.
  */
-export type FriendRank = Readonly<{ id: bigint; tier: number | null; rate: number }>;
+/** tier: 0–4 when activated, null when not activated, undefined when it couldn't be read. */
+export type FriendRank = Readonly<{ id: bigint; tier: number | null | undefined; rate: number }>;
 export type FriendRanksClient = Pick<PublicClient, "readContract">;
 
 /** Rare Friends reward weight by generation (1–6) and activation tier (0–4). */
@@ -20,8 +21,8 @@ export const FRIEND_REWARD_RATE: Readonly<Record<number, readonly number[]>> = O
   6: [1.1, 1.6875, 2.5875, 3.965625, 6.075],
 });
 
-export function friendRewardRate(generation: number, tier: number | null) {
-  if (tier === null) return 0;
+export function friendRewardRate(generation: number, tier: number | null | undefined) {
+  if (tier === null || tier === undefined) return 0;
   return FRIEND_REWARD_RATE[generation]?.[Math.max(0, Math.min(4, tier))] ?? 0;
 }
 
@@ -33,7 +34,8 @@ const ACT_ABI = parseAbi(["function positions(address collection, uint256 tokenI
 
 /**
  * Activation tier and reward rate for each Friend (null tier: not activated or unreadable).
- * Best effort: a failed read ranks that Friend as unactivated instead of failing discovery.
+ * Best effort: a failed read leaves that Friend's tier unknown (undefined) instead of failing
+ * discovery.
  */
 export async function readFriendRanks(
   client: FriendRanksClient, friends: readonly Readonly<{ id: bigint; generation: number }>[],
@@ -47,15 +49,15 @@ export async function readFriendRanks(
     if (!isAddress(manager) || /^0x0{40}$/i.test(manager)) manager = null;
   } catch { /* no activation data: everyone ranks by generation */ }
   const out: FriendRank[] = [];
-  for (let i = 0; i < friends.length; i += 16) {
+  for (let i = 0; i < friends.length; i += 32) {
     options.signal?.throwIfAborted();
-    out.push(...await Promise.all(friends.slice(i, i + 16).map(async ({ id, generation }) => {
-      let tier: number | null = null;
+    out.push(...await Promise.all(friends.slice(i, i + 32).map(async ({ id, generation }) => {
+      let tier: number | null | undefined;
       if (manager) {
         try {
           const [t, amount] = await client.readContract({ address: manager, abi: ACT_ABI, functionName: "positions", args: [generations, id], ...at }) as readonly [number, bigint];
-          if (amount > 0n && Number.isInteger(Number(t))) tier = Math.max(0, Math.min(4, Number(t)));
-        } catch { /* unreadable: unactivated */ }
+          tier = amount > 0n && Number.isInteger(Number(t)) ? Math.max(0, Math.min(4, Number(t))) : null;
+        } catch { /* unreadable: unknown */ }
       }
       return Object.freeze({ id, tier, rate: friendRewardRate(generation, tier) });
     })));

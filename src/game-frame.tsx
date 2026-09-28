@@ -22,6 +22,8 @@ export type GameFrameProps = {
   /** Only show the empty result after successful discovery; null suppresses it. */
   friendsEmptyMessage?: string | null;
   friendsHiddenCount?: number;
+  /** Friends hidden because the game only uses activated Friends. */
+  friendsInactiveHidden?: number;
   /** Optional picker heading and explanation (for example, what the chosen Friend becomes in the game). */
   selectionTitle?: string; selectionNote?: string;
   /** Use host when the surrounding interface already owns selection and connection. */
@@ -56,7 +58,7 @@ export function GameMenu({ title, onClose, children, footer }: { title: string; 
   </div></div>;
 }
 
-export function GameFrame({ children, friends, selectedFriendId, onSelectFriend, friendsLoading, friendsError, friendsEmptyMessage = "No playable Friends found.", friendsHiddenCount = 0, selectionTitle, selectionNote, onConnect, wallet, confirmation, connection, walletActions, selectionMode = "picker", mode, onMenuChange }: GameFrameProps) {
+export function GameFrame({ children, friends, selectedFriendId, onSelectFriend, friendsLoading, friendsError, friendsEmptyMessage = "No playable Friends found.", friendsHiddenCount = 0, friendsInactiveHidden = 0, selectionTitle, selectionNote, onConnect, wallet, confirmation, connection, walletActions, selectionMode = "picker", mode, onMenuChange }: GameFrameProps) {
   const [menu, setMenu] = useState<"friends" | "wallet" | null>(null);
   const friend = friends.find(value => value.id === selectedFriendId);
   const selecting = selectionMode === "picker" && (!friend || menu === "friends");
@@ -92,6 +94,7 @@ export function GameFrame({ children, friends, selectedFriendId, onSelectFriend,
           {value.rate !== undefined && <small className="rf-frame-friend-rate">{value.rate > 0 ? `Rate ${formatRate(value.rate)}${index === 0 && friends.length > 1 ? " · highest" : ""}` : "Rate 0"}</small>}
         </span></button>)}</div>
       {!friendsLoading && !friendsError && friendsHiddenCount > 0 && <p>{friendsHiddenCount} {friendsHiddenCount === 1 ? "Friend" : "Friends"} hidden: not hardwired (generation 0). Playing requires generation 1 or higher.</p>}
+      {!friendsLoading && !friendsError && friendsInactiveHidden > 0 && <p>{friendsInactiveHidden} {friendsInactiveHidden === 1 ? "Friend" : "Friends"} hidden: not activated. This game only uses activated Friends; activate on Rare Friends to play with {friendsInactiveHidden === 1 ? "it" : "them"}.</p>}
       {!friendsLoading && !friendsError && !friends.length && friendsEmptyMessage && <p>{friendsEmptyMessage}</p>}
       {onConnect && <button type="button" className="rf-frame-primary" onClick={onConnect}>Connect wallet</button>}
     </GameMenu> : menu === "wallet" ? <GameMenu title="Friend wallet" onClose={() => setMenu(null)}>

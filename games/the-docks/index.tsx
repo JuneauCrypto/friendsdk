@@ -62,6 +62,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const [crewLeader, setCrewLeader] = useState<Map<bigint, bigint>>(new Map());   // who each walking Friend follows
   const [primary, setPrimary] = useState<bigint>(friendId);                        // the primary leader: "Call all" gathers here
   const [quick, setQuick] = useState<{ id: bigint; x: number; y: number } | null>(null);  // quick options for a tapped Friend
+  const [naming, setNaming] = useState<bigint | null>(null);                        // Friend being named
+  const [nameDraft, setNameDraft] = useState("");
+  const names = useRef<Map<bigint, string>>(new Map());                            // Friend → public name (on chain, simulated)
+  const mayors = useRef<Map<string, bigint | null>>(new Map());                     // island → mayor (on chain, simulated)
   const defaults = useRef<Map<string, bigint>>(new Map());                          // island → captain (on chain, simulated)
   const [crewSel, setCrewSel] = useState<Set<bigint>>(new Set());
   const [crewBar, setCrewBar] = useState(false);
@@ -322,10 +326,11 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   /** The line behind a leader, front to back. */
   const lineOf = (leader: bigint) => [...crewModes].filter(([id, m]) => m === "follow" && (crewLeader.get(id) ?? primary) === leader).map(([id]) => id);
   function callAll() {
-    const ids = myPlots(world.current!).flatMap(p => p.friends.map(x => x.m.id)).filter(id => id !== lead && id !== primary);
+    const stay = new Set(myPlots(world.current!).map(p => mayorOf(p)).filter((m): m is bigint => m !== undefined && m !== lead && m !== primary));
+    const ids = myPlots(world.current!).flatMap(p => p.friends.map(x => x.m.id)).filter(id => id !== lead && id !== primary && !stay.has(id));
     if (primary !== lead) setModes([primary], "park");
     setModes(ids, "follow", primary);
-    say(ids.length ? `#${primary} called all ${ids.length.toLocaleString()} Friends over. They're on their way${ids.length > MAX_DRAWN ? ` (${MAX_DRAWN} shown walking, the rest counted)` : ""}.` : "No other Friends to call.");
+    say(ids.length ? `#${primary} called all ${ids.length.toLocaleString()} Friends over. They're on their way${ids.length > MAX_DRAWN ? ` (${MAX_DRAWN} shown walking, the rest counted)` : ""}.${stay.size ? ` ${stay.size === 1 ? "The mayor stays" : "Mayors stay"} home to greet visitors.` : ""}` : stay.size ? `No one to call: ${stay.size === 1 ? "the mayor stays" : "mayors stay"} home to greet visitors.` : "No other Friends to call.");
   }
   /** Take control of any of your Friends. One that was in a line breaks off from its leader. */
   function control(id: bigint) {
@@ -365,11 +370,47 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const oldKey = (islandId: string) => `docks-default-leader:${owner.current.toLowerCase()}:${islandId}`;
   function setCaptain(p: Plot, id: bigint, first = false) {
     defaults.current.set(p.id, id);
+    if (mayorOf(p) === id) { mayors.current.set(p.id, null); try { localStorage.removeItem(mayorKey(p.id)); } catch { /* ignore */ } }
     try { localStorage.setItem(storeKey(p.id), String(id)); } catch { /* storage unavailable: session only */ }
     setQuick(null); bump();
     if (first) { const m = `#${id}, the Friend you chose, is ${p.name}'s captain (saved on chain, simulated, gas only). You won't be asked again; change it any time in 🏝 Islands.`; setToast(t => t ? `${t} ${m}` : m); }
-    else say(`#${id} is ${p.name}'s captain (simulated on chain, gas only): you'll board as #${id} every time.`);
+    else say(`${who(id)} is ${p.name}'s captain (simulated on chain, gas only): you'll board as #${id} every time.`);
   }
+  /* ── each island's mayor: a second Friend that stays home and greets visitors ── */
+  const mayorKey = (islandId: string) => `docks-mayor:${owner.current.toLowerCase()}:${islandId}`;
+  const mayorOf = (p: Plot): bigint | undefined => {
+    if (!mayors.current.has(p.id)) {
+      let v: bigint | null = null;
+      try { const s0 = localStorage.getItem(mayorKey(p.id)); if (s0 && /^[0-9]+$/.test(s0)) v = BigInt(s0); } catch { /* ignore */ }
+      mayors.current.set(p.id, v);
+    }
+    const m = mayors.current.get(p.id);
+    return m !== null && m !== undefined && p.friends.some(x => x.m.id === m) ? m : undefined;
+  };
+  function setMayor(p: Plot, id: bigint | null) {
+    if (id !== null && defaults.current.get(p.id) === id) { say(`#${id} is ${p.name}'s captain; pick another Friend as mayor.`); return; }
+    mayors.current.set(p.id, id);
+    try { if (id === null) localStorage.removeItem(mayorKey(p.id)); else localStorage.setItem(mayorKey(p.id), String(id)); } catch { /* session only */ }
+    if (id !== null) setModes([id], "home");
+    setQuick(null); bump();
+    say(id === null ? `${p.name} has no mayor now.` : `${who(id)} is ${p.name}'s mayor (simulated on chain, gas only): it stays home and greets visitors.`);
+  }
+
+  /* ── Friend names: public, set by the holder, saved on chain (simulated) ── */
+  const nameOf = (id: bigint) => {
+    if (!names.current.has(id)) { let v = ""; try { v = localStorage.getItem(`docks-name:${id}`) ?? ""; } catch { /* ignore */ } names.current.set(id, v); }
+    return names.current.get(id) || "";
+  };
+  const who = (id: bigint) => { const n = nameOf(id); return n ? `${n} (#${id})` : `#${id}`; };
+  function saveName(id: bigint, raw: string) {
+    const n = raw.trim().replace(/\s+/g, " ");
+    if (new TextEncoder().encode(n).length > 24) { say("Names are up to 24 characters."); return; }
+    names.current.set(id, n);
+    try { if (n) localStorage.setItem(`docks-name:${id}`, n); else localStorage.removeItem(`docks-name:${id}`); } catch { /* session only */ }
+    setNaming(null); bump();
+    say(n ? `#${id} is now named “${n}” (saved on chain, simulated, gas only; everyone sees it).` : `#${id}'s name was cleared.`);
+  }
+
   useEffect(() => {
     if (!ready || roster.state !== "done") return;
     const h = home(); let d = defaults.current.get(h.id);
@@ -680,7 +721,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const allMine = mine.flatMap(p => p.friends);
   const saved = savedRef.current;
   const pending = pendingChanges(w, saved), dirty = pending.moved.length > 0 || pending.gone.length > 0;
-  const uiBlocked = Boolean(menu) || paused;
+  const uiBlocked = Boolean(menu) || naming !== null || paused;
   const leadSprites = lead === friendId ? sprites : crewSprites.get(lead) ?? null;
   const label = leadSprites ? `${leadSprites.familyName} #${lead}` : `Friend #${lead}`;
   const following = [...crewModes].filter(([, m]) => m === "follow").length, parked = crewModes.size - following;
@@ -746,8 +787,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         </div>
       </div>
     </div> : crewBar ? <div className="docks-crewbar" role="toolbar" aria-label="Your crew">
-      <div className="docks-arrange-info"><strong>Controlling #{String(lead)}{lead === primary ? " · primary leader" : ""}</strong>
-        <small>{lead === primary ? `${myLine.toLocaleString()} in line behind you` : `primary leader #${primary}${myLine ? ` · ${myLine} behind you` : " · walking solo"}`} · {parked.toLocaleString()} waiting around · {defaultOf(h) !== undefined ? `captain #${defaultOf(h)}` : "no captain yet"} · tap any Friend for options{crewSel.size ? ` · ${crewSel.size} picked` : ""}</small></div>
+      <div className="docks-arrange-info"><strong>Controlling {who(lead)}{lead === primary ? " · primary leader" : ""}</strong>
+        <small>{lead === primary ? `${myLine.toLocaleString()} in line behind you` : `primary leader #${primary}${myLine ? ` · ${myLine} behind you` : " · walking solo"}`} · {parked.toLocaleString()} waiting around · {defaultOf(h) !== undefined ? `captain ${who(defaultOf(h)!)}` : "no captain yet"}{mayorOf(h) !== undefined ? ` · mayor ${who(mayorOf(h)!)}` : ""} · tap any Friend for options{crewSel.size ? ` · ${crewSel.size} picked` : ""}</small></div>
       <button type="button" onClick={() => { setQuick(null); setMenu("control"); }}>🔄 Change Friend</button>
       <button type="button" className="rf-frame-primary" onClick={callAll}>📣 Call all to #{String(primary)}</button>
       {lead !== primary && <button type="button" onClick={promote}>⭐ Make #{String(lead)} primary leader</button>}
@@ -783,7 +824,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       const r = (document.querySelector(".docks") as HTMLElement | null)?.getBoundingClientRect();
       const left = Math.max(8, Math.min((quick.x - (r?.left ?? 0)), (r?.width ?? 400) - 230)), top = Math.max(8, Math.min(quick.y - (r?.top ?? 0) + 12, (r?.height ?? 400) - 250));
       return <div className="docks-quick" role="menu" aria-label={`#${id} options`} style={{ left, top }}>
-        <strong>#{String(id)}{fr ? ` · Gen ${fr.m.gen}` : ""}</strong>
+        <strong>{who(id)}{fr ? ` · Gen ${fr.m.gen}` : ""}{quickPlot && defaultOf(quickPlot) === id ? " · ⭐ captain" : ""}{quickPlot && mayorOf(quickPlot) === id ? " · 🏛 mayor" : ""}</strong>
         <small>{mode === "home" ? `on its land${quickPlot ? ` · ${quickPlot.name}` : ""}` : mode === "follow" ? `in #${quickLeader}'s line` : mode === "park" ? "waiting around" : "you control it"}</small>
         {id !== lead && <button type="button" role="menuitem" className="rf-frame-primary" onClick={() => control(id)}>🎮 Control #{String(id)}</button>}
         {mode === "follow" && lineOf(quickLeader!).indexOf(id) < lineOf(quickLeader!).length - 1 && <button type="button" role="menuitem" onClick={() => breakOffCrew(id)}>✂ Break off crew from #{String(id)}</button>}
@@ -792,16 +833,27 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         {(mode === "follow" || mode === "park") && <button type="button" role="menuitem" onClick={() => { setModes([id], "home"); setQuick(null); say(`#${id} went home.`); }}>🏠 Send home</button>}
         {(mode === "follow" || mode === "park") && <button type="button" role="menuitem" onClick={() => { setCrewBar(true); setCrewSel(s0 => { const n = new Set(s0); if (n.has(id)) n.delete(id); else n.add(id); return n; }); setQuick(null); }}>{crewSel.has(id) ? "☐ Unpick" : "☑ Pick"}</button>}
         {quickPlot?.mine && defaultOf(quickPlot) !== id && <button type="button" role="menuitem" onClick={() => setCaptain(quickPlot, id)}>⭐ Make captain of {quickPlot.name}</button>}
+        {quickPlot?.mine && defaultOf(quickPlot) !== id && mayorOf(quickPlot) !== id && <button type="button" role="menuitem" onClick={() => setMayor(quickPlot, id)}>🏛 Make mayor of {quickPlot.name}</button>}
+        {fr && <button type="button" role="menuitem" onClick={() => { setNameDraft(nameOf(id)); setNaming(id); setQuick(null); }}>✏️ {nameOf(id) ? "Rename" : "Name"} #{String(id)}</button>}
         <button type="button" role="menuitem" onClick={() => setQuick(null)}>Close</button>
       </div>; })()}
+    {naming !== null && !menu && <GameMenu onClose={() => setNaming(null)} title={`Name #${naming}`}>
+      <p>Give #{String(naming)} a name everyone sees. Saved on chain (simulated, gas only); only the Friend's holder can name it, and a new holder names it again.</p>
+      <div className="docks-row">
+        <input aria-label={`Name for #${naming}`} maxLength={24} placeholder="Up to 24 characters" value={nameDraft} onChange={e => setNameDraft(e.target.value)} onKeyDown={e => { e.stopPropagation(); if (e.key === "Enter") { e.preventDefault(); saveName(naming, nameDraft); } }} autoFocus />
+        <button type="button" className="rf-frame-primary" onClick={() => saveName(naming, nameDraft)}>Save name</button>
+        {nameOf(naming) && <button type="button" onClick={() => saveName(naming, "")}>Clear</button>}
+      </div>
+    </GameMenu>}
     {menu && <GameMenu onClose={() => setMenu(null)} title={menu === "control" ? "Change Friend" : menu === "plot" ? "My islands" : menu === "docks" ? "The Docks" : menu === "village" ? "Flags" : menu === "tokens" ? "Tokens" : menu === "help" ? "How it works" : "Settings"}>
       {menu === "control" ? <>
         <p>Control any of your Friends: tap one on the map, or pick it here. A Friend in a line breaks off when you take it over; make it the primary leader to call the others to it.</p>
         <div className="docks-list">{[lead, ...[...crewModes.keys()], ...allMine.map(x => x.m.id).filter(id => id !== lead && !crewModes.has(id))].slice(0, 150).map(id => { const pl = allMine.find(x => x.m.id === id), m = id === lead ? "you" : crewModes.get(id) ?? "home";
           return <div className="docks-friend" key={String(id)}>
             <div className="crop">{pl?.m.friend ? <img src={pl.m.friend.art} alt={`Friend #${id} on-chain artwork`} loading="lazy" /> : <span className="docks-note">#{String(id)}</span>}</div>
-            <span><strong>#{String(id)}{id === primary ? " · primary" : ""}{pl && defaultOf(plotOf(w, id)!) === id ? " · captain" : ""}</strong>
+            <span><strong>{who(id)}{id === primary ? " · primary" : ""}{pl && defaultOf(plotOf(w, id)!) === id ? " · captain" : ""}{pl && mayorOf(plotOf(w, id)!) === id ? " · mayor" : ""}</strong>
               <small>{m === "you" ? "you control it" : m === "follow" ? `in #${leaderOf(id)}'s line` : m === "park" ? "waiting around" : `on its land${pl ? ` · Gen ${pl.m.gen}` : ""}`}</small></span>
+            <button type="button" aria-label={`Name #${id}`} onClick={() => { setMenu(null); setNameDraft(nameOf(id)); setNaming(id); }}>✏️</button>
             {id !== lead && <button type="button" onClick={() => { setMenu(null); control(id); }}>Control</button>}</div>; })}</div>
       </> : menu === "plot" ? <>
         <p>Every activated Friend is a small floating island; joined together they make one big island. Every activated Friend in your wallet is here automatically, exactly as it renders on chain. Keep them together, or deploy them to other islands. Islands belong to your wallet and can't be sold: the only NFTs are your Friends.</p>
@@ -818,10 +870,14 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           {isl.friends.length > 1 && <button type="button" onClick={reArrange}>▦ Auto-arrange</button>}
           <button type="button" onClick={newIsland}>＋ New island</button>
         </div>
-        <div className="docks-item"><span><strong>⭐ Captain: {defaultOf(isl) !== undefined ? `#${defaultOf(isl)}` : "not set"}</strong>
+        <div className="docks-item"><span><strong>⭐ Captain: {defaultOf(isl) !== undefined ? who(defaultOf(isl)!) : "not set"}</strong>
           <small>The Friend you control whenever you board {isl.name}. Saved on chain (simulated, gas only).</small></span>
           <select aria-label={`Captain of ${isl.name}`} value={defaultOf(isl) !== undefined ? String(defaultOf(isl)) : ""} onChange={e => { if (e.target.value) setCaptain(isl, BigInt(e.target.value)); }}>
-            <option value="">Pick…</option>{isl.friends.slice(0, 300).map(x => <option key={String(x.m.id)} value={String(x.m.id)}>#{String(x.m.id)} · Gen {x.m.gen}</option>)}</select></div>
+            <option value="">Pick…</option>{isl.friends.slice(0, 300).map(x => <option key={String(x.m.id)} value={String(x.m.id)}>{who(x.m.id)} · Gen {x.m.gen}</option>)}</select></div>
+        <div className="docks-item"><span><strong>🏛 Mayor: {mayorOf(isl) !== undefined ? who(mayorOf(isl)!) : "not set"}</strong>
+          <small>A second Friend that stays home on {isl.name} and greets visitors while your captain is out (Call all leaves it home). Can't be the captain. Saved on chain (simulated, gas only).</small></span>
+          <select aria-label={`Mayor of ${isl.name}`} value={mayorOf(isl) !== undefined ? String(mayorOf(isl)) : ""} onChange={e => setMayor(isl, e.target.value ? BigInt(e.target.value) : null)}>
+            <option value="">None</option>{isl.friends.filter(x => x.m.id !== defaultOf(isl)).slice(0, 300).map(x => <option key={String(x.m.id)} value={String(x.m.id)}>{who(x.m.id)} · Gen {x.m.gen}</option>)}</select></div>
         {(isl.holes ?? []).length > 0 && <><h3>Holes on {isl.name}</h3>
           <p className="docks-note">A saved Friend left your wallet or was deactivated, so its spot is a hole. It heals for free if that Friend comes back; or fill it with another activated Friend of the same generation (normal arrange fee).</p>
           {(isl.holes ?? []).map(hl => { const same = mine.flatMap(q => q.friends).filter(x => x.m.gen === hl.gen);
@@ -1001,11 +1057,11 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <li><strong>Islands:</strong> every activated Friend is a small floating island; joined, they make one big island. Every activated Friend in your wallet joins automatically, from 1 to 10,000+. Keep them together or deploy them to more islands (＋ New island). Islands are saved to your wallet and can't be sold; the only NFTs are your Friends.</li>
         <li><strong>Holes:</strong> if a saved Friend leaves your wallet (sending it clears its activation) or is deactivated, its spot becomes a hole in the island. The hole stays until that Friend comes back (it heals for free) or you fill it with another activated Friend of the same generation (normal arrange fee).</li>
         <li><strong>Arranging is the game:</strong> Arrange → tap a Friend and move it, or <em>Pick several</em> / <em>All</em> to move a group together; each Friend must touch another along part of a side. Save on chain pays RF for every Friend whose spot changed ({Object.entries(ARRANGE_FEE).map(([g, f]) => `Gen ${g}: ${f}`).join(", ")}), plus gas, into a pool (your flag's, or the shared Docks pool). Unmoved Friends are free; Undo returns to your last save.</li>
-        <li><strong>No burning:</strong> every fee in The Docks goes into a permanent RF/ETH pool: your flag's, or the shared Docks pool. Trading through the pools earns fees that buy RF: half back into the pool, half to build with (flag members' allowances, or the Docks build fund). The platform fee is {PLATFORM_FEE_BPS / 100}% for now (never above 5%).</li>
+        <li><strong>No burning:</strong> every fee in The Docks goes into a permanent RF/ETH pool: your flag's, or the shared Docks pool. A flag pool's trading fees buy RF: half back into the pool, half shared as members' allowances. The shared Docks pool keeps everything from islands in no flag as liquidity; its trading fees are saved as earned, in ETH and RF, in the Docks rewards reserve for leaders and games later. The platform fee is {PLATFORM_FEE_BPS / 100}% for now (never above 5%).</li>
         <li><strong>Dock:</strong> Docks → pick a loading zone next to another island. Every island takes one berth whatever its size, so how far you can roam depends on how many islands there are. Docking and moving cost only gas. Neighbours are joined by a gangway.</li>
         <li><strong>Bridges:</strong> can't dock next to an island? Build a bridge to it: {BRIDGE_FEE_PER_BERTH} RF per berth of distance, into a pool. It lasts until either island moves.</li>
         <li><strong>Visit:</strong> for now only islands under a flag can be walked onto: every island of your flag, and, just to explore, a flag's islands your island is docked next to or bridged to.</li>
-        <li><strong>Control any Friend:</strong> tap (or click) one of your Friends on its land or walking in a line: <em>Control</em> it (taken out of a line, it breaks off), <em>Break off crew</em> (it and those behind it follow it), <em>Call</em> it, <em>Send home</em>, <em>Pick</em>, or make it the island's <em>captain</em> (the Friend you pick when you connect becomes captain; saved on chain once, you board as it every time). 👥 Crew → <em>Change Friend</em>, <em>Call all</em> to the primary leader, <em>Make primary leader</em>, <em>Walk solo</em>, <em>All go home</em>.</li>
+        <li><strong>Control any Friend:</strong> tap (or click) one of your Friends on its land or walking in a line: <em>Control</em> it (taken out of a line, it breaks off), <em>Break off crew</em> (it and those behind it follow it), <em>Call</em> it, <em>Send home</em>, <em>Pick</em>, make it the island's <em>captain</em> (the Friend you pick when you connect becomes captain; saved on chain once, you board as it every time) or <em>mayor</em> (a second Friend that stays home and greets visitors), or <em>Name</em> it (a public name, saved on chain). 👥 Crew → <em>Change Friend</em>, <em>Call all</em> to the primary leader, <em>Make primary leader</em>, <em>Walk solo</em>, <em>All go home</em>.</li>
         <li><strong>Flags:</strong> 🚩 Flags → plant a flag where your lead stands and lock RF. Anyone can lock more until it hits {fmt(VX.FLAG_TARGET)} RF; then it's founded: half permanent RF/ETH liquidity whose trading fees buy RF (half back into the pool, half shared), half the founders' allowances for building. Lockers hold soulbound founder marks. Everyone brings one island: founders free, others enroll ({fmt(VX.ENROLL_PRICE)} RF, open the first {VX.ENROLL_WINDOW_DAYS} days, then as voted). Every Friend is a vote, founders' multiplied by 1 + their share of the pool; vote on the pool share and enrollment. Spend your allowance on items for your flagged island (build timers, boost with RF); leaving takes a removal request and an epoch (~21 days), and the flag's items on your island are raffled to those who stayed. Not full in {VX.FLAG_DAYS} days? Refunds. Launch tokens to your flag.</li>
         <li><strong>Tokens:</strong> launch a token for 1,000 RF, airdrop it into Friend wallets and open a claim pool; claims cost RF, into the pool.</li>
         <li><strong>Always on-chain:</strong> every Friend is its real on-chain artwork, loaded as you get near it. Re-checked every minute (or tap Check): new Friends join, upgrades update, sold or deactivated Friends leave.</li>

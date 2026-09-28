@@ -28,6 +28,10 @@ is a saved layout that belongs to the wallet that built it, and it can't be sold
 - **Control any Friend.** Tap a Friend to control it, break it (and those behind it) off a
   line, promote it to primary leader and call everyone to it, or walk solo. Each island's
   **captain** (the Friend you pick in "Choose your captain" when you first connect) is set once on chain and is who you board as.
+  Each island can also have a **mayor**: a second Friend that stays home and greets visitors
+  (Call all leaves it home; it can't be the captain). Holders can **name** their Friends: a
+  public name up to 24 characters (on chain `setFriendName` / `nameOf`; a new holder names it
+  again). Only activated Friends play: the picker hides the rest.
   The SDK picker ("Choose your captain") lists your Friends in one column with artwork, generation, activation tier and Rare Friends reward rate, highest rate first; it remembers your choice for that wallet, so returning players go straight in.
 - **Tokens.** Every Friend is its own wallet (its canonical token-bound account): launch a token from your island for 1,000 RF
   with airdrops and an RF-priced claim pool.
@@ -117,7 +121,9 @@ pushes changes to connected players instead of polling.
 
 Nothing is burned by The Docks. A pool's trading fees buy RF (`harvest`): half goes back into
 the pool (a village can vote the share), half is shared by Friend count as allowances (the Docks
-pool's half goes to the Docks build fund for the shared space). Rare Friends' own shop still
+pool works differently: every fee from islands in no flag stays in it as liquidity, and its
+trading fees are kept as earned, in RF and WETH, in the Docks rewards reserve, set aside for
+leaders and games later; `collectDocksRewards`, anyone. Nothing spends the reserve yet). Rare Friends' own shop still
 burns half of what's spent there.
 
 Claim eligibility (launcher's choice, for airdrops and claims): my island · my island +
@@ -176,8 +182,9 @@ needs backing.
 - `DocksVillageTreasury.sol` — every RF in: half liquidity, half the payer's allowance
   (`allowanceOf` = half the founder lock + credits − spent). `payFromAllowance` (items only;
   the RF goes to liquidity), `forfeit` (on removal), `provideLiquidity` (anyone), `harvest`
-  (members; anyone for the Docks pool, village 0: fees → buy back RF, `poolBpsOf` back into
-  the pool, the rest shared by Friend count or to `docksFund`). Every fee arrives through
+  (members: fees → buy back RF, `poolBpsOf` back into the pool, the rest shared by Friend
+  count), `collectDocksRewards` (anyone: the Docks pool's fees, RF and WETH as earned, into
+  `docksRewardsRf` / `docksRewardsWeth` for leaders and games later). Every fee arrives through
   `onFee(islandId, amount)` (islands, launchpad, items only) and goes to the island's village
   pool or the Docks pool; `setPlatformFee` (≤ 5%, starts at 0) takes a share of fees for the
   `platform` address.
@@ -193,7 +200,7 @@ needs backing.
   no ETH is needed up front; buyers fill it with ETH over time. The position NFT stays in the
   contract, which has no remove-liquidity function; `collect` takes fees only. `buyRf` is the
   buyback swap. There is no RF/WETH v3 pool on chain yet, so one must be created first.
-- Tests: `forge test --match-contract DocksTest` (51 unit tests, including the on-chain captain, flags, soulbound marks, refunds, founding into liquidity and allowances, one island per wallet with nobody joining free, removal only at the next epoch with the allowance forfeited, a departed Friend burning a spot and staying bound (blocked from another village, then free after the epoch), cooldown on the island a moved Friend lands on, a Friend reclaiming its spot only while the population cap allows, power = Friends × founder share, enrollment votes, harvest half back into the pool and half shared by Friend count, the pool share vote, the platform fee (0 to start, capped at 5%), the Docks pool build fund, nothing ever burned, village items from allowances with build times and boosts, own items, raffles of items left behind (members who stayed, Dice draw, winner keeps it; nobody entered → runs again), the village launch scope, islands are not tokens, per-generation fees into the Docks pool, only moved Friends charged, deploying between islands, holes (reserved, healed on return, burned in when placed elsewhere, filled by same-size Friends), loading zones, size-independent berths, bridge pricing and expiry, launch scopes over gangways and bridges, 300 Friends arranged and claimed in one transaction each) and
+- Tests: `forge test --match-contract DocksTest` (53 unit tests, including the on-chain captain, mayor and Friend names, flags, soulbound marks, refunds, founding into liquidity and allowances, one island per wallet with nobody joining free, removal only at the next epoch with the allowance forfeited, a departed Friend burning a spot and staying bound (blocked from another village, then free after the epoch), cooldown on the island a moved Friend lands on, a Friend reclaiming its spot only while the population cap allows, power = Friends × founder share, enrollment votes, harvest half back into the pool and half shared by Friend count, the pool share vote, the platform fee (0 to start, capped at 5%), the Docks pool rewards reserve (RF and WETH kept as earned), nothing ever burned, village items from allowances with build times and boosts, own items, raffles of items left behind (members who stayed, Dice draw, winner keeps it; nobody entered → runs again), the village launch scope, islands are not tokens, per-generation fees into the Docks pool, only moved Friends charged, deploying between islands, holes (reserved, healed on return, burned in when placed elsewhere, filled by same-size Friends), loading zones, size-independent berths, bridge pricing and expiry, launch scopes over gangways and bridges, 300 Friends arranged and claimed in one transaction each) and
   `FRIENDSDK_FORK_RPC=https://rpc.mainnet.chain.robinhood.com forge test --match-contract DocksForkTest`
   (real Generations, activation manager and RF on a local fork: creates two islands, arranges
   #67111 (50 RF into the Docks pool) and #7153, docks them side by side, launches, claims; and a village on the

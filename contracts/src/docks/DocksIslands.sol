@@ -56,7 +56,11 @@ interface IDocksFeeSink {
 ///   distance. A bridge lasts until either island moves.
 /// - Access: each island is open or invite-only with approved visitors.
 /// - Captain: the Friend its owner controls whenever they board the island (the Friend they
-///   choose when they first connect; changeable any time).
+///   choose when they first connect; changeable any time). Mayor: a second Friend of the
+///   island that stays home and greets visitors while the captain is out.
+/// - Friend names: the holder of a Friend can give it a public name (up to 24 bytes). A name
+///   belongs to the holder who set it: after a transfer it reads empty until the new holder
+///   names it.
 /// - Gone Friends: anyone can burn the hole of a placed Friend that is no longer valid
 ///   (`burnHole`), so the island's (and its village's) population drops right away.
 contract DocksIslands {
@@ -110,6 +114,8 @@ contract DocksIslands {
     error WrongSize();
     error StillValid();
     error AlreadyInitialized();
+    error SameAsCaptain();
+    error NameTooLong();
 
     event IslandCreated(uint256 indexed islandId, address indexed owner, string name);
     event Arranged(uint256 indexed islandId, uint256 moved, uint256 rfPaid);
@@ -121,6 +127,8 @@ contract DocksIslands {
     event Undocked(uint256 indexed islandId);
     event BridgeBuilt(uint256 indexed from, uint256 indexed to, uint256 rfPaid);
     event CaptainSet(uint256 indexed islandId, uint256 indexed friendId);
+    event MayorSet(uint256 indexed islandId, uint256 indexed friendId);
+    event FriendNamed(uint256 indexed friendId, address indexed holder, string name);
     event IslandUpdated(uint256 indexed islandId, string name, bool inviteOnly);
     event VisitorSet(uint256 indexed islandId, address indexed visitor, bool approved);
     event VisitRequested(uint256 indexed islandId, address indexed visitor);
@@ -134,6 +142,9 @@ contract DocksIslands {
     mapping(uint256 islandId => string) public islandName;
     mapping(uint256 islandId => bool) public inviteOnly;
     mapping(uint256 islandId => uint256) public captainOf;
+    mapping(uint256 islandId => uint256) public mayorOf;
+    struct Name { address holder; string name; }
+    mapping(uint256 friendId => Name) private _names;
     mapping(uint256 islandId => mapping(address visitor => bool)) public approved;
 
     mapping(uint256 friendId => Spot) public spotOf;
@@ -189,6 +200,42 @@ contract DocksIslands {
         if (!isValid(friendId)) revert NotActive();
         captainOf[islandId] = friendId;
         emit CaptainSet(islandId, friendId);
+        if (mayorOf[islandId] == friendId) {
+            mayorOf[islandId] = 0;
+            emit MayorSet(islandId, 0);
+        }
+    }
+
+    /// @notice Set the island's mayor: another of its own activated Friends, held by you, that
+    /// stays home and greets visitors. 0 clears it.
+    function setMayor(uint256 islandId, uint256 friendId) external {
+        _onlyOwner(islandId);
+        if (friendId != 0) {
+            Spot storage s = spotOf[friendId];
+            if (!s.placed || s.islandId != islandId) revert NotPlaced();
+            if (!isValid(friendId)) revert NotActive();
+            if (captainOf[islandId] == friendId) revert SameAsCaptain();
+        }
+        mayorOf[islandId] = friendId;
+        emit MayorSet(islandId, friendId);
+    }
+
+    /// @notice Name a Friend you hold (public; up to 24 bytes; empty clears it).
+    function setFriendName(uint256 friendId, string calldata name) external {
+        if (generations.ownerOf(friendId) != msg.sender) revert NotHolder();
+        if (bytes(name).length > 24) revert NameTooLong();
+        _names[friendId] = Name(msg.sender, name);
+        emit FriendNamed(friendId, msg.sender, name);
+    }
+
+    /// @notice The Friend's name, set by its current holder ("" if none).
+    function nameOf(uint256 friendId) external view returns (string memory) {
+        Name storage n = _names[friendId];
+        try generations.ownerOf(friendId) returns (address holder) {
+            return holder == n.holder ? n.name : "";
+        } catch {
+            return "";
+        }
     }
 
     function setVisitor(uint256 islandId, address visitor, bool approved_) external {

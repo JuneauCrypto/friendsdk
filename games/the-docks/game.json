@@ -21,7 +21,8 @@
   ],
   "selection": {
     "title": "Choose your captain",
-    "note": "Listed by Rare Friends reward rate, highest first. Your pick becomes your captain: it leads your island every time you board, saved on chain (simulated), so you're only asked once.",
-    "remember": true
+    "note": "Only activated Friends can play. Listed by Rare Friends reward rate, highest first. Your pick becomes your captain: it leads your island every time you board, saved on chain (simulated), so you're only asked once.",
+    "remember": true,
+    "requireActivated": true
   }
 }

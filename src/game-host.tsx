@@ -27,13 +27,18 @@ export type GameHostProps = {
   /** Optional picker wording, and whether to remember the chosen Friend for this wallet. */
   selection?: FriendSelectionOptions;
 };
-export type FriendSelectionOptions = Readonly<{ title?: string; note?: string; remember?: boolean }>;
+/**
+ * requireActivated: the game only uses activated Friends, so the picker hides Friends whose
+ * activation reads as "not activated" (a game rule on top of the runtime's eligibility check;
+ * Friends whose activation can't be read stay listed).
+ */
+export type FriendSelectionOptions = Readonly<{ title?: string; note?: string; remember?: boolean; requireActivated?: boolean }>;
 /** Keeps only safe, short picker settings from an untyped source such as game.json. */
 export function parseFriendSelection(input: unknown): FriendSelectionOptions | undefined {
   if (!input || typeof input !== "object") return undefined;
   const v = input as Record<string, unknown>;
   const text = (x: unknown, max: number) => typeof x === "string" && x.trim() ? x.trim().slice(0, max) : undefined;
-  return Object.freeze({ title: text(v.title, 60), note: text(v.note, 300), remember: v.remember === true });
+  return Object.freeze({ title: text(v.title, 60), note: text(v.note, 300), remember: v.remember === true, requireActivated: v.requireActivated === true });
 }
 const ART_LIMIT = 48;
 const rememberKey = (chainId: number | null, account: string) => `friendsdk:chosen-friend:${chainId ?? 0}:${account.toLowerCase()}`;
@@ -82,16 +87,21 @@ function WalletViewport({ session, publicClient, selection, ...props }: Omit<Gam
   const valid = wallet.status === "connected" && discovery?.revision === wallet.revision &&
     discovery.client === publicClient && discovery.session === session && discovery.attempt === attempt ? discovery : null;
   const friends = valid?.friends ?? [];
-  const friend = friends.find(value => value.id === selected) ?? null;
+  const found = friends.find(value => value.id === selected) ?? null;
   // Display-only ranking (reward rate) and artwork, so Friends are recognizable in the picker.
   const [ranks, setRanks] = useState<{ source: readonly OwnedFriend[]; byId: ReadonlyMap<bigint, FriendRank> } | null>(null);
   const [art, setArt] = useState<{ source: readonly OwnedFriend[]; byId: ReadonlyMap<bigint, string> } | null>(null);
   const rankById = ranks?.source === friends ? ranks.byId : null;
   const artById = art?.source === friends ? art.byId : null;
-  const ranked = useMemo(() => friends.map(value => {
+  const ranked = useMemo((): GameFriend[] => friends.map((value): GameFriend => {
     const r = rankById?.get(value.id), image = artById?.get(value.id);
     return r || image ? Object.freeze({ ...value, ...(r ? { tier: r.tier, rate: r.rate } : {}), ...(image ? { image } : {}) }) : value;
   }).sort(compareFriendRank), [friends, rankById, artById]);
+  const needActive = Boolean(selection?.requireActivated);
+  const ranksLoading = needActive && friends.length > 0 && !rankById;
+  const playable = useMemo(() => needActive ? rankById ? ranked.filter(value => value.tier !== null) : [] : ranked, [needActive, rankById, ranked]);
+  const friend = found && playable.some(value => value.id === found.id) ? found : null;
+  const inactiveHidden = needActive && rankById ? ranked.length - playable.length : 0;
   useEffect(() => {
     if (!friends.length) return;
     const controller = new AbortController(), source = friends;
@@ -115,10 +125,10 @@ function WalletViewport({ session, publicClient, selection, ...props }: Omit<Gam
   // one tap away). Eligibility is still checked fresh before play.
   const key = wallet.account ? rememberKey(wallet.chainId, wallet.account) : null;
   useEffect(() => {
-    if (!selection?.remember || !key || selected !== null || !friends.length) return;
+    if (!selection?.remember || !key || selected !== null || !playable.length) return;
     const id = recall(key);
-    if (id !== null && friends.some(value => value.id === id)) setSelected(id);
-  }, [selection?.remember, key, friends, selected]);
+    if (id !== null && playable.some(value => value.id === id)) setSelected(id);
+  }, [selection?.remember, key, playable, selected]);
   const choose = useCallback((id: bigint) => {
     if (selection?.remember && key) remember(key, id);
     setSelected(id);
@@ -150,10 +160,10 @@ function WalletViewport({ session, publicClient, selection, ...props }: Omit<Gam
     {wallet.status === "wrong-network" && <><button type="button" className="rf-frame-primary" onClick={() => { void session.switchNetwork(); }}>Switch to Robinhood</button><button type="button" onClick={() => { void session.refresh(); }}>Check network</button></>}
   </div>;
   return <ConnectedViewport {...props} selectedFriend={friend} account={wallet.account} chainId={wallet.chainId}
-    publicClient={publicClient} revision={wallet.revision} walletClient={walletClient} assertActive={assertWalletActive} picker={{ friends: ranked, onSelectFriend: choose, connection, selectionTitle: selection?.title, selectionNote: selection?.note,
-      friendsLoading: wallet.status === "connected" && !valid, friendsError: valid?.error,
+    publicClient={publicClient} revision={wallet.revision} walletClient={walletClient} assertActive={assertWalletActive} picker={{ friends: playable, onSelectFriend: choose, friendsInactiveHidden: inactiveHidden, connection, selectionTitle: selection?.title, selectionNote: selection?.note,
+      friendsLoading: wallet.status === "connected" && (!valid || ranksLoading), friendsError: valid?.error,
       friendsHiddenCount: valid?.hiddenCount,
-      friendsEmptyMessage: valid && !valid.error ? valid.hiddenCount ? "No eligible Friends available in this wallet." : "No Rare Friends Generations NFTs found in this wallet on Robinhood." : null }} />;
+      friendsEmptyMessage: valid && !valid.error && !ranksLoading ? valid.hiddenCount || inactiveHidden ? "No eligible Friends available in this wallet." : "No Rare Friends Generations NFTs found in this wallet on Robinhood." : null }} />;
 }
 
 export type ConnectedGameHostProps = {
@@ -173,7 +183,7 @@ export type ConnectedGameHostProps = {
   walletClient?: ChanceWalletClient;
   assertActive?: () => void;
 };
-type Picker = Pick<GameFrameProps, "friends" | "onSelectFriend" | "connection" | "selectionTitle" | "selectionNote" | "friendsLoading" | "friendsError" | "friendsEmptyMessage" | "friendsHiddenCount" | "onConnect">;
+type Picker = Pick<GameFrameProps, "friends" | "onSelectFriend" | "connection" | "friendsInactiveHidden" | "selectionTitle" | "selectionNote" | "friendsLoading" | "friendsError" | "friendsEmptyMessage" | "friendsHiddenCount" | "onConnect">;
 
 /** SDK frame for a project that already supplies connection and selection. */
 export function ConnectedGameHost(props: ConnectedGameHostProps) { return <ConnectedViewport {...props} />; }

@@ -30,9 +30,13 @@ interface IDocksBuyback {
 ///   each locked). Enrollment fees: half liquidity, half the enrollee's allowance. Allowances are
 ///   spent only on items for the member's village island (DocksItems); that RF goes to the
 ///   village's liquidity too. A member's unspent allowance goes to liquidity when they leave.
-/// - `harvest` collects a pool's trading fees and buys RF with the WETH part. `poolBpsOf` of
-///   it (half by default, set by village vote) goes back into the pool; the rest is shared
-///   between members by Friend count (for the Docks pool: the Docks build fund).
+/// - `harvest` collects a village pool's trading fees and buys RF with the WETH part. `poolBpsOf`
+///   of it (half by default, set by village vote) goes back into the pool; the rest is shared
+///   between members by Friend count.
+/// - The shared Docks pool: every fee from islands in no village stays in it as permanent
+///   liquidity. Its trading fees are kept as earned, in RF and WETH, in the Docks rewards
+///   reserve (`docksRewardsRf`, `docksRewardsWeth`), set aside for leaders and games later.
+///   There is no way to spend the reserve yet; that needs a later, reviewed contract.
 /// - Platform fee: a share of every fee (not of flag locks), 0 to start, at most 5%, set by
 ///   the platform address. Nothing else can be withdrawn.
 contract DocksVillageTreasury is IDocksVillageTreasury, IDocksFeeSink, ReentrancyGuard {
@@ -56,6 +60,7 @@ contract DocksVillageTreasury is IDocksVillageTreasury, IDocksFeeSink, Reentranc
     event Deposited(uint256 indexed villageId, address indexed wallet, uint256 allowance, uint256 queuedForLiquidity);
     event LiquidityQueued(uint256 indexed villageId, uint256 rf);
     event LiquidityAdded(uint256 indexed villageId, uint256 rf);
+    event DocksRewardsCollected(uint256 rf, uint256 weth);
     event Harvested(uint256 indexed villageId, uint256 rfFees, uint256 wethFees, uint256 rfBought, uint256 toPool, uint256 shared);
     event FeeReceived(uint256 indexed villageId, uint256 amount, uint256 platformCut);
     event PlatformFeeSet(uint16 bps);
@@ -75,7 +80,8 @@ contract DocksVillageTreasury is IDocksVillageTreasury, IDocksFeeSink, Reentranc
     mapping(uint256 villageId => mapping(address wallet => uint256)) public credited; // beyond the founder half
     mapping(uint256 villageId => mapping(address wallet => uint256)) public spent;
     mapping(uint256 villageId => uint16) private _poolBps; // stored +1 so 0 can mean "unset"
-    uint256 public docksFund; // the Docks pool's share of its buybacks, for the shared space
+    uint256 public docksRewardsRf; // the Docks pool's trading fees, kept for leaders and games later
+    uint256 public docksRewardsWeth;
     address public platform;
     uint16 public platformFeeBps;
     address public launchpad;
@@ -189,15 +195,22 @@ contract DocksVillageTreasury is IDocksVillageTreasury, IDocksFeeSink, Reentranc
         pendingLiquidity[villageId] = amount - _provide(villageId, amount);
     }
 
-    /// @notice Collect a pool's trading fees and buy RF with the WETH part: the pool share goes
-    /// back into the pool, the rest is shared between members by Friend count (the Docks pool's
-    /// goes to the Docks build fund). Members only for a village (they set the minimum RF the
-    /// buyback must return); anyone for the Docks pool.
+    /// @notice Collect the shared Docks pool's trading fees into the Docks rewards reserve, as
+    /// earned (RF and WETH, no swap). Anyone.
+    function collectDocksRewards() external nonReentrant returns (uint256 rfFees, uint256 wethFees) {
+        (rfFees, wethFees) = liquidity.collect(DOCKS_POOL, address(this));
+        docksRewardsRf += rfFees;
+        docksRewardsWeth += wethFees;
+        emit DocksRewardsCollected(rfFees, wethFees);
+    }
+
+    /// @notice Collect a village pool's trading fees and buy RF with the WETH part: the pool
+    /// share goes back into the pool, the rest is shared between members by Friend count.
+    /// Members only (they set the minimum RF the buyback must return).
     function harvest(uint256 villageId, uint256 minRfOut) external nonReentrant returns (uint256 toPool, uint256 shared) {
-        if (villageId != DOCKS_POOL) {
-            if (!funded[villageId]) revert NotFounded();
-            if (!villages.inVillage(villageId, msg.sender)) revert NotMember();
-        }
+        if (villageId == DOCKS_POOL) revert NotFounded(); // the Docks pool: collectDocksRewards
+        if (!funded[villageId]) revert NotFounded();
+        if (!villages.inVillage(villageId, msg.sender)) revert NotMember();
         (uint256 rfFees, uint256 wethFees) = liquidity.collect(villageId, address(this));
         uint256 bought;
         if (wethFees > 0) {
@@ -207,12 +220,7 @@ contract DocksVillageTreasury is IDocksVillageTreasury, IDocksFeeSink, Reentranc
         uint256 total = rfFees + bought;
         toPool = total * poolBpsOf(villageId) / 10_000;
         pendingLiquidity[villageId] += toPool;
-        if (villageId == DOCKS_POOL) {
-            shared = total - toPool;
-            docksFund += shared;
-        } else {
-            shared = _share(villageId, total - toPool);
-        }
+        shared = _share(villageId, total - toPool);
         emit Harvested(villageId, rfFees, wethFees, bought, toPool, shared);
     }
 

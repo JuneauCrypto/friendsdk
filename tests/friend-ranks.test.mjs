@@ -23,7 +23,7 @@ const client = tiers => ({
 test('ranks Friends by reward rate, best effort, never failing discovery', async () => {
   const friends = [{ id: 5n, generation: 2 }, { id: 6n, generation: 1 }, { id: 7n, generation: 1 }, { id: 8n, generation: 1 }];
   const ranks = await readFriendRanks(client(new Map([[5n, 4], [6n, 0], [8n, 'fail']])), friends);
-  assert.deepEqual(ranks.map(r => [r.id, r.tier, r.rate]), [[5n, 4, 86062.5], [6n, 0, 175000], [7n, null, 0], [8n, null, 0]]);
+  assert.deepEqual(ranks.map(r => [r.id, r.tier, r.rate]), [[5n, 4, 86062.5], [6n, 0, 175000], [7n, null, 0], [8n, undefined, 0]]);
   const sorted = friends.map(f => ({ ...f, rate: ranks.find(r => r.id === f.id).rate })).sort(compareFriendRank);
   assert.deepEqual(sorted.map(f => f.id), [6n, 5n, 7n, 8n]);
   assert.equal(friendRewardRate(1, 4), 987187.5);

@@ -1080,6 +1080,43 @@ contract DocksTest is Test {
         assertEq(vil.enrollPrice(v), 0);
     }
 
+    function testMayorIsASecondFriendAndNotTheCaptain() public {
+        _place(alice, 1, 0, 0);
+        _place(alice, 2, 1, 0);
+        uint256 isl = plotOf[alice];
+        vm.startPrank(alice);
+        reg.setCaptain(isl, 1);
+        vm.expectRevert(DocksIslands.SameAsCaptain.selector);
+        reg.setMayor(isl, 1);
+        reg.setMayor(isl, 2);
+        assertEq(reg.mayorOf(isl), 2);
+        reg.setCaptain(isl, 2); // the mayor promoted to captain: the mayor seat empties
+        assertEq(reg.captainOf(isl), 2);
+        assertEq(reg.mayorOf(isl), 0);
+        vm.stopPrank();
+        vm.prank(bob);
+        vm.expectRevert(DocksIslands.NotIslandOwner.selector);
+        reg.setMayor(isl, 1);
+    }
+
+    function testHoldersNameTheirFriends() public {
+        _friend(1, alice);
+        vm.prank(bob);
+        vm.expectRevert(DocksIslands.NotHolder.selector);
+        reg.setFriendName(1, "Stolen");
+        vm.prank(alice);
+        vm.expectRevert(DocksIslands.NameTooLong.selector);
+        reg.setFriendName(1, "a name that is far too long");
+        vm.prank(alice);
+        reg.setFriendName(1, "Skipper");
+        assertEq(reg.nameOf(1), "Skipper");
+        gen.set(1, bob); // sold: the old name doesn't follow
+        assertEq(reg.nameOf(1), "");
+        vm.prank(bob);
+        reg.setFriendName(1, "Captain Bob");
+        assertEq(reg.nameOf(1), "Captain Bob");
+    }
+
     function testCaptainIsSetOnceOnChain() public {
         _place(alice, 1, 0, 0);
         _place(alice, 2, 1, 0);
@@ -1123,14 +1160,19 @@ contract DocksTest is Test {
         tre.onFee(1, 1 ether);
     }
 
-    function testDocksPoolHarvestFillsTheBuildFund() public {
+    function testDocksPoolFeesGoToTheRewardsReserve() public {
         _place(alice, 1, 0, 0);
-        liq.setFees(100 ether, 0);
-        vm.prank(carol);
-        (uint256 toPool, uint256 shared) = tre.harvest(0, 0); // anyone, for the shared pool
-        assertEq(toPool, 50 ether);
-        assertEq(tre.docksFund(), 50 ether);
-        assertEq(shared, 50 ether);
+        liq.setFees(100 ether, 2 ether);
+        vm.expectRevert(DocksVillageTreasury.NotFounded.selector);
+        tre.harvest(0, 0); // the Docks pool is not bought back or shared
+        uint256 pending = tre.pendingLiquidity(0);
+        vm.prank(carol); // anyone
+        (uint256 r, uint256 w) = tre.collectDocksRewards();
+        assertEq(r, 100 ether);
+        assertEq(w, 2 ether);
+        assertEq(tre.docksRewardsRf(), 100 ether);
+        assertEq(tre.docksRewardsWeth(), 2 ether, "kept as WETH, no swap");
+        assertEq(tre.pendingLiquidity(0), pending, "fees are not re-added to the pool");
     }
 
     function testHarvestSharesByFriendsAndThePoolShareIsVoted() public {
