@@ -119,3 +119,12 @@
 .docks-pennant{display:inline-block;width:5px;height:5px;margin-right:2px;border:.4px solid #000;clip-path:polygon(0 0,100% 50%,0 100%)}
 @keyframes docks-wave{50%{transform:skewY(-6deg) scaleX(.9)}}
 @media (prefers-reduced-motion:reduce){.docks-flag .cloth{animation:none}}
+/* a rising flag climbs its pole as RF is locked in */
+.docks-flag.rising .cloth{bottom:calc(var(--raised) * .22);opacity:.85}
+.docks-flag.rising b{background:#000;color:var(--flag);border-color:var(--flag)}
+.docks-village{display:grid;gap:4px;padding:8px;border:1px solid #333;margin:6px 0}
+.docks-village h4{margin:4px 0 0;font-size:12px}
+.docks-meter{height:8px;border:1px solid #555;background:#111}
+.docks-meter i{display:block;height:100%}
+.docks-village input{width:9em}
+.docks-village .docks-row.tight{flex-wrap:wrap}

@@ -367,7 +367,7 @@ export function DocksView(props: Props) {
     const b = world.box.get(p)!, c = toScreen(b.x0, b.y0);
     return { plot: p, x: c.x, y: c.y - 20, rank: rankOf(p).rank, village: villageOf(world, p) };
   }), [world, version]); // eslint-disable-line react-hooks/exhaustive-deps
-  const flags = useMemo(() => world.villages.flatMap(v => { const t = flagTile(world, v); if (!t) return [];
+  const flags = useMemo(() => world.villages.filter(v => !v.failed).flatMap(v => { const t = flagTile(world, v); if (!t) return [];
     const c = toScreen(t.x + 0.5, t.y + 0.5); return [{ v, x: c.x, y: c.y }]; }), [world, version]); // eslint-disable-line react-hooks/exhaustive-deps
   const selSet = new Set(selected);
   const selPlot = selected[0] ? plotOf(world, selected[0].m.id) : null;
@@ -392,8 +392,8 @@ export function DocksView(props: Props) {
           className={selSet.has(pl) ? "selected-outline" : "other-outline"} />)}
       </svg>
       {gates.map(g => <span key={g.key} className={`docks-gate ${g.open ? "open" : "shut"}`} style={{ left: g.x, top: g.y, zIndex: 600 }}>{g.open ? "⇄" : "🔒"}</span>)}
-      {flags.map(f => <span key={f.v.id} className="docks-flag" style={{ left: f.x, top: f.y, zIndex: 650, ["--flag" as string]: f.v.color }}>
-        <i className="pole" /><i className="cloth" /><b>{f.v.name} · {f.v.members.length}</b></span>)}
+      {flags.map(f => <span key={f.v.id} className={`docks-flag${f.v.founded ? "" : " rising"}`} style={{ left: f.x, top: f.y, zIndex: 650, ["--flag" as string]: f.v.color, ["--raised" as string]: `${f.v.founded ? 100 : Math.max(8, Math.floor(f.v.locked / f.v.target * 100))}%` }}>
+        <i className="pole" /><i className="cloth" /><b>{f.v.name} · {f.v.founded ? `${f.v.members.length} island${f.v.members.length === 1 ? "" : "s"}` : `${Math.floor(f.v.locked / f.v.target * 100)}% raised`}</b></span>)}
       {labels.map(l => <span key={l.plot.id} className={`docks-plot-label ${l.plot.mine ? "mine" : ""}`} style={{ left: l.x, top: l.y, zIndex: 700 }}>
         {l.village && <i className="docks-pennant" style={{ background: l.village.color }} title={l.village.name} />}{l.plot.name} · {l.rank}{l.plot.mine ? ` · ${l.plot.friends.length}` : l.plot.access === "open" ? " · open" : " · invite"}{l.plot.berth ? "" : " · floating"}</span>)}
       {myVisible.length <= 150 && myVisible.map(({ pl, x, y }) => { const c = toScreen(x + T(pl.m.cw) / 2, y + T(pl.m.ch) / 2);

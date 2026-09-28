@@ -62,9 +62,19 @@ export type World = {
   walk: Map<number, "gangway" | "bridge">;                         // walkway tiles over the water
   villages: Village[];
 };
-/** A flag planted on an island starts a village; other islands choose to join while connected
- *  to it (docked next to, or bridged to, a member). Mirrors contracts/src/docks/DocksVillages.sol. */
-export type Village = { id: string; name: string; founder: Plot; flag: { x: number; y: number }; members: Plot[]; color: string };
+/** A flag planted on an island rises as people lock RF into it; full, it's founded as a village
+ *  and other islands choose to join while connected to it. Mirrors contracts/src/docks/DocksVillages.sol. */
+export type Village = {
+  id: string; name: string; seat: Plot; flag: { x: number; y: number }; members: Plot[]; color: string;
+  target: number; deadline: number; locked: number; lockers: Map<string, number>;   // who (a wallet label) → RF locked
+  founded: boolean; failed: boolean;
+  treasury: number; liquidity: number; fees: { rf: number; eth: number }; burnBps: number; burned: number;
+  proposals: Proposal[];
+};
+export type Proposal = {
+  id: number; kind: "spend" | "burnShare"; amount: number; burnBps: number; memo: string;
+  yes: number; no: number; voters: Set<string>; ends: number; executed: boolean;
+};
 
 // Numeric keys (fast for large islands). Coordinates stay well inside ±2^20.
 const K = 1 << 21, HALF = 1 << 20;
@@ -300,28 +310,33 @@ export function addBridge(w: World, a: Plot, b: Plot) {
   w.bridges.push({ a, b, at: [{ ...a.berth }, { ...b.berth }] }); rebuild(w); return true;
 }
 
-/* ── villages ── */
+/* ── villages (membership; the flag's RF economy is in villages.ts) ── */
 
 const FLAG_COLORS = ["#ff4d6d", "#4dabf7", "#ffd43b", "#69db7c", "#b197fc", "#ff922b"];
-export const villageOf = (w: World, p: Plot) => w.villages.find(v => v.members.includes(p)) ?? null;
+/** The founded village an island is in (a rising flag isn't a village yet). */
+export const villageOf = (w: World, p: Plot) => w.villages.find(v => v.founded && v.members.includes(p)) ?? null;
+/** A flag still rising on this island (it's the seat). */
+export const risingFlagOf = (w: World, p: Plot) => w.villages.find(v => !v.founded && !v.failed && v.seat === p) ?? null;
 /** Why `p` can't plant a flag (null: it can). `at` is an island-local tile the flag stands on. */
 export function flagProblem(w: World, p: Plot, at: { x: number; y: number }): string | null {
   if (!p.berth) return `Dock ${p.name} first: flags go on docked islands.`;
-  const v = villageOf(w, p); if (v) return `${p.name} is already in ${v.name}.`;
+  const v = villageOf(w, p) ?? risingFlagOf(w, p); if (v) return `${p.name} already flies ${v.name}'s flag.`;
   const cx = Math.floor(at.x / CELL), cy = Math.floor(at.y / CELL);
   if (!w.occ.get(p)?.has(ck(cx, cy))) return "Stand on your island's land to plant the flag.";
   return null;
 }
-export function plantFlag(w: World, p: Plot, name: string, at: { x: number; y: number }): Village {
-  const why = flagProblem(w, p, at); if (why) throw new Error(why);
+export function newVillage(w: World, seat: Plot, name: string, at: { x: number; y: number }, target: number, deadline: number): Village {
   const clean = name.trim().slice(0, 32); if (!clean) throw new Error("Name your village.");
-  const v: Village = { id: `v${w.villages.length + 1}-${p.id}`, name: clean, founder: p, flag: { ...at }, members: [p], color: FLAG_COLORS[w.villages.length % FLAG_COLORS.length] };
+  const v: Village = { id: `v${w.villages.length + 1}-${seat.id}`, name: clean, seat, flag: { ...at }, members: [seat],
+    color: FLAG_COLORS[w.villages.length % FLAG_COLORS.length], target, deadline, locked: 0, lockers: new Map(), founded: false, failed: false,
+    treasury: 0, liquidity: 0, fees: { rf: 0, eth: 0 }, burnBps: 5000, burned: 0, proposals: [] };
   w.villages.push(v); w.version++; return v;
 }
-/** An island can join while it's docked and connected to any island already in the village. */
+/** An island can join a founded village while it's docked and connected to any island in it. */
 export function joinProblem(w: World, v: Village, p: Plot): string | null {
+  if (!v.founded) return `${v.name}'s flag is still rising: islands join once it's full and founded.`;
   if (!p.berth) return `Dock ${p.name} first.`;
-  const cur = villageOf(w, p); if (cur) return cur === v ? `${p.name} is in ${v.name}.` : `${p.name} is already in ${cur.name}.`;
+  const cur = villageOf(w, p) ?? risingFlagOf(w, p); if (cur) return cur === v ? `${p.name} is in ${v.name}.` : `${p.name} already flies ${cur.name}'s flag.`;
   if (!v.members.some(m => connected(w, p, m))) return `Dock next to, or bridge to, an island in ${v.name} to join.`;
   return null;
 }
@@ -329,14 +344,14 @@ export function joinVillage(w: World, v: Village, p: Plot) {
   const why = joinProblem(w, v, p); if (why) throw new Error(why);
   v.members.push(p); w.version++;
 }
-/** Leaving is free. When the founding island leaves, the flag comes down for everyone. */
+/** Leaving is free. The seat island, where the flag stands, stays: the RF under it is locked for good. */
 export function leaveVillage(w: World, p: Plot) {
   const v = villageOf(w, p); if (!v) return null;
-  if (v.founder === p) w.villages = w.villages.filter(x => x !== v); else v.members = v.members.filter(x => x !== p);
-  w.version++; return v;
+  if (v.seat === p) throw new Error(`${p.name} is ${v.name}'s seat: the flag stays.`);
+  v.members = v.members.filter(x => x !== p); w.version++; return v;
 }
 export function flagTile(w: World, v: Village) {
-  const o = w.origin.get(v.founder); return o ? { x: o.x + v.flag.x, y: o.y + v.flag.y } : null;
+  const o = w.origin.get(v.seat); return o ? { x: o.x + v.flag.x, y: o.y + v.flag.y } : null;
 }
 
 /* ── walking & access (world tiles) ── */

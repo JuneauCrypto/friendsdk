@@ -243,16 +243,34 @@ try {
     const vp = await game.locator(".docks-viewport, [class*=viewport]").first().boundingBox();
     if (vp) { await page.mouse.move(vp.x + vp.width / 2, vp.y + vp.height / 2); await page.mouse.wheel(0, -600); await page.waitForTimeout(400); }
     await game.getByRole("button", { name: "Center on lead" }).click();
-    // villages: put down a flag where the lead stands; a connected sample island chooses to join
-    assert.equal(await game.locator(".docks-flag").count(), 1, "the sample village's flag");
+    // villages: plant a flag, lock RF until it's full, found it, harvest, vote
+    assert.equal(await game.locator(".docks-flag").count(), 2, "Market Town and Crystal Hollow's rising flag");
     await game.locator(".docks-nav").getByRole("button", { name: /Village/ }).click();
-    await game.getByText(/Market Town · 2 islands/).waitFor();
-    await game.getByRole("button", { name: /preview RF/ }).click();
+    await game.getByText(/village · 2 islands/).first().waitFor();
+    for (let i = 0; i < 4; i++) await game.getByRole("button", { name: /250k preview RF/ }).click();
     await game.getByLabel("Village name").fill("Dock Town");
     await game.getByRole("button", { name: /Plant flag where #\d+ stands/ }).click();
-    await game.getByText(/🚩 Dock Town founded on Your island \(simulated\): 100,000 RF paid, 50,000 burned/).waitFor();
-    assert.equal(await game.locator(".docks-flag").count(), 2, "your flag is up");
-    await game.getByText(/\(sample\) (chose to join|passed on joining) Dock Town/).waitFor({ timeout: 10_000 });
+    await game.getByText(/🚩 Dock Town's flag is up on Your island \(simulated\): 100k of 1M RF locked/).waitFor();
+    assert.equal(await game.locator(".docks-flag.rising").count(), 2, "your flag rises next to Crystal Hollow's");
+    await game.locator(".docks-nav").getByRole("button", { name: /Village/ }).click();
+    await game.getByLabel("Lock RF into Dock Town").fill("900000");
+    await game.locator(".docks-village", { hasText: "Dock Town" }).getByRole("button", { name: "Lock RF", exact: true }).click();
+    await game.getByText(/You locked .* RF into Dock Town's flag \(simulated\) · 100% full/).waitFor();
+    await game.getByText(/your mark: .* RF \(\d+% of votes, soulbound\)/).first().waitFor();
+    await game.getByRole("button", { name: "🏛 Found Dock Town" }).click();
+    await game.getByText(/🏛 Dock Town is a village! 500k RF to its treasury, 500k RF into permanent RF\/ETH liquidity/).waitFor();
+    assert.equal(await game.locator(".docks-flag.rising").count(), 1, "only Crystal Hollow still rising");
+    await game.locator(".docks-nav").getByRole("button", { name: /Village/ }).click();
+    await page.waitForTimeout(4500);                               // trading fees accrue
+    await game.locator(".docks-village", { hasText: "Dock Town" }).getByRole("button", { name: "🌾 Harvest fees" }).click();
+    await game.getByText(/Harvested Dock Town \(simulated\): .* burned .* to the treasury/).waitFor();
+    await game.getByRole("button", { name: "Put it to a vote" }).click();
+    await game.getByRole("button", { name: "Yes", exact: true }).click();
+    await game.getByRole("button", { name: "⏩ End vote" }).click();
+    await game.getByRole("button", { name: "Carry out" }).click();
+    await game.getByText(/Dock Town spent 25k RF on the marketplace \(simulated\)/).waitFor();
+    await shot("village-menu");
+    await game.getByRole("button", { name: "Close Villages" }).click();
     await page.waitForTimeout(300); await shot("village");
     // deploy #7573 to a second island: joining a new island counts as a move (Gen 3: 20 RF)
     await btn("Islands").click();

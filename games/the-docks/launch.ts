@@ -4,7 +4,6 @@
 import { connected, villageOf, type Plot, type World } from "./world.js";
 
 export const LAUNCH_FEE = 1000;
-export const FLAG_FEE = 100_000;                                // plant a flag: half burned, half to the treasury
 export const START_RF = 5000;                                   // simulated RF for the preview
 export type Scope = "anyDocked" | "holderPlot" | "plotAndNeighbours" | "visitors" | "village";
 export const SCOPES: { id: Scope; label: string; hint: string }[] = [
@@ -64,12 +63,6 @@ export function launch(e: Economy, w: World, input: LaunchInput, canVisit: (p: P
   const rest = input.supply - dropTotal - input.claimPool;
   if (rest > 0) credit(e, input.creatorFriend, symbol, rest);
   return l;
-}
-
-/** Planting a flag (the village itself lives in world.ts). */
-export function payFlag(e: Economy) {
-  if (e.rf < FLAG_FEE) throw new Error(`Planting a flag costs ${FLAG_FEE.toLocaleString()} RF; you have ${e.rf.toLocaleString()}.`);
-  e.rf -= FLAG_FEE; e.burned += FLAG_FEE / 2; e.treasury += FLAG_FEE / 2;
 }
 
 /** Sample launches by other plots have their own RF; the player's claims spend the player's RF. */

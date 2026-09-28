@@ -7,6 +7,8 @@ import { ERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.so
 import { DocksIslands, IDocksGenerations } from "../src/docks/DocksIslands.sol";
 import { DocksLaunchpad } from "../src/docks/DocksLaunchpad.sol";
 import { DocksVillages } from "../src/docks/DocksVillages.sol";
+import { DocksFounderMarks } from "../src/docks/DocksFounderMarks.sol";
+import { DocksVillageTreasury, IDocksLiquidity, IDocksBuyback } from "../src/docks/DocksVillageTreasury.sol";
 
 contract MockRF is ERC20 {
     constructor() ERC20("RareFriends", "RF") { }
@@ -59,6 +61,47 @@ contract MockGenerations {
     }
 }
 
+
+/// Stands in for the Uniswap position: keeps the RF, pays out whatever fees the test sets.
+/// Also the buyback: 1 WETH buys 1,000 RF.
+contract MockLiquidity is IDocksLiquidity, IDocksBuyback {
+    MockRF public rf;
+    MockRF public weth;
+    mapping(uint256 => uint256) public provided;
+    uint256 public rfFees;
+    uint256 public wethFees;
+
+    constructor(MockRF rf_, MockRF weth_) {
+        rf = rf_;
+        weth = weth_;
+    }
+
+    function setFees(uint256 r, uint256 w) external {
+        rfFees = r;
+        wethFees = w;
+    }
+
+    function provide(uint256 villageId, uint256 amount) external returns (uint256) {
+        rf.transferFrom(msg.sender, address(this), amount);
+        provided[villageId] += amount;
+        return amount;
+    }
+
+    function collect(uint256, address to) external returns (uint256 r, uint256 w) {
+        (r, w) = (rfFees, wethFees);
+        rf.mint(to, r);
+        weth.mint(to, w);
+        (rfFees, wethFees) = (0, 0);
+    }
+
+    function buyRf(uint256 wethIn, uint256 minOut, address to) external returns (uint256 out) {
+        weth.transferFrom(msg.sender, address(this), wethIn);
+        out = wethIn * 1000;
+        require(out >= minOut, "slippage");
+        rf.mint(to, out);
+    }
+}
+
 contract DocksTest is Test {
     MockRF rf;
     MockActivation act;
@@ -66,6 +109,9 @@ contract DocksTest is Test {
     DocksIslands reg;
     DocksLaunchpad pad;
     DocksVillages vil;
+    DocksVillageTreasury tre;
+    MockLiquidity liq;
+    MockRF weth;
     address alice = address(0xA11CE);
     address bob = address(0xB0B);
     address carol = address(0xCA201);
@@ -85,7 +131,11 @@ contract DocksTest is Test {
         act = new MockActivation();
         gen = new MockGenerations(address(act));
         reg = new DocksIslands(IDocksGenerations(address(gen)), IERC20(address(rf)));
-        vil = new DocksVillages(IERC20(address(rf)), reg, treasury);
+        vil = new DocksVillages(IERC20(address(rf)), reg, 1_000_000 ether, 30 days, 1000 ether);
+        weth = new MockRF();
+        liq = new MockLiquidity(rf, weth);
+        tre = new DocksVillageTreasury(IERC20(address(rf)), IERC20(address(weth)), vil, liq, liq);
+        vil.init(tre);
         pad = new DocksLaunchpad(IERC20(address(rf)), reg, vil, treasury);
         _friend(1, alice);
         _friend(2, alice);
@@ -633,12 +683,28 @@ contract DocksTest is Test {
         assertEq(pad.claimMany(id, ids), n);
     }
 
-    /* ── villages: plant a flag, islands choose to join ── */
+    /* ── villages: a flag everyone locks RF into until it's full ── */
 
-    function _plant(address who) internal returns (uint256 v) {
-        rf.mint(who, 100_000 ether);
+    uint256 constant TARGET = 1_000_000 ether;
+
+    function _plant(address who, uint256 amount) internal returns (uint256 v) {
+        rf.mint(who, amount);
         vm.prank(who);
-        v = vil.plant(plotOf[who], "Dock Town", 0, 0);
+        v = vil.plant(plotOf[who], "Dock Town", 0, 0, amount);
+    }
+
+    function _lock(address who, uint256 v, uint256 amount) internal returns (uint256 taken) {
+        rf.mint(who, amount);
+        vm.prank(who);
+        taken = vil.lock(v, amount);
+    }
+
+    /// alice plants with 400k, bob locks 600k, founded.
+    function _village() internal returns (uint256 v) {
+        _world();
+        v = _plant(alice, 400_000 ether);
+        _lock(bob, v, 600_000 ether);
+        vil.found(v);
     }
 
     function _join(address who, uint256 v, address via) internal {
@@ -646,73 +712,221 @@ contract DocksTest is Test {
         vil.join(v, plotOf[who], plotOf[via]);
     }
 
-    function testPlantFlagCostsHundredThousandRFAndNeedsDockedLand() public {
-        _place(alice, 1, 0, 0);
-        rf.mint(alice, 100_000 ether);
-        vm.prank(alice);
-        vm.expectRevert(DocksVillages.NotDocked.selector);
-        vil.plant(plotOf[alice], "Dock Town", 0, 0);
-        _dock(alice, 0, 0);
-        vm.prank(alice);
-        vm.expectRevert(DocksVillages.NotOnLand.selector);
-        vil.plant(plotOf[alice], "Dock Town", 5, 5);
-        vm.prank(bob);
-        vm.expectRevert(DocksVillages.NotIslandOwner.selector);
-        vil.plant(plotOf[alice], "Dock Town", 0, 0);
-        uint256 burned = _burned();
-        uint256 t = rf.balanceOf(treasury);
-        vm.prank(alice);
-        uint256 v = vil.plant(plotOf[alice], "Dock Town", 0, 0);
-        assertEq(_burned() - burned, 50_000 ether);
-        assertEq(rf.balanceOf(treasury) - t, 50_000 ether);
+    function testFlagFillsFromManyLockersThenFoundsAVillage() public {
+        _world();
+        uint256 v = _plant(alice, 400_000 ether);
+        assertTrue(vil.rising(v));
+        assertEq(_lock(bob, v, 300_000 ether), 300_000 ether);
+        vm.expectRevert(DocksVillages.NotFull.selector);
+        vil.found(v);
+        uint256 carolBefore = rf.balanceOf(carol);
+        assertEq(_lock(carol, v, 500_000 ether), 300_000 ether, "the last lock is trimmed to what's missing");
+        assertEq(rf.balanceOf(carol) - carolBefore, 200_000 ether, "the rest never left carol");
+        assertFalse(vil.rising(v));
+        vm.expectRevert(DocksVillages.NotRising.selector);
+        vil.lock(v, 1000 ether);
+        assertEq(vil.villageOf(plotOf[alice]), 0, "not a village until founded");
+
+        vil.found(v); // anyone can found a full flag
         assertEq(vil.villageOf(plotOf[alice]), v);
-        assertEq(vil.villages(v).members, 1);
+        assertEq(tre.balanceOf(v), 500_000 ether, "half to the village treasury");
+        assertEq(liq.provided(v), 500_000 ether, "half to permanent liquidity");
+        assertEq(rf.balanceOf(address(vil)), 0, "nothing left to withdraw");
+        vm.expectRevert(DocksVillages.NotRising.selector);
+        vil.found(v);
         vm.prank(alice);
-        vm.expectRevert(DocksVillages.AlreadyInVillage.selector);
-        vil.plant(plotOf[alice], "Second", 0, 0);
+        vm.expectRevert(DocksVillages.NotRising.selector);
+        vil.refund(v);
     }
 
-    function testIslandsJoinWhenConnectedToTheVillage() public {
+    function testFounderMarksAreSoulboundAndWeighted() public {
+        uint256 v = _village();
+        DocksFounderMarks m = vil.marks();
+        uint256 aliceMark = m.markOf(v, alice);
+        assertEq(m.ownerOf(aliceMark), alice);
+        assertEq(m.balanceOf(alice), 1);
+        assertEq(vil.weightOf(v, alice), 400_000 ether);
+        assertEq(vil.weightOf(v, bob), 600_000 ether);
+        assertEq(vil.totalWeight(v), TARGET);
+        assertTrue(m.locked(aliceMark));
+        vm.prank(alice);
+        vm.expectRevert(DocksFounderMarks.Soulbound.selector);
+        m.transferFrom(alice, bob, aliceMark);
+        vm.prank(alice);
+        vm.expectRevert(DocksFounderMarks.Soulbound.selector);
+        m.approve(bob, aliceMark);
+        assertEq(m.villages(), address(vil));
+        vm.expectRevert(DocksFounderMarks.NotVillages.selector);
+        m.add(v, carol, 1 ether);
+        assertGt(bytes(m.tokenURI(aliceMark)).length, 50);
+    }
+
+    function testPlantChecks() public {
+        _place(alice, 1, 0, 0);
+        rf.mint(alice, 10_000 ether);
+        vm.startPrank(alice);
+        rf.approve(address(vil), type(uint256).max);
+        vm.expectRevert(DocksVillages.NotDocked.selector);
+        vil.plant(plotOf[alice], "Dock Town", 0, 0, 1000 ether);
+        vm.stopPrank();
+        _dock(alice, 0, 0);
+        vm.startPrank(alice);
+        vm.expectRevert(DocksVillages.NotOnLand.selector);
+        vil.plant(plotOf[alice], "Dock Town", 5, 5, 1000 ether);
+        vm.expectRevert(DocksVillages.TooSmall.selector);
+        vil.plant(plotOf[alice], "Dock Town", 0, 0, 999 ether);
+        vm.expectRevert(DocksVillages.BadName.selector);
+        vil.plant(plotOf[alice], "", 0, 0, 1000 ether);
+        vm.stopPrank();
+        vm.prank(bob);
+        vm.expectRevert(DocksVillages.NotIslandOwner.selector);
+        vil.plant(plotOf[alice], "Dock Town", 0, 0, 1000 ether);
+        vm.startPrank(alice);
+        vil.plant(plotOf[alice], "Dock Town", 0, 0, 1000 ether);
+        vm.expectRevert(DocksVillages.AlreadyInVillage.selector);
+        vil.plant(plotOf[alice], "Second flag", 0, 0, 1000 ether);
+        vm.stopPrank();
+    }
+
+    function testFlagThatDoesNotFillInTimeRefundsEveryone() public {
         _world();
-        uint256 v = _plant(alice);
+        uint256 v = _plant(alice, 100_000 ether);
+        _lock(bob, v, 50_000 ether);
+        vm.prank(bob);
+        vm.expectRevert(DocksVillages.StillOpen.selector);
+        vil.refund(v);
+        vm.warp(block.timestamp + 30 days);
+        rf.mint(carol, 10_000 ether);
+        vm.prank(carol);
+        vm.expectRevert(DocksVillages.NotRising.selector);
+        vil.lock(v, 10_000 ether);
+        uint256 bobBefore = rf.balanceOf(bob);
+        vm.prank(bob);
+        assertEq(vil.refund(v), 50_000 ether);
+        assertEq(rf.balanceOf(bob) - bobBefore, 50_000 ether);
+        assertEq(vil.marks().balanceOf(bob), 0, "mark burned");
+        vm.prank(bob);
+        vm.expectRevert(DocksFounderMarks.NoMark.selector);
+        vil.refund(v);
+        vm.prank(alice);
+        vil.refund(v);
+        assertEq(rf.balanceOf(address(vil)), 0);
+        _plant(alice, 1000 ether); // the island is free for a new flag
+    }
+
+    function testAFullFlagThatCantBeFoundedRefundsAfterGrace() public {
+        _world();
+        uint256 v = _plant(alice, 400_000 ether);
+        _lock(bob, v, 600_000 ether);
+        vm.warp(block.timestamp + 30 days);
+        vm.prank(bob);
+        vm.expectRevert(DocksVillages.StillOpen.selector);
+        vil.refund(v);
+        vm.warp(block.timestamp + 7 days);
+        vm.prank(bob);
+        vil.refund(v);
+        vm.expectRevert(DocksVillages.NotFull.selector);
+        vil.found(v);
+    }
+
+    function testIslandsJoinWhenConnectedAndTheSeatStays() public {
+        _world();
+        uint256 v = _plant(alice, 400_000 ether);
+        vm.prank(bob);
+        vm.expectRevert(DocksVillages.NotFounded.selector);
+        vil.join(v, plotOf[bob], plotOf[alice]);
+        _lock(bob, v, 600_000 ether);
+        vil.found(v);
         uint256 bobRf = rf.balanceOf(bob);
         _join(bob, v, alice); // docked next to alice: gas only
         assertEq(rf.balanceOf(bob), bobRf);
         vm.prank(carol);
         vm.expectRevert(DocksVillages.NotConnected.selector);
         vil.join(v, plotOf[carol], plotOf[alice]); // two berths away
-        vm.prank(carol);
-        vm.expectRevert(DocksVillages.NotInVillage.selector);
-        vil.join(v, plotOf[carol], plotOf[carol]);
         _join(carol, v, bob); // the village grows island by island
         assertEq(vil.villages(v).members, 3);
         assertTrue(vil.sameVillage(plotOf[alice], plotOf[carol]));
-        vm.prank(bob);
-        vm.expectRevert(DocksVillages.AlreadyInVillage.selector);
-        vil.join(v, plotOf[bob], plotOf[alice]);
-    }
-
-    function testFounderLeavingTakesTheFlagDown() public {
-        _world();
-        uint256 v = _plant(alice);
-        _join(bob, v, alice);
-        vm.prank(bob);
-        vil.leave(plotOf[bob]);
-        assertEq(vil.villageOf(plotOf[bob]), 0);
-        _join(bob, v, alice);
         vm.prank(alice);
-        vil.leave(plotOf[alice]);
+        vm.expectRevert(DocksVillages.SeatStays.selector);
+        vil.leaveVillage(plotOf[alice]);
+        vm.prank(bob);
+        vil.leaveVillage(plotOf[bob]);
         assertEq(vil.villageOf(plotOf[bob]), 0);
-        assertFalse(vil.villages(v).standing);
-        vm.prank(carol);
-        vm.expectRevert(DocksVillages.FlagDown.selector);
-        vil.join(v, plotOf[carol], plotOf[bob]);
-        _plant(bob); // bob is free to start his own
     }
 
-    function testVillageScope() public {
-        _world();
-        uint256 v = _plant(alice);
+    function testHarvestBuysBackRFBurnsHalfAndFillsTheTreasury() public {
+        uint256 v = _village();
+        liq.setFees(1000 ether, 2 ether); // 2 WETH buys 2,000 RF → 3,000 RF of fees
+        vm.prank(carol);
+        vm.expectRevert(DocksVillageTreasury.NotFounder.selector);
+        tre.harvest(v, 0);
+        uint256 burned = _burned();
+        vm.prank(bob);
+        vm.expectRevert(bytes("slippage"));
+        tre.harvest(v, 2001 ether);
+        vm.prank(bob);
+        (uint256 b, uint256 k) = tre.harvest(v, 2000 ether);
+        assertEq(b, 1500 ether);
+        assertEq(k, 1500 ether);
+        assertEq(_burned() - burned, 1500 ether);
+        assertEq(tre.balanceOf(v), 500_000 ether + 1500 ether);
+    }
+
+    function testFoundersVoteToSpendTheTreasuryAndSetTheBurnShare() public {
+        uint256 v = _village();
+        address market = address(0x3A12);
+        vm.prank(carol);
+        vm.expectRevert(DocksVillageTreasury.NotFounder.selector);
+        tre.propose(v, DocksVillageTreasury.Kind.Spend, market, 10_000 ether, 0, "Upgrade");
+        vm.prank(alice);
+        uint256 spend = tre.propose(v, DocksVillageTreasury.Kind.Spend, market, 10_000 ether, 0, "Buy the dock lanterns");
+        vm.prank(alice);
+        tre.vote(spend, true); // 400k for
+        vm.prank(alice);
+        vm.expectRevert(DocksVillageTreasury.AlreadyVoted.selector);
+        tre.vote(spend, true);
+        vm.prank(carol);
+        vm.expectRevert(DocksVillageTreasury.NotFounder.selector);
+        tre.vote(spend, true);
+        vm.expectRevert(DocksVillageTreasury.VotingOpen.selector);
+        tre.execute(spend);
+        vm.warp(block.timestamp + 3 days);
+        vm.prank(bob);
+        vm.expectRevert(DocksVillageTreasury.VotingClosed.selector);
+        tre.vote(spend, false);
+        tre.execute(spend);
+        assertEq(rf.balanceOf(market), 10_000 ether);
+        assertEq(tre.balanceOf(v), 490_000 ether);
+        vm.expectRevert(DocksVillageTreasury.Executed.selector);
+        tre.execute(spend);
+
+        // bob (600k) outvotes alice: rejected
+        vm.prank(alice);
+        uint256 more = tre.propose(v, DocksVillageTreasury.Kind.Spend, market, 1 ether, 0, "");
+        vm.prank(alice);
+        tre.vote(more, true);
+        vm.prank(bob);
+        tre.vote(more, false);
+        vm.warp(block.timestamp + 3 days);
+        vm.expectRevert(DocksVillageTreasury.Rejected.selector);
+        tre.execute(more);
+
+        // burn a quarter instead of half
+        vm.prank(bob);
+        uint256 share = tre.propose(v, DocksVillageTreasury.Kind.SetBurnShare, address(0), 0, 2500, "Keep more");
+        vm.prank(bob);
+        tre.vote(share, true);
+        vm.warp(block.timestamp + 3 days);
+        tre.execute(share);
+        assertEq(tre.burnBpsOf(v), 2500);
+        liq.setFees(4000 ether, 0);
+        vm.prank(alice);
+        (uint256 b,) = tre.harvest(v, 0);
+        assertEq(b, 1000 ether);
+    }
+
+    function testVillageLaunchScope() public {
+        uint256 v = _village();
         _join(bob, v, alice);
         vm.prank(alice);
         uint256 id = pad.launch(_params(Scope_.Village));
