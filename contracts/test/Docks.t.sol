@@ -472,23 +472,22 @@ contract DocksTest is Test {
         assertTrue(reg.connected(plotOf[alice], plotOf[bob]));
     }
 
-    /* ── bridges: RF per berth of distance ── */
+    /* ── bridges: free, like docking ── */
 
-    function testBridgeBurnsPerBerthAndBreaksWhenAnIslandMoves() public {
+    function testBridgeIsFreeAndBreaksWhenAnIslandMoves() public {
         _place(alice, 1, 0, 0);
         _place(bob, 10, 0, 0);
         _place(carol, 20, 0, 0);
         _dock(alice, 0, 0);
         _dock(bob, 1, 0);
         _dock(carol, 2, 0);
-        assertEq(reg.bridgeCost(plotOf[alice], plotOf[carol]), 20 ether);
         vm.prank(alice);
         vm.expectRevert(DocksIslands.AlreadyConnected.selector);
         reg.buildBridge(plotOf[alice], plotOf[bob]);
         uint256 before = _burned();
         vm.prank(alice);
         reg.buildBridge(plotOf[alice], plotOf[carol]);
-        assertEq(_burned() - before, 20 ether);
+        assertEq(_burned() - before, 0, "island to island costs no RF");
         assertTrue(reg.connected(plotOf[alice], plotOf[carol]));
         _dock(carol, 1, 1); // carol moves (under bob): the bridge is gone
         assertFalse(reg.hasBridge(plotOf[alice], plotOf[carol]));

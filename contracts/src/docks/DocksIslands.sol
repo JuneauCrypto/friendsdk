@@ -52,8 +52,8 @@ interface IDocksFeeSink {
 /// - Docking: islands float on one shared berth grid, one island per berth whatever its size,
 ///   so the world grows with the number of islands. Dock at a free berth next to another
 ///   island (a loading zone); islands on neighbouring berths are connected. Gas only.
-/// - Bridges: link your island to one you can't dock next to, for RF paid per berth of
-///   distance. A bridge lasts until either island moves.
+/// - Bridges: link your island to one you can't dock next to. Free (gas only), like docking.
+///   A bridge lasts until either island moves.
 /// - Access: each island is open or invite-only with approved visitors.
 /// - Captain: the Friend its owner controls whenever they board the island (the Friend they
 ///   choose when they first connect; changeable any time). Mayor: a second Friend of the
@@ -96,8 +96,6 @@ contract DocksIslands {
     uint256 public constant FEE_GEN4 = 10 ether;
     uint256 public constant FEE_GEN5 = 5 ether;
     uint256 public constant FEE_GEN6 = 1 ether;
-    /// @notice RF paid per berth of distance a bridge spans.
-    uint256 public constant BRIDGE_FEE_PER_BERTH = 10 ether;
 
     error NotIslandOwner();
     error NotHolder();
@@ -125,7 +123,7 @@ contract DocksIslands {
     event HoleFilled(uint256 indexed islandId, uint256 indexed oldFriendId, uint256 indexed newFriendId);
     event Docked(uint256 indexed islandId, int32 x, int32 y);
     event Undocked(uint256 indexed islandId);
-    event BridgeBuilt(uint256 indexed from, uint256 indexed to, uint256 rfPaid);
+    event BridgeBuilt(uint256 indexed from, uint256 indexed to);
     event CaptainSet(uint256 indexed islandId, uint256 indexed friendId);
     event MayorSet(uint256 indexed islandId, uint256 indexed friendId);
     event FriendNamed(uint256 indexed friendId, address indexed holder, string name);
@@ -389,22 +387,14 @@ contract DocksIslands {
         return v == 0 ? 0 : v - 1;
     }
 
-    /* ── bridges (RF per berth of distance) ── */
+    /* ── bridges (free: island to island costs nothing but gas) ── */
 
-    function bridgeCost(uint256 from, uint256 to) public view returns (uint256) {
-        Berth storage a = berthOf[from];
-        Berth storage b = berthOf[to];
-        if (!a.docked || !b.docked) revert NotDocked();
-        return _distance(a, b) * BRIDGE_FEE_PER_BERTH;
-    }
-
-    function buildBridge(uint256 from, uint256 to) external returns (uint256 paid) {
+    function buildBridge(uint256 from, uint256 to) external {
         _onlyOwner(from);
         if (connected(from, to) || from == to) revert AlreadyConnected();
-        paid = bridgeCost(from, to);
+        if (!berthOf[from].docked || !berthOf[to].docked) revert NotDocked();
         _bridge[_pair(from, to)] = _epochs(from, to);
-        _charge(from, paid);
-        emit BridgeBuilt(from, to, paid);
+        emit BridgeBuilt(from, to);
     }
 
     function hasBridge(uint256 a, uint256 b) public view returns (bool) {

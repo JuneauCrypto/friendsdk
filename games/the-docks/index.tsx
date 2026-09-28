@@ -7,7 +7,7 @@ import { createFriendReader, type GenerationSprites } from "@rarefriends/friends
 import { readFriend, readOwner, type Friend } from "./land.js";
 import { readOwnedLands } from "./roster.js";
 import {
-  ARRANGE_FEE, BRIDGE_FEE_PER_BERTH, RANKS, addBridge, addToPlot, autoArrange, bridgeCost, canEnter, createWorld, deploy, disconnected,
+  ARRANGE_FEE, RANKS, addBridge, addToPlot, autoArrange, canEnter, connected, createWorld, deploy, disconnected, zonesNextTo,
   dockAt, loadingZones, member, memberOf, moveGroup, myPlots, neighboursOf, pendingChanges, plotOf, rankOf, rebuild,
   refreshMember, removeFromPlot, swapInto, undock, weightOf, burnHole, fillHole, holesOf, feeOf,
   CELL, exploring, canEnterFrom, flagProblem, joinProblem, newVillage, risingFlagOf, tileAt, villageOf, flagTile, walletOf, type Village,
@@ -62,6 +62,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const [crewLeader, setCrewLeader] = useState<Map<bigint, bigint>>(new Map());   // who each walking Friend follows
   const [primary, setPrimary] = useState<bigint>(friendId);                        // the primary leader: "Call all" gathers here
   const [quick, setQuick] = useState<{ id: bigint; x: number; y: number } | null>(null);  // quick options for a tapped Friend
+  const [islandPop, setIslandPop] = useState<{ id: string; x: number; y: number } | null>(null); // tapped someone else's island
+  const [chatWith, setChatWith] = useState<string | null>(null);                     // island id, or "*" to pick
+  const [chatDraft, setChatDraft] = useState("");
+  const chats = useRef<Map<string, { from: string; text: string }[]>>(new Map());      // simulated chat per island
   const [naming, setNaming] = useState<bigint | null>(null);                        // Friend being named
   const [nameDraft, setNameDraft] = useState("");
   const names = useRef<Map<bigint, string>>(new Map());                            // Friend → public name (on chain, simulated)
@@ -360,7 +364,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     say(`#${lead} walks solo. ${mine.length.toLocaleString()} Friend${mine.length === 1 ? "" : "s"} wait${mine.length === 1 ? "s" : ""} here.`);
   }
   function onWalkerTap(id: bigint, at: { x: number; y: number }) { setQuick({ id, x: at.x, y: at.y }); }
-  function onFriendTap(id: bigint, at: { x: number; y: number }) { setQuick({ id, x: at.x, y: at.y }); }
+  function onFriendTap(id: bigint, at: { x: number; y: number }) { setIslandPop(null); setQuick({ id, x: at.x, y: at.y }); }
+  function onIslandTap(id: string | null, at: { x: number; y: number }) { setQuick(null); setIslandPop(id ? { id, x: at.x, y: at.y } : null); }
   // kept for the Islands list
   const takeOver = control;
 
@@ -541,16 +546,46 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     const w = world.current!, p = island();
     if (!p.friends.length) { say("Deploy at least one Friend to this island before docking it."); return; }
     if (!dockAt(w, p, b)) { say("That loading zone was just taken."); return; }
-    setMenu(null); goTo(p); bump();
-    const n = neighboursOf(w, p).map(q => q.name);
-    say(`${p.name} docked${n.length ? ` next to ${n.join(", ")}` : ""} (gas only, simulated). A gangway joins you.`);
+    setMenu(null); setIslandPop(null); goTo(p); bump();
+    const n = neighboursOf(w, p).filter(q => !q.mine);
+    say(`${p.name} docked${neighboursOf(w, p).length ? ` next to ${neighboursOf(w, p).map(q => q.name).join(", ")}` : ""}: free, no RF (gas only on chain, simulated). A gangway joins you.${n.length ? " 💬 Chat is open with your new neighbours." : ""}`);
+  }
+  /** Tap another island → Dock: the first free loading zone right next to it. */
+  function dockNextTo(target: Plot) {
+    const w = world.current!, p = island();
+    if (connected(w, p, target)) { say(`${p.name} is already next to ${target.name}.`); return; }
+    const z = zonesNextTo(w, p, target);
+    if (!z.length) { say(`No free loading zone next to ${target.name}. Build a bridge to it instead (free).`); return; }
+    dockIsland(z[0]);
   }
   function buildBridge(to: Plot) {
-    const w = world.current!, p = island(), cost = bridgeCost(p, to);
-    if (econ.current.rf < cost) { say(`That bridge costs ${cost} RF; you have ${fmt(econ.current.rf)}.`); return; }
-    if (!addBridge(w, p, to)) { say("You're already connected to that island."); return; }
-    econ.current.rf -= cost; toPool(econ.current, w, p, cost); setMenu(null); bump();
-    say(`Bridge built from ${p.name} to ${to.name} (simulated): ${cost} RF into ${poolName(w, p)} + gas. It lasts until either island moves.`);
+    const w = world.current!, p = island();
+    if (!addBridge(w, p, to)) { say(p.berth ? "You're already connected to that island." : `Dock ${p.name} first, then bridge.`); return; }
+    setMenu(null); setIslandPop(null); bump();
+    say(`Bridge built from ${p.name} to ${to.name}: free, no RF (gas only on chain, simulated). It lasts until either island moves.`);
+  }
+  /* ── chat with docked neighbours (simulated: sample islands answer on their own) ── */
+  const chatNeighbours = () => { const w = world.current!, mineP = myPlots(w);
+    return w.plots.filter(q => !q.mine && q.friends.length && mineP.some(m => connected(w, m, q))); };
+  const canChat = (p: Plot) => chatNeighbours().includes(p);
+  function openChat(p?: Plot) {
+    setIslandPop(null); setQuick(null); setChatDraft("");
+    const n = chatNeighbours();
+    if (p && !canChat(p)) { say(`Dock next to ${p.name} (or bridge to it) to chat.`); return; }
+    if (!p && !n.length) { say("Dock next to someone else's island to chat with them."); return; }
+    setChatWith(p ? p.id : n.length === 1 ? n[0].id : "*");
+  }
+  const REPLIES = ["Ahoy, neighbour!", "Welcome to the docks.", "Nice island. How many Friends are on it?", "Want to raise a flag together?", "Come explore across the gangway anytime.", "Good winds to your captain."];
+  function sendChat(p: Plot) {
+    const text = chatDraft.trim().slice(0, 280);
+    if (!text) return;
+    if (!canChat(p)) { say(`You're no longer docked with ${p.name}.`); setChatWith(null); return; }
+    const log = chats.current.get(p.id) ?? [];
+    log.push({ from: "You", text }); chats.current.set(p.id, log.slice(-50)); setChatDraft(""); bump();
+    window.setTimeout(() => {
+      const l = chats.current.get(p.id) ?? [];
+      l.push({ from: p.name, text: REPLIES[(l.length + p.name.length) % REPLIES.length] }); chats.current.set(p.id, l.slice(-50)); bump();
+    }, 900);
   }
   /* ── villages: plant a flag, everyone locks RF until it's full, then it's a flag ── */
   /** Samples: Market Town (founded by Market Cluster + Rooftop Pair) and a rising flag on Crystal Keep. */
@@ -721,7 +756,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const allMine = mine.flatMap(p => p.friends);
   const saved = savedRef.current;
   const pending = pendingChanges(w, saved), dirty = pending.moved.length > 0 || pending.gone.length > 0;
-  const uiBlocked = Boolean(menu) || naming !== null || paused;
+  const uiBlocked = Boolean(menu) || naming !== null || chatWith !== null || paused;
   const leadSprites = lead === friendId ? sprites : crewSprites.get(lead) ?? null;
   const label = leadSprites ? `${leadSprites.familyName} #${lead}` : `Friend #${lead}`;
   const following = [...crewModes].filter(([, m]) => m === "follow").length, parked = crewModes.size - following;
@@ -741,7 +776,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
 
   return <section className="docks" aria-label={definition.name}>
     <DocksView world={w} version={w.version} sprites={leadSprites} walkerId={lead} offLand={offLand} zoom={zoom} paused={uiBlocked} reducedMotion={reducedMotion}
-      arranging={arranging} selected={selected} crew={crew} crewSel={crewSel} onWalkerTap={onWalkerTap} onFriendTap={onFriendTap} apiRef={api} onVisible={onVisible} onZoom={z => setZoom(clampZoom(z))}
+      arranging={arranging} selected={selected} crew={crew} crewSel={crewSel} onWalkerTap={onWalkerTap} onFriendTap={onFriendTap} onIslandTap={onIslandTap} apiRef={api} onVisible={onVisible} onZoom={z => setZoom(clampZoom(z))}
       onPick={pl => { const p = plotOf(w, pl.m.id); if (!p) return;
         if (pickMany && selected[0] && plotOf(w, selected[0].m.id) === p) setSelected(s => s.includes(pl) ? s.filter(x => x !== pl) : [...s, pl]);
         else { setIslandId(p.id); setSelected([pl]); } }}
@@ -809,6 +844,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <button type="button" onClick={() => setCrewBar(true)} disabled={uiBlocked}>👥<span>Crew</span></button>
         <button type="button" onClick={() => { setPage(1); setMenu("plot"); }} disabled={uiBlocked}>🏝<span>Islands</span></button>
         <button type="button" onClick={() => setMenu("docks")} disabled={uiBlocked}>⚓<span>Docks</span></button>
+        {chatNeighbours().length > 0 && <button type="button" onClick={() => openChat()} disabled={uiBlocked}>💬<span>Chat</span></button>}
         <button type="button" onClick={() => { setVillageError(""); setMenu("village"); }} disabled={uiBlocked}>🚩<span>Flags</span></button>
         <button type="button" onClick={() => setMenu("tokens")} disabled={uiBlocked}>🚀<span>Tokens</span></button>
         <button type="button" onClick={() => void checkChain(true)} disabled={uiBlocked || checking}>{checking ? "⏳" : "🔄"}<span>Check</span></button>
@@ -837,6 +873,31 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         {fr && <button type="button" role="menuitem" onClick={() => { setNameDraft(nameOf(id)); setNaming(id); setQuick(null); }}>✏️ {nameOf(id) ? "Rename" : "Name"} #{String(id)}</button>}
         <button type="button" role="menuitem" onClick={() => setQuick(null)}>Close</button>
       </div>; })()}
+    {islandPop && !menu && !quick && (() => { const p = w.plots.find(q => q.id === islandPop.id); if (!p || p.mine) return null;
+      const me = isl, conn = connected(w, me, p), next = zonesNextTo(w, me, p), fl = villageOf(w, p) ?? risingFlagOf(w, p), r = rankOf(p);
+      const rc = (document.querySelector(".docks") as HTMLElement | null)?.getBoundingClientRect();
+      const left = Math.max(8, Math.min((islandPop.x - (rc?.left ?? 0)), (rc?.width ?? 400) - 240)), top = Math.max(8, Math.min(islandPop.y - (rc?.top ?? 0) + 12, (rc?.height ?? 400) - 220));
+      return <div className="docks-quick" role="menu" aria-label={`${p.name} options`} style={{ left, top }}>
+        <strong>{p.name}</strong>
+        <small>{p.friends.length.toLocaleString()} Friend{p.friends.length === 1 ? "" : "s"} · {r.rank} · {fl ? `🚩 ${fl.name}${fl.founded ? "" : " (rising)"}` : "no flag"}{conn ? ` · docked with ${me.name}` : ""}</small>
+        {!conn && next.length > 0 && <button type="button" role="menuitem" className="rf-frame-primary" onClick={() => dockNextTo(p)}>⚓ Dock {me.name} here · free</button>}
+        {!conn && !next.length && <button type="button" role="menuitem" onClick={() => buildBridge(p)} disabled={!me.berth || !p.berth}>🌉 Bridge from {me.name} · free</button>}
+        {canChat(p) && <button type="button" role="menuitem" onClick={() => openChat(p)}>💬 Chat with {p.name}</button>}
+        <button type="button" role="menuitem" onClick={() => setIslandPop(null)}>Close</button>
+      </div>; })()}
+    {chatWith !== null && !menu && (() => { const n = chatNeighbours(), p = chatWith === "*" ? null : n.find(q => q.id === chatWith) ?? null;
+      return <GameMenu onClose={() => setChatWith(null)} title={p ? `Chat with ${p.name}` : "Chat with neighbours"}>
+        {!p ? <><p>Pick a docked neighbour to chat with.</p>
+          <div className="docks-row">{n.map(q => <button type="button" key={q.id} onClick={() => setChatWith(q.id)}>💬 {q.name}</button>)}</div></> : <>
+          <p className="docks-note">Chat is open while your islands are docked or bridged together. Simulated here: sample islands answer on their own; chat between real players needs a message relay (next phase).</p>
+          <div className="docks-chat" role="log" aria-label={`Messages with ${p.name}`}>{(chats.current.get(p.id) ?? []).length ? (chats.current.get(p.id) ?? []).map((m, i) =>
+            <p key={i} className={m.from === "You" ? "me" : ""}><strong>{m.from}</strong> {m.text}</p>) : <p className="docks-note">Say hi to {p.name}.</p>}</div>
+          <div className="docks-row">
+            <input aria-label={`Message to ${p.name}`} maxLength={280} placeholder="Message" value={chatDraft} onChange={e => setChatDraft(e.target.value)} onKeyDown={e => { e.stopPropagation(); if (e.key === "Enter") { e.preventDefault(); sendChat(p); } }} autoFocus />
+            <button type="button" className="rf-frame-primary" onClick={() => sendChat(p)}>Send</button>
+            {n.length > 1 && <button type="button" onClick={() => setChatWith("*")}>Others</button>}
+          </div></>}
+      </GameMenu>; })()}
     {naming !== null && !menu && <GameMenu onClose={() => setNaming(null)} title={`Name #${naming}`}>
       <p>Give #{String(naming)} a name everyone sees. Saved on chain (simulated, gas only); only the Friend's holder can name it, and a new holder names it again.</p>
       <div className="docks-row">
@@ -913,17 +974,38 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         </div>
       </> : menu === "docks" ? <>
         {islandTabs}
-        <p>{isl.berth ? `${isl.name} is docked${neighboursOf(w, isl).length ? ` next to ${neighboursOf(w, isl).map(p => p.name).join(", ")}` : ""}. Pick another loading zone to move it, or build a bridge.` : `${isl.name} is floating free. Pick a loading zone next to another island to dock.`} Every island takes one berth, whatever its size, so the docks grow with the number of islands. Docking and moving cost only gas.</p>
+        <p>{isl.berth ? `${isl.name} is docked${neighboursOf(w, isl).length ? ` next to ${neighboursOf(w, isl).map(p => p.name).join(", ")}` : ""}. Pick another loading zone to move it, or build a bridge.` : `${isl.name} is floating free. Pick a loading zone next to another island to dock.`} Every island takes one berth, whatever its size, so the docks grow with the number of islands. Island to island is free: docking, moving and bridges cost no RF. Tip: tap any island on the map and hit ⚓ Dock.</p>
         <ChainMap world={w} island={isl} zones={zones} onDock={dockIsland} onBridge={buildBridge} />
         {isl.berth && <div className="docks-row"><button type="button" onClick={() => { undock(w, isl); setMenu(null); goTo(isl); bump(); say(`${isl.name} is floating free.`); }}>Undock</button>
-          <span className="docks-note">Bridges cost {BRIDGE_FEE_PER_BERTH} RF per berth of distance (into {poolName(w, isl)}) and last until either island moves.</span></div>}
-        <h3>Everyone here</h3>
-        {[...w.plots].filter(p => p.friends.length).sort((a, b) => rankOf(b).weight - rankOf(a).weight).map((p, i) => { const r = rankOf(p);
-          return <div className="docks-item" key={p.id}><span><strong>{i + 1}. {p.name}{p.mine ? " (yours)" : ""} · {r.rank}</strong>
-            <small>{p.friends.length.toLocaleString()} Friend{p.friends.length === 1 ? "" : "s"} · weight {fmtW(r.weight)} · {p.berth ? `berth ${p.berth.x},${p.berth.y}` : "floating"}{p.mine ? "" : ` · ${villageOf(w, p) ? `🚩 ${villageOf(w, p)!.name}` : "no flag: closed"}${exploring(w, p) ? " · you can explore" : ""} · sample`}</small></span>
-            <button type="button" onClick={() => { setMenu(null);
-              if (canEnter(w, p)) { goTo(p); say(p.mine ? `On ${p.name}.` : `You and your crew walked over to ${p.name}.`); }
-              else { const b = w.box.get(p); if (b) api.current?.focusOn((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2); say(villageOf(w, p) ? `${p.name} is under ${villageOf(w, p)!.name}'s flag: join it, or bridge to one of its islands to explore. Here's the view.` : `${p.name} has no flag, so it's closed to visitors for now. Here's the view.`); } }}>{canEnter(w, p) ? "Go" : "Look"}</button></div>; })}
+          <span className="docks-note">Bridges are free and last until either island moves.</span></div>}
+        <h3>🏝 Islands</h3>
+        <div className="docks-isles">{[...w.plots].filter(p => p.friends.length && p !== isl).sort((a, b) => rankOf(b).weight - rankOf(a).weight).map(p => { const r = rankOf(p), fl = villageOf(w, p) ?? risingFlagOf(w, p), art = p.friends.find(x => x.m.friend)?.m.friend?.art;
+          const conn = connected(w, isl, p), next = !p.mine && !conn ? zonesNextTo(w, isl, p) : [];
+          return <div className="docks-isle" key={p.id}>
+            <div className="crop">{art ? <img src={art} alt={`${p.name} on-chain artwork`} loading="lazy" /> : <span className="docks-note">{p.name}</span>}</div>
+            <span><strong>{p.name}{p.mine ? " (yours)" : ""}</strong>
+              <small>{p.friends.length.toLocaleString()} Friend{p.friends.length === 1 ? "" : "s"} · {r.rank}{fl ? ` · 🚩 ${fl.name}` : ""}{conn ? ` · next to ${isl.name}` : ""}</small></span>
+            <div className="docks-row tight">
+              {!p.mine && !conn && next.length > 0 && <button type="button" className="rf-frame-primary" onClick={() => dockNextTo(p)}>⚓ Dock</button>}
+              {!p.mine && !conn && !next.length && isl.berth && p.berth && <button type="button" onClick={() => buildBridge(p)}>🌉 Bridge</button>}
+              {canChat(p) && <button type="button" onClick={() => { setMenu(null); openChat(p); }}>💬</button>}
+              <button type="button" onClick={() => { setMenu(null);
+                if (canEnter(w, p)) { goTo(p); say(p.mine ? `On ${p.name}.` : `You and your crew walked over to ${p.name}.`); }
+                else { const b = w.box.get(p); if (b) api.current?.focusOn((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2); say(villageOf(w, p) ? `${p.name} is under ${villageOf(w, p)!.name}'s flag: join it, or bridge to one of its islands to explore. Here's the view.` : `${p.name} has no flag, so it's closed to visitors for now. Here's the view.`); } }}>{canEnter(w, p) ? "Go" : "Look"}</button>
+            </div></div>; })}</div>
+        <h3>🚩 Flags</h3>
+        {w.villages.filter(v => !v.failed).length ? <div className="docks-flags">{w.villages.filter(v => !v.failed).map(v => { const isles = v.founded ? v.members : [v.seat];
+          return <div className="docks-flagcard" key={v.id}>
+            <span className="docks-flag-emblem" style={{ background: v.color }} aria-hidden="true">🚩</span>
+            <span><strong>{v.name}</strong><small>{v.founded ? `${v.members.length} island${v.members.length === 1 ? "" : "s"}` : `rising · ${fmt(v.locked)} / ${fmt(v.target)} RF`}</small></span>
+            <div className="docks-flag-isles">{isles.map(p => { const art = p.friends.find(x => x.m.friend)?.m.friend?.art, conn = connected(w, isl, p), next = !p.mine && !conn ? zonesNextTo(w, isl, p) : [];
+              return <div key={p.id} className="docks-flag-isle">
+                <div className="crop small">{art ? <img src={art} alt="" loading="lazy" /> : null}</div>
+                <small>{p.name}{p.mine ? " (yours)" : ""}</small>
+                {next.length > 0 && <button type="button" onClick={() => dockNextTo(p)}>⚓ Dock</button>}
+                {conn && !p.mine && <small>docked</small>}
+              </div>; })}</div>
+          </div>; })}</div> : <p className="docks-note">No flags yet. Plant one in 🚩 Flags.</p>}
         <p className="docks-note">Rank follows the official Rare Friends reward weight (Generation × Activation tier), summed over an island's Friends. Neighbours are other people's public Friends shown as samples; their answers to visit requests are simulated.</p>
       </> : menu === "village" ? <>
         <p>Plant a flag and raise it together. Anyone can lock RF into it until it reaches {fmt(VX.FLAG_TARGET)} RF; then it's founded. Locked RF never comes back once it's founded (no rug): half becomes permanent RF/ETH liquidity whose trading fees buy RF (half back into the pool, half shared as allowances), half each founder's allowance to build flag items on their island. Everyone who locked holds a soulbound founder mark. Not full in {VX.FLAG_DAYS} days? Everyone takes their RF back. Once founded, everyone brings one island: founders free, anyone else enrolls ({fmt(VX.ENROLL_PRICE)} RF: half liquidity, half their allowance). Every Friend votes; founders' votes are multiplied.</p>
@@ -1058,8 +1140,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <li><strong>Holes:</strong> if a saved Friend leaves your wallet (sending it clears its activation) or is deactivated, its spot becomes a hole in the island. The hole stays until that Friend comes back (it heals for free) or you fill it with another activated Friend of the same generation (normal arrange fee).</li>
         <li><strong>Arranging is the game:</strong> Arrange → tap a Friend and move it, or <em>Pick several</em> / <em>All</em> to move a group together; each Friend must touch another along part of a side. Save on chain pays RF for every Friend whose spot changed ({Object.entries(ARRANGE_FEE).map(([g, f]) => `Gen ${g}: ${f}`).join(", ")}), plus gas, into a pool (your flag's, or the shared Docks pool). Unmoved Friends are free; Undo returns to your last save.</li>
         <li><strong>No burning:</strong> every fee in The Docks goes into a permanent RF/ETH pool: your flag's, or the shared Docks pool. A flag pool's trading fees buy RF: half back into the pool, half shared as members' allowances. The shared Docks pool keeps everything from islands in no flag as liquidity; its trading fees are saved as earned, in ETH and RF, in the Docks rewards reserve for leaders and games later. The platform fee is {PLATFORM_FEE_BPS / 100}% for now (never above 5%).</li>
-        <li><strong>Dock:</strong> Docks → pick a loading zone next to another island. Every island takes one berth whatever its size, so how far you can roam depends on how many islands there are. Docking and moving cost only gas. Neighbours are joined by a gangway.</li>
-        <li><strong>Bridges:</strong> can't dock next to an island? Build a bridge to it: {BRIDGE_FEE_PER_BERTH} RF per berth of distance, into a pool. It lasts until either island moves.</li>
+        <li><strong>Dock:</strong> tap any island on the map and hit ⚓ Dock (free), or Docks → pick a loading zone next to another island. Docked (or bridged) to someone? 💬 Chat with them. Every island takes one berth whatever its size, so how far you can roam depends on how many islands there are. Docking and moving cost only gas. Neighbours are joined by a gangway.</li>
+        <li><strong>Bridges:</strong> can't dock next to an island? Build a bridge to it: free, like docking. It lasts until either island moves.</li>
         <li><strong>Visit:</strong> for now only islands under a flag can be walked onto: every island of your flag, and, just to explore, a flag's islands your island is docked next to or bridged to.</li>
         <li><strong>Control any Friend:</strong> tap (or click) one of your Friends on its land or walking in a line: <em>Control</em> it (taken out of a line, it breaks off), <em>Break off crew</em> (it and those behind it follow it), <em>Call</em> it, <em>Send home</em>, <em>Pick</em>, make it the island's <em>captain</em> (the Friend you pick when you connect becomes captain; saved on chain once, you board as it every time) or <em>mayor</em> (a second Friend that stays home and greets visitors), or <em>Name</em> it (a public name, saved on chain). 👥 Crew → <em>Change Friend</em>, <em>Call all</em> to the primary leader, <em>Make primary leader</em>, <em>Walk solo</em>, <em>All go home</em>.</li>
         <li><strong>Flags:</strong> 🚩 Flags → plant a flag where your lead stands and lock RF. Anyone can lock more until it hits {fmt(VX.FLAG_TARGET)} RF; then it's founded: half permanent RF/ETH liquidity whose trading fees buy RF (half back into the pool, half shared), half the founders' allowances for building. Lockers hold soulbound founder marks. Everyone brings one island: founders free, others enroll ({fmt(VX.ENROLL_PRICE)} RF, open the first {VX.ENROLL_WINDOW_DAYS} days, then as voted). Every Friend is a vote, founders' multiplied by 1 + their share of the pool; vote on the pool share and enrollment. Spend your allowance on items for your flagged island (build timers, boost with RF); leaving takes a removal request and an epoch (~21 days), and the flag's items on your island are raffled to those who stayed. Not full in {VX.FLAG_DAYS} days? Refunds. Launch tokens to your flag.</li>

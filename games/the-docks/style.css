@@ -136,3 +136,22 @@
 .docks-quick{position:absolute;z-index:40;display:grid;gap:4px;min-width:200px;max-width:230px;padding:8px;background:#fff;color:#000;border:2px solid #000;box-shadow:3px 3px 0 #000;font-size:12px}
 .docks-quick small{color:#444;margin-bottom:2px}
 .docks-quick button{text-align:left;padding:6px 8px}
+
+/* docks menu: islands and flags, shown separately with their artwork */
+.docks-isles{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px;margin-bottom:10px}
+.docks-isle{display:grid;grid-template-columns:96px 1fr;gap:4px 8px;align-items:center;padding:6px;border:1px solid #000;background:#fff;color:#000}
+.docks-isle>.docks-row{grid-column:1/-1}
+.docks-isle strong,.docks-flagcard strong{display:block}
+.docks-isle small,.docks-flagcard small{display:block;color:#444}
+.docks-isle .crop,.docks-flag-isle .crop{position:relative;width:96px;height:64px;overflow:hidden;background:#000;border:1px solid #000}
+.docks-isle .crop img,.docks-flag-isle .crop img{position:absolute;left:50%;top:50%;width:200px;height:200px;transform:translate(-50%,-56%)}
+.docks-flag-isle .crop.small{width:72px;height:48px}
+.docks-flag-isle .crop.small img{width:150px;height:150px}
+.docks-flags{display:grid;gap:8px;margin-bottom:10px}
+.docks-flagcard{display:grid;grid-template-columns:36px 1fr;gap:6px 8px;align-items:center;padding:6px;border:1px solid #000;background:#fff;color:#000}
+.docks-flag-emblem{display:grid;place-items:center;width:36px;height:36px;border:1px solid #000;font-size:18px}
+.docks-flag-isles{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:8px}
+.docks-flag-isle{display:grid;justify-items:start;gap:2px;max-width:96px}
+.docks-chat{max-height:220px;overflow:auto;border:1px solid #000;padding:6px;margin-bottom:8px;background:#fff;color:#000}
+.docks-chat p{margin:2px 0}
+.docks-chat p.me{text-align:right}

@@ -27,6 +27,7 @@ type Props = {
   crewSel: Set<bigint>;                          // crew picked on the map
   onWalkerTap: (id: bigint, at: { x: number; y: number }) => void;   // tapped a walking Friend (client px)
   onFriendTap: (id: bigint, at: { x: number; y: number }) => void;   // tapped one of your Friends at home
+  onIslandTap?: (plotId: string | null, at: { x: number; y: number }) => void; // tapped someone else's island (null: anywhere else)
   onBlocked: (plot: Plot) => void; onEnterPlot: (plot: Plot | null) => void;
   onPick: (pl: Placed) => void;                  // arrange mode: tap one of your Friends
   onVisible: (pls: Placed[]) => void;            // Friends near the camera (for lazy art loading)
@@ -204,6 +205,9 @@ export function DocksView(props: Props) {
       const d = Math.hypot(fx - sx, fy - sy); if (d < hb) { hb = d; home = v.pl.m.id; }
     }
     if (home !== null) { st.onFriendTap(home, { x: e.clientX, y: e.clientY }); return; }
+    // someone else's island: its options (dock next to it, bridge, chat); you still walk there if you can
+    const o = tileAt(st.world, at.x, at.y);
+    st.onIslandTap?.(o?.plot && !o.plot.mine ? o.plot.id : null, { x: e.clientX, y: e.clientY });
     player.current.target = at; focus.current = null;
   };
 

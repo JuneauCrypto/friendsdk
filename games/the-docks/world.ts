@@ -23,8 +23,8 @@ export const FOOTPRINT: Readonly<Record<number, readonly [number, number]>> = { 
 /** RF paid per Friend moved on its island when saved on chain (DocksIslands.FEE_GEN1…6), into a pool. */
 export const ARRANGE_FEE: Readonly<Record<number, number>> = { 1: 100, 2: 50, 3: 20, 4: 10, 5: 5, 6: 1 };
 export const feeOf = (m: { gen: number }) => ARRANGE_FEE[m.gen] ?? 1;
-/** RF burned per berth of distance a bridge spans (DocksPlots.BRIDGE_FEE_PER_BERTH). */
-export const BRIDGE_FEE_PER_BERTH = 10;
+/** Island to island is free: docking and bridges cost no RF (gas only on chain). */
+export const BRIDGE_FEE_PER_BERTH = 0;
 
 export type Member = {
   id: bigint; gen: number; tier: number; cw: number; ch: number;
@@ -311,6 +311,11 @@ export function dockAt(w: World, p: Plot, b: Berth) {
   if (o && o !== p) return false;
   if (!loadingZones(w, p).some(z => same(z, b))) return false;
   p.berth = { ...b }; rebuild(w); return true;
+}
+/** Loading zones right next to `target` where `p` could dock. */
+export function zonesNextTo(w: World, p: Plot, target: Plot): Berth[] {
+  if (!target.berth) return [];
+  return loadingZones(w, p).filter(z => dist(z, target.berth!) === 1);
 }
 export function undock(w: World, p: Plot) { p.berth = null; rebuild(w); }
 const dist = (a: Berth, b: Berth) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);

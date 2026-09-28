@@ -130,9 +130,18 @@ try {
   await game.getByRole("img", { name: /Map: \d+ docked islands, \d+ loading zones/ }).waitFor();
   await shot("map");
   await game.locator(".docks-slots button").first().click();
-  await game.getByText(/Your island docked next to .* \(gas only, simulated\)/).waitFor();
+  await game.getByText(/Your island docked next to .*: free, no RF/).waitFor();
   await page.waitForTimeout(600);
   await shot("docked");
+  // docked with someone else: chat (simulated replies from sample islands)
+  await btn("Chat").click();
+  if (await game.getByText("Pick a docked neighbour to chat with.").count()) await game.locator(".docks-row button").first().click();
+  await game.getByRole("textbox", { name: /^Message to / }).fill("Hello neighbours");
+  await game.getByRole("button", { name: "Send" }).click();
+  await game.getByRole("log").getByText("Hello neighbours").waitFor();
+  await game.getByRole("log").locator("p:not(.me)").first().waitFor();
+  await shot("chat");
+  await game.getByRole("button", { name: /^Close Chat with/ }).click();
   // my other Friends arrived automatically; adding by number is only a fallback
   await btn("Islands").click();
   await game.getByText(many ? `${(many + 2).toLocaleString("en-US")} Friends ·` : "2 Friends ·", { exact: false }).first().waitFor();
@@ -268,13 +277,14 @@ try {
   if (!many) { assert.match(rfText, /Your RF\s*3,950/, "5,000 − 40 save − 2×5 claims − 1,000 launch"); assert.match(rfText, /Into pools\s*1,050/); assert.match(rfText, /Platform fee\s*0%/); }
   await game.getByRole("button", { name: "Close Tokens" }).click();
   if (!many) {
-    // a bridge to an island we aren't docked next to costs RF per berth of distance
+    // island to island is free: a bridge costs no RF
     await btn("Docks").click();
+    await game.locator(".docks-isle").first().waitFor();
+    assert.ok(await game.locator(".docks-isle img").count() > 0, "the docks show the islands' artwork");
     const bridge = game.getByRole("button", { name: /^Bridge to / }).first();
-    const cost = Number((await bridge.locator("small").textContent()).replace(/\D/g, ""));
-    assert.ok(cost >= 20 && cost % 10 === 0, `bridge cost ${cost}`);
+    assert.equal(await bridge.locator("small").textContent(), "free");
     await bridge.click();
-    await game.getByText(new RegExp(`Bridge built from Your island to .* \\(simulated\\): ${cost} RF into the Docks pool`)).waitFor();
+    await game.getByText(/Bridge built from Your island to .*: free, no RF/).waitFor();
     await shot("bridge");
     for (let i = 0; i < 5; i++) await game.getByRole("button", { name: "Zoom out" }).click();
     await page.waitForTimeout(1500); await shot("world");
@@ -355,6 +365,23 @@ try {
     await btn("More").click();
     await game.getByRole("button", { name: "Bring #7573 back" }).click();
     await game.getByText(/#7573 came back and healed its hole on Island 2/).waitFor();
+  }
+  if (!many && !failImport) {
+    // tap someone else's island on the map: its options, with Dock / Bridge / Chat
+    await game.getByRole("button", { name: "Fit all islands" }).click();
+    await page.waitForTimeout(900);
+    const lands = game.locator("img.docks-land"), vw = page.viewportSize();
+    for (let i = 2; i < Math.min(12, await lands.count()); i++) {
+      const b = await lands.nth(i).boundingBox(); if (!b || b.x < 0 || b.y < 0 || b.x + b.width > vw.width || b.y + b.height > vw.height - 120) continue;
+      await page.mouse.click(b.x + b.width / 2, b.y + b.height * 0.62);
+      if (await game.getByRole("menu", { name: /options$/ }).getByText(/Friends? ·/).count()) break;
+    }
+    const pop = game.getByRole("menu", { name: /options$/ });
+    await pop.getByText(/Friends? ·/).waitFor();
+    assert.ok(await pop.getByRole("menuitem", { name: /⚓ Dock Your island here · free|🌉 Bridge from Your island · free|💬 Chat with/ }).count(), "island options offer dock, bridge or chat");
+    await shot("island-options");
+    await pop.getByRole("menuitem", { name: "Close" }).click();
+    await game.getByRole("button", { name: "Center on lead" }).click();
   }
   if (!many && !failImport) {
     // coming back: the picker remembers the captain and the game boards as it, without asking

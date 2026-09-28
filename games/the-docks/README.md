@@ -18,8 +18,14 @@ is a saved layout that belongs to the wallet that built it, and it can't be sold
   size**, so the docks grow with the number of islands, not their size. Dock at a free
   **loading zone** next to another island; neighbours are joined by a **gangway**. Docking
   and moving an island cost only gas.
-- **Bridges.** Can't dock next to an island you want? Build a **bridge** to it for
-  **10 RF per berth** of distance, into a pool. It lasts until either island moves.
+- **Tap to dock.** Tap any island on the map for its options: **⚓ Dock** next to it, **🌉 Bridge**
+  or **💬 Chat**. Island to island is free: docking and bridges cost no RF (gas only on chain).
+- **Bridges.** Can't dock next to an island you want? Build a free **bridge** to it. It lasts
+  until either island moves.
+- **Chat.** Docked or bridged to someone else's island, you can chat with them (simulated:
+  sample islands answer on their own; chat between real players needs a message relay).
+- **Docks screen.** Islands and flags are shown separately, with each island's artwork and
+  Dock / Bridge / Chat / Go buttons.
 - **Access (flags only, for now).** You walk across every island of your flag; visitors
   can bridge over to a flag's islands just to explore.
 - **Your whole wallet, automatically.** Every activated Friend in the same wallet joins,
@@ -69,7 +75,7 @@ app's built-in browser (the SDK has no WalletConnect).
 | **Holes** | When the minute check finds a saved Friend gone from the wallet (or deactivated), its spot turns into a hole (drawn dark with a red dashed edge). 🏝 Islands lists holes with a **Fill with…** picker (same generation only; the Friend that left fills its own hole for free). It heals by itself if that Friend returns. ⚙️ More → *Preview: a Friend leaves your wallet* shows the flow without sending anything. |
 | **Islands** | Each island has its own grid of 4 × 4-tile cells; Friends cover whole cells at true size (Gen 1 = 30 tiles … Gen 6 = 4), and rounding becomes boardwalk. 🏝 Islands → switch islands, **＋ New island**, and deploy any Friend to another island from its row. |
 | **Docking** | ⚓ Docks → the berth map: one square per island, glowing loading zones next to docked islands. Pick one to dock or move (gas only). Islands are drawn centred in their berth with water between; neighbours are joined by a gangway you can walk. |
-| **Bridges** | On the berth map, tap an island you aren't next to (or **Bridge to …**): 10 RF per berth of distance, into a pool. The bridge is a walkway over the water and lasts until either island moves. |
+| **Bridges** | On the berth map, tap an island you aren't next to (or **Bridge to …**): free (gas only). The bridge is a walkway over the water and lasts until either island moves. |
 | **Access** | For now only islands under a flag can be walked onto: every island of your flag, plus, as a visitor who can only explore, a flag's islands once your island is docked next to or bridged to one of them. Islands with no flag are closed to visitors. |
 | **Your whole wallet** | `roster.ts` reads the wallet that holds your Friend (`ownerOf`), its owner-filtered `Transfer` history (the same account-filtered method the SDK runtime's picker uses; no collection scan) and then generation + activation tier for every held Friend through Multicall3, 250 per call. Inactive Friends are left out. Re-run every minute, so bought, sold, activated or upgraded Friends join, leave or update. Adding by number stays as a fallback. |
 | **Arrange** | ✥ Arrange → tap any Friend on the island (or **Next ▸**) and step it one cell (↖ ↗ ↙ ↘ or arrow keys); **Pick several** to move a group together, **All** for the whole island shape (moving the whole shape together costs nothing). Stepping onto a same-size neighbour swaps them, so packed islands can be reshuffled. **Auto-arrange** packs the island into one connected block. **Done** / **Save** refuse an island where a Friend doesn't touch another along part of a side. The bar shows how many Friends moved and the RF that saving burns. |
@@ -113,7 +119,7 @@ pushes changes to connected players instead of polling.
 | Create an island on chain | gas only (happens on an island's first save; islands are not tokens) | — |
 | Fill a hole | the filling Friend's arrange fee (free if the Friend that left comes back) | the island's village pool, or the shared Docks pool |
 | Dock / move an island | gas only | — |
-| Build a bridge | 10 RF per berth of distance, plus gas | the island's village pool, or the shared Docks pool |
+| Build a bridge | free (gas only) | — |
 | Launch a token | 1,000 RF | the launching island's village pool, or the Docks pool |
 | Claim from a launch | launch's claim price (set by launcher) | the launching island's village pool, or the Docks pool |
 | Own items, boosts, raffle tickets | item price · RF per boost · 100 RF a ticket | the island's village pool, or the shared Docks pool |
@@ -153,8 +159,8 @@ needs backing.
   - *Docking (gas only):* one berth per island whatever its size; `dock(islandId, x, y)` at
     a free berth next to a docked island (`isLoadingZone`), also to move; `undock`;
     `islandAtBerth`; `connected(a, b)` = neighbouring berths or a live bridge.
-  - *Bridges:* `buildBridge(from, to)` pays `BRIDGE_FEE_PER_BERTH` (10 RF) × berth
-    distance; a bridge records both islands' berth epochs and ends when either moves.
+  - *Bridges:* `buildBridge(from, to)` is free (gas only), like docking; a bridge records
+    both islands' berth epochs and ends when either moves.
   - *Access:* open / invite-only islands with approved visitors, set by the island's owner.
     Ownership and activation are checked through the live activation manager
     (`positions(generations, id)`).
@@ -200,7 +206,7 @@ needs backing.
   no ETH is needed up front; buyers fill it with ETH over time. The position NFT stays in the
   contract, which has no remove-liquidity function; `collect` takes fees only. `buyRf` is the
   buyback swap. There is no RF/WETH v3 pool on chain yet, so one must be created first.
-- Tests: `forge test --match-contract DocksTest` (53 unit tests, including the on-chain captain, mayor and Friend names, flags, soulbound marks, refunds, founding into liquidity and allowances, one island per wallet with nobody joining free, removal only at the next epoch with the allowance forfeited, a departed Friend burning a spot and staying bound (blocked from another village, then free after the epoch), cooldown on the island a moved Friend lands on, a Friend reclaiming its spot only while the population cap allows, power = Friends × founder share, enrollment votes, harvest half back into the pool and half shared by Friend count, the pool share vote, the platform fee (0 to start, capped at 5%), the Docks pool rewards reserve (RF and WETH kept as earned), nothing ever burned, village items from allowances with build times and boosts, own items, raffles of items left behind (members who stayed, Dice draw, winner keeps it; nobody entered → runs again), the village launch scope, islands are not tokens, per-generation fees into the Docks pool, only moved Friends charged, deploying between islands, holes (reserved, healed on return, burned in when placed elsewhere, filled by same-size Friends), loading zones, size-independent berths, bridge pricing and expiry, launch scopes over gangways and bridges, 300 Friends arranged and claimed in one transaction each) and
+- Tests: `forge test --match-contract DocksTest` (53 unit tests, including the on-chain captain, mayor and Friend names, flags, soulbound marks, refunds, founding into liquidity and allowances, one island per wallet with nobody joining free, removal only at the next epoch with the allowance forfeited, a departed Friend burning a spot and staying bound (blocked from another village, then free after the epoch), cooldown on the island a moved Friend lands on, a Friend reclaiming its spot only while the population cap allows, power = Friends × founder share, enrollment votes, harvest half back into the pool and half shared by Friend count, the pool share vote, the platform fee (0 to start, capped at 5%), the Docks pool rewards reserve (RF and WETH kept as earned), nothing ever burned, village items from allowances with build times and boosts, own items, raffles of items left behind (members who stayed, Dice draw, winner keeps it; nobody entered → runs again), the village launch scope, islands are not tokens, per-generation fees into the Docks pool, only moved Friends charged, deploying between islands, holes (reserved, healed on return, burned in when placed elsewhere, filled by same-size Friends), loading zones, size-independent berths, free bridges that expire when an island moves, launch scopes over gangways and bridges, 300 Friends arranged and claimed in one transaction each) and
   `FRIENDSDK_FORK_RPC=https://rpc.mainnet.chain.robinhood.com forge test --match-contract DocksForkTest`
   (real Generations, activation manager and RF on a local fork: creates two islands, arranges
   #67111 (50 RF into the Docks pool) and #7153, docks them side by side, launches, claims; and a village on the
