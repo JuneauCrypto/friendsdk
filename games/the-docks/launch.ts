@@ -1,6 +1,8 @@
 /* Token launches — SIMULATED in this preview. Mirrors contracts/src/docks/DocksLaunchpad.sol:
- * 1,000 RF per launch (500 burned, 500 to the treasury); fixed supply, no owner; airdrops and
- * claims land in the Friend's own wallet; every claim costs the launch's RF price, burned. */
+ * 1,000 RF per launch; fixed supply, no owner; airdrops and claims land in the Friend's own
+ * wallet; every claim costs the launch's RF price. Like every fee in The Docks, launch fees and
+ * claim prices go to a permanent RF/ETH pool (the island's village's, or the shared Docks pool):
+ * nothing is burned; the pools' trading fees buy RF to build with. */
 import { connected, villageOf, type Plot, type World } from "./world.js";
 
 export const LAUNCH_FEE = 1000;
@@ -18,11 +20,20 @@ export type Launch = {
   scope: Scope; claimEach: number; claimPrice: number; claimRemaining: number; claimed: Set<bigint>;
 };
 export type Economy = {
-  rf: number; burned: number; treasury: number; launches: Launch[];
+  rf: number; pooled: number; docksPool: number; docksFund: number; platform: number; launches: Launch[];
   /** token balances in each Friend's own wallet: friendId → symbol → amount */
   wallets: Map<bigint, Map<string, number>>;
 };
-export const createEconomy = (): Economy => ({ rf: START_RF, burned: 0, treasury: 0, launches: [], wallets: new Map() });
+export const createEconomy = (): Economy => ({ rf: START_RF, pooled: 0, docksPool: 0, docksFund: 0, platform: 0, launches: [], wallets: new Map() });
+/** Platform fee on every fee: 0 to start, never above 5% (DocksVillageTreasury). */
+export const PLATFORM_FEE_BPS = 0;
+/** A fee: into the pool of the island's village, or the shared Docks pool (minus the platform fee). */
+export function toPool(e: Economy, w: World, p: Plot | null, amount: number) {
+  const cut = amount * PLATFORM_FEE_BPS / 10_000, rest = amount - cut, v = p ? villageOf(w, p) : null;
+  e.platform += cut; e.pooled += rest;
+  if (v) v.pendingLiquidity += rest; else e.docksPool += rest;
+}
+export const poolName = (w: World, p: Plot | null) => { const v = p ? villageOf(w, p) : null; return v ? `${v.name}'s pool` : "the Docks pool"; };
 
 function credit(e: Economy, id: bigint, symbol: string, amount: number) {
   const w = e.wallets.get(id) ?? new Map<string, number>();
@@ -55,7 +66,7 @@ export function launch(e: Economy, w: World, input: LaunchInput, canVisit: (p: P
   const dropTotal = drop.length * input.airdropEach;
   if (!(input.supply > 0) || dropTotal + input.claimPool > input.supply) throw new Error("Airdrop + claim pool can't exceed the supply.");
   if ((input.claimPool === 0) !== (input.claimEach === 0) || input.claimEach > input.claimPool) throw new Error("Set both a claim pool and an amount per claim (or neither).");
-  e.rf -= LAUNCH_FEE; e.burned += LAUNCH_FEE / 2; e.treasury += LAUNCH_FEE / 2;
+  e.rf -= LAUNCH_FEE; toPool(e, w, input.creator, LAUNCH_FEE);
   const l: Launch = { id: e.launches.length, name, symbol, supply: input.supply, creator: input.creator, creatorFriend: input.creatorFriend,
     scope: input.claimScope, claimEach: input.claimEach, claimPrice: input.claimPrice, claimRemaining: input.claimPool, claimed: new Set() };
   e.launches.push(l);
@@ -77,7 +88,7 @@ export function claim(e: Economy, w: World, l: Launch, friendId: bigint, canVisi
   if (l.claimEach === 0 || l.claimRemaining < l.claimEach) throw new Error(`$${l.symbol}'s claim pool is empty.`);
   if (!eligibleFriends(w, l, canVisit).some(x => x.id === friendId)) throw new Error(`#${friendId} isn't eligible for $${l.symbol}.`);
   if (e.rf < l.claimPrice) throw new Error(`Claiming costs ${l.claimPrice} RF.`);
-  e.rf -= l.claimPrice; e.burned += l.claimPrice;
+  e.rf -= l.claimPrice; toPool(e, w, l.creator, l.claimPrice);
   l.claimed.add(friendId); l.claimRemaining -= l.claimEach;
   credit(e, friendId, l.symbol, l.claimEach);
 }
@@ -88,7 +99,7 @@ export function claimAll(e: Economy, w: World, l: Launch, ids: bigint[], canVisi
   let n = 0;
   for (const id of ids) {
     if (!ok.has(id) || l.claimed.has(id) || l.claimRemaining < l.claimEach || e.rf < l.claimPrice) continue;
-    e.rf -= l.claimPrice; e.burned += l.claimPrice; l.claimed.add(id); l.claimRemaining -= l.claimEach;
+    e.rf -= l.claimPrice; toPool(e, w, l.creator, l.claimPrice); l.claimed.add(id); l.claimRemaining -= l.claimEach;
     credit(e, id, l.symbol, l.claimEach); n++;
   }
   return n;

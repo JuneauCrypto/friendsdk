@@ -20,7 +20,7 @@ export const GAP = 6;                                              // tiles of w
 const MIN_BERTH = 12;                                              // tiles: the smallest berth drawn
 /** Footprint in cells by generation: lands are 30, 20, 18×16, 12, 8 and 4 tiles across. */
 export const FOOTPRINT: Readonly<Record<number, readonly [number, number]>> = { 1: [8, 8], 2: [5, 5], 3: [5, 4], 4: [3, 3], 5: [2, 2], 6: [1, 1] };
-/** RF burned per Friend moved on its island when saved on chain (DocksPlots.FEE_GEN1…6). */
+/** RF paid per Friend moved on its island when saved on chain (DocksIslands.FEE_GEN1…6), into a pool. */
 export const ARRANGE_FEE: Readonly<Record<number, number>> = { 1: 100, 2: 50, 3: 20, 4: 10, 5: 5, 6: 1 };
 export const feeOf = (m: { gen: number }) => ARRANGE_FEE[m.gen] ?? 1;
 /** RF burned per berth of distance a bridge spans (DocksPlots.BRIDGE_FEE_PER_BERTH). */
@@ -78,13 +78,13 @@ export type Village = {
   founded: boolean; failed: boolean; foundedAt: number;
   pool: number;                                                   // locked + enrollment fees: founder shares are of this
   enrollOpen: boolean; enrollPrice: number; enrollCap: number; enrollVote: Proposal | null;
-  liquidity: number; pendingLiquidity: number; fees: { rf: number; eth: number }; burnBps: number; burned: number;
+  liquidity: number; pendingLiquidity: number; fees: { rf: number; eth: number }; poolBps: number; compounded: number;
   credited: Map<string, number>; spent: Map<string, number>;      // allowances: founders' half of their lock + these
   removals: Map<Plot, number>;                                    // island → epoch boundary it leaves at
   raffles: Raffle[];
   proposals: Proposal[];
 };
-export type ProposalKind = "burnShare" | "enrollment" | "enrollPrice" | "enrollCap";
+export type ProposalKind = "poolShare" | "enrollment" | "enrollPrice" | "enrollCap";
 export type Proposal = {
   id: number; kind: ProposalKind; options: number[]; memo: string;
   tally: number[]; voters: Map<string, number>; ends: number; settled: boolean; winner: number;
@@ -346,7 +346,7 @@ export function newVillage(w: World, seat: Plot, name: string, at: { x: number; 
   const v: Village = { id: `v${w.villages.length + 1}-${seat.id}`, name: clean, seat, flag: { ...at }, members: [],
     color: FLAG_COLORS[w.villages.length % FLAG_COLORS.length], target, deadline, locked: 0, lockers: new Map(), founded: false, failed: false, foundedAt: 0,
     pool: 0, enrollOpen: false, enrollPrice: 0, enrollCap: 0, enrollVote: null,
-    liquidity: 0, pendingLiquidity: 0, fees: { rf: 0, eth: 0 }, burnBps: 5000, burned: 0,
+    liquidity: 0, pendingLiquidity: 0, fees: { rf: 0, eth: 0 }, poolBps: 5000, compounded: 0,
     credited: new Map(), spent: new Map(), removals: new Map(), raffles: [], proposals: [] };
   w.villages.push(v); w.version++; return v;
 }

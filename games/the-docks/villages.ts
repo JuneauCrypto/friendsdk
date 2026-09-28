@@ -10,9 +10,10 @@
  *    (~21 days); an island leaves only by a removal request, carried out at the next epoch; its
  *    village items are raffled to the members who stayed (RF tickets → liquidity);
  *  - votes: every Friend on a member's island is a vote; founders ×(1 + their share of the pool);
- *  - harvest: fees buy back RF, the burn share (half) is burned, the rest shared by Friends. */
+ *  - harvest: fees buy back RF; the pool share (half) goes back into the pool, the rest is
+ *    shared by Friends. Nothing is burned. */
 import { addMember, CELL, flagProblem, newVillage, villageOf, walletOf, type Item, type Plot, type Proposal, type ProposalKind, type Raffle, type Village, type World } from "./world.js";
-import type { Economy } from "./launch.js";
+import { toPool, type Economy } from "./launch.js";
 
 export const FLAG_TARGET = 1_000_000;                 // RF to fill a flag (a contract setting)
 export const FLAG_DAYS = 30;                          // days a flag has to fill
@@ -141,14 +142,14 @@ export function accrueFees(v: Village, rand = Math.random) {
   v.fees.eth += +(0.001 + rand() * 0.004).toFixed(4);
 }
 
-/** Collect fees, buy back RF with the ETH, burn the burn share, keep the rest. Members only. */
+/** Collect fees, buy back RF with the ETH: the pool share back into the pool, the rest shared by Friends. Members only. */
 export function harvest(v: Village, e: Economy, who = YOU) {
   if (!v.founded) throw new Error(`${v.name} isn't founded yet.`);
   if (!islandOf(v, who)) throw new Error(`Only ${v.name}'s members harvest (they set the buyback's minimum).`);
   const bought = Math.round(v.fees.eth * RF_PER_ETH), total = v.fees.rf + bought;
-  const burned = Math.round(total * v.burnBps / 10_000), kept = total - burned;
-  const out = { rf: v.fees.rf, eth: v.fees.eth, bought, burned, kept };
-  v.fees = { rf: 0, eth: 0 }; v.burned += burned; e.burned += burned;
+  const toPoolRf = Math.round(total * v.poolBps / 10_000), kept = total - toPoolRf;
+  const out = { rf: v.fees.rf, eth: v.fees.eth, bought, toPool: toPoolRf, kept };
+  v.fees = { rf: 0, eth: 0 }; v.pendingLiquidity += toPoolRf; v.compounded += toPoolRf; void e;
   const pop = population(v);
   for (const m of v.members) { const who = walletOf(m); v.credited.set(who, (v.credited.get(who) ?? 0) + (pop ? kept * m.friends.length / pop : 0)); }
   if (!pop) v.pendingLiquidity += kept;
@@ -157,18 +158,18 @@ export function harvest(v: Village, e: Economy, who = YOU) {
 
 /* ── votes: Friends × founder multiplier ── */
 
-const CHOICES: Record<ProposalKind, number> = { burnShare: 2, enrollment: 4, enrollPrice: 3, enrollCap: 3 };
+const CHOICES: Record<ProposalKind, number> = { poolShare: 2, enrollment: 4, enrollPrice: 3, enrollCap: 3 };
 function newProposal(v: Village, kind: ProposalKind, options: number[], memo: string, days: number): Proposal {
   const p: Proposal = { id: v.proposals.length, kind, options, memo: memo.trim().slice(0, 140), tally: Array(CHOICES[kind]).fill(0),
     voters: new Map(), ends: Date.now() + days * DAY, settled: false, winner: -1 };
   v.proposals.push(p); return p;
 }
-/** Propose a new share of each buyback to burn (the rest is shared as allowances). Members propose. */
-export function proposeBurnShare(v: Village, who: string, burnBps: number) {
+/** Propose a new share of each buyback to put back into the pool (the rest is shared as allowances). Members propose. */
+export function proposePoolShare(v: Village, who: string, poolBps: number) {
   if (!v.founded) throw new Error(`${v.name} isn't founded yet.`);
   if (!islandOf(v, who)) throw new Error(`Only ${v.name}'s members make proposals.`);
-  if (!(burnBps >= 0 && burnBps <= 10_000)) throw new Error("Burn share is 0–100%.");
-  return newProposal(v, "burnShare", [burnBps], "", VOTE_DAYS);
+  if (!(poolBps >= 0 && poolBps <= 10_000)) throw new Error("Pool share is 0–100%.");
+  return newProposal(v, "poolShare", [poolBps], "", VOTE_DAYS);
 }
 /** Start an enrollment vote (one at a time). */
 export function proposeEnrollment(v: Village, who: string) {
@@ -196,10 +197,10 @@ export function settle(v: Village, p: Proposal): string {
   if (p.settled) throw new Error("Already settled.");
   if (Date.now() < p.ends) throw new Error("Voting is still open.");
   p.settled = true;
-  if (p.kind === "burnShare") {
+  if (p.kind === "poolShare") {
     p.winner = passed(v, p) ? 1 : 0;
     if (!p.winner) return `${v.name}'s vote didn't pass.`;
-    v.burnBps = p.options[0]; return `${v.name} now burns ${p.options[0] / 100}% of each buyback.`;
+    v.poolBps = p.options[0]; return `${v.name} now puts ${p.options[0] / 100}% of each buyback back into its pool.`;
   }
   p.winner = plurality(p); v.enrollVote = null;
   if (p.kind === "enrollment") {
@@ -290,11 +291,10 @@ export function buyForVillage(w: World, v: Village, who: string, kind: number, c
   v.spent.set(who, (v.spent.get(who) ?? 0) + price); v.pendingLiquidity += price;
   return newItem(w, kind, v, null, p, cx, cy);
 }
-/** RF paid for own items, boosts and tickets: the island's village liquidity, or burned. */
+/** RF paid for own items and boosts: the pool of the island's village, or the Docks pool. */
 function payRf(w: World, e: Economy, p: Plot | null, amount: number) {
   if (e.rf < amount) throw new Error(`You have ${Math.floor(e.rf).toLocaleString()} RF.`);
-  e.rf -= amount; const v = p ? villageOf(w, p) : null;
-  if (v) v.pendingLiquidity += amount; else e.burned += amount;
+  e.rf -= amount; toPool(e, w, p, amount);
 }
 /** An item of your own, paid with your RF: always yours. */
 export function buyOwn(w: World, e: Economy, who: string, kind: number, p: Plot, cx: number, cy: number) {

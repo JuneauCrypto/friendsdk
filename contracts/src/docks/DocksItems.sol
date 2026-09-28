@@ -20,13 +20,12 @@ import { IDiceEntropy } from "../ChanceGame.sol";
 ///   your islands.
 /// - Building: a new item appears after its kind's build time; anyone can speed it up with
 ///   RF (`boost`). Every RF paid here (own items, tickets, boosts, and allowances spent on
-///   village items) goes to the permanent liquidity of the island's village; with no village
-///   it's burned.
+///   village items) goes to the permanent liquidity of the island's village, or the shared
+///   Docks pool for an island in no village. Nothing is burned.
 /// - Raffle draws use Dice (entropy V2); anyone pays Dice's native fee to draw.
 contract DocksItems is IDocksVillageItems, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    address public constant BURN = 0x000000000000000000000000000000000000dEaD;
     uint256 public constant MAX_ITEMS_PER_ISLAND = 64;
     uint256 public constant RAFFLE_PERIOD = 3 days;
     uint32 public constant CALLBACK_GAS_LIMIT = 200_000;
@@ -322,15 +321,10 @@ contract DocksItems is IDocksVillageItems, ReentrancyGuard {
         emit Raffled(itemId, village, ends);
     }
 
-    /// @dev RF for the island's village liquidity, or burned when it's in no village.
+    /// @dev RF to the pool of the island's village, or the shared Docks pool.
     function _pay(uint256 island, uint256 amount) private {
-        uint256 villageId = villages.villageOf(island);
-        if (villageId == 0) {
-            rf.safeTransferFrom(msg.sender, BURN, amount);
-            return;
-        }
         rf.safeTransferFrom(msg.sender, address(_treasury()), amount);
-        _treasury().queueLiquidity(villageId, amount);
+        _treasury().onFee(island, amount);
     }
 
     function _price(uint32 kind) private view returns (uint256) {

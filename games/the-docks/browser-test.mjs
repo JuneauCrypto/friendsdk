@@ -157,21 +157,21 @@ try {
   await game.getByRole("button", { name: "Auto-arrange" }).click();
   await btn("Done").click();
   await game.getByRole("toolbar", { name: "Arrange your Friends" }).waitFor({ state: "detached" });
-  // save on chain (simulated): mints the plot NFT and burns RF per Friend moved (2 × Gen 3 = 40 RF)
+  // save on chain (simulated): creates the island and pays RF per Friend moved into the Docks pool (2 × Gen 3 = 40 RF)
   if (many) {
     await game.getByRole("button", { name: /Save · 10,002 moved · 55k RF/ }).click();
-    await game.getByText(/Saving burns 55k RF; you have 5,000/).waitFor();
+    await game.getByText(/Saving costs 55k RF; you have 5,000/).waitFor();
   } else {
     await game.getByRole("button", { name: /Save · 2 moved · 40 RF/ }).click();
-    await game.getByText(/Saved on chain \(simulated\): created Island #\d+ on chain · 2 Friends moved · 40 RF burned/).waitFor();
+    await game.getByText(/Saved on chain \(simulated\): created Island #\d+ on chain · 2 Friends moved · 40 RF into the Docks pool/).waitFor();
     await shot("saved");
     // one more move is a new draft: only that Friend is charged; Undo returns to the save
     await game.locator(".docks-arrange-btn").click();
     for (const dir of ["Move down-right", "Move up-left", "Move up-right", "Move down-left"]) {
       await game.getByRole("button", { name: dir }).click();
-      if (await game.getByText(/1 moved · burns 20 RF \+ gas/).count()) break;
+      if (await game.getByText(/1 moved · 20 RF \+ gas/).count()) break;
     }
-    await game.getByText(/1 moved · burns 20 RF \+ gas/).waitFor();
+    await game.getByText(/1 moved · 20 RF \+ gas/).waitFor();
     await btn("Done").click();
     await game.getByText(/touch the rest|Arranged/).first().waitFor().catch(() => {});
     if (await game.getByRole("toolbar", { name: "Arrange your Friends" }).count()) await game.getByRole("button", { name: "Auto-arrange" }).click(), await btn("Done").click();
@@ -230,16 +230,16 @@ try {
   }
   await shot("tokens");
   const rfText = await game.locator(".docks-rf").textContent();
-  if (!many) { assert.match(rfText, /Your RF\s*3,950/, "5,000 − 40 save − 2×5 claims − 1,000 launch"); assert.match(rfText, /Burned\s*550/); }
+  if (!many) { assert.match(rfText, /Your RF\s*3,950/, "5,000 − 40 save − 2×5 claims − 1,000 launch"); assert.match(rfText, /Into pools\s*1,050/); assert.match(rfText, /Platform fee\s*0%/); }
   await game.getByRole("button", { name: "Close Tokens" }).click();
   if (!many) {
-    // a bridge to an island we aren't docked next to burns RF per berth of distance
+    // a bridge to an island we aren't docked next to costs RF per berth of distance
     await btn("Docks").click();
     const bridge = game.getByRole("button", { name: /^Bridge to / }).first();
     const cost = Number((await bridge.locator("small").textContent()).replace(/\D/g, ""));
     assert.ok(cost >= 20 && cost % 10 === 0, `bridge cost ${cost}`);
     await bridge.click();
-    await game.getByText(new RegExp(`Bridge built from Your island to .* \\(simulated\\): ${cost} RF burned`)).waitFor();
+    await game.getByText(new RegExp(`Bridge built from Your island to .* \\(simulated\\): ${cost} RF into the Docks pool`)).waitFor();
     await shot("bridge");
     for (let i = 0; i < 5; i++) await game.getByRole("button", { name: "Zoom out" }).click();
     await page.waitForTimeout(1500); await shot("world");
@@ -273,7 +273,7 @@ try {
     await town.getByText(/enrollment open · 10k RF \(first week: 7 days left\)/).waitFor();
     await page.waitForTimeout(4500);                               // trading fees accrue
     await town.getByRole("button", { name: "🌾 Harvest fees" }).click();
-    await game.getByText(/Harvested Dock Town \(simulated\): .* burned .* shared by Friends as allowances/).waitFor();
+    await game.getByText(/Harvested Dock Town \(simulated\): .* back into the pool · .* shared by Friends as allowances/).waitFor();
     // enrollment after the first week: vote for a new price, then pick it in the 24h vote
     await town.getByRole("button", { name: "Open at a different price" }).click();
     await town.getByRole("button", { name: "⏩ Skip the first week" }).click();
@@ -305,7 +305,7 @@ try {
     await game.getByText(/#7573 deployed to Island 2/).waitFor();
     await game.getByRole("button", { name: "Close My islands" }).click();
     await game.getByRole("button", { name: /Save · 1 moved · 20 RF/ }).click();
-    await game.getByText(/created Island #\d+ on chain · 1 Friend moved · 20 RF burned/).waitFor();
+    await game.getByText(/created Island #\d+ on chain · 1 Friend moved · 20 RF into /).waitFor();
     await shot("two-islands");
     // #7573 (saved on Island 2) leaves the wallet: its spot becomes a hole; it comes back and heals it
     await btn("More").click();

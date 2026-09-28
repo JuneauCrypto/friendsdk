@@ -5,7 +5,7 @@ import { IERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.
 import { SafeERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import { ReentrancyGuard } from "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
 import { DocksVillages, IDocksVillageTreasury } from "./DocksVillages.sol";
-import { DocksIslands } from "./DocksIslands.sol";
+import { DocksIslands, IDocksFeeSink } from "./DocksIslands.sol";
 
 /// @notice Permanent RF liquidity for a village. `provide` takes RF and keeps it as liquidity
 /// forever (there is deliberately no way to remove it); `collect` sends the trading fees earned
@@ -20,36 +20,49 @@ interface IDocksBuyback {
     function buyRf(uint256 wethIn, uint256 minRfOut, address to) external returns (uint256 rfOut);
 }
 
-/// @notice Village treasuries: permanent liquidity plus each member's RF allowance.
+/// @notice Village treasuries: permanent liquidity plus each member's RF allowance. Nothing is
+/// burned here: RF that comes in builds liquidity, whose trading fees buy more RF to build with.
 ///
-/// Every RF that comes into a village is split: half becomes permanent liquidity, half the
-/// allowance of whoever paid it. Founders' allowance is half of what they locked; an enrollee's
-/// is half of their fee. Allowances are spent only on items placed on the member's island in
-/// the village (DocksItems), and that RF goes to the village's liquidity too. When a member's
-/// island leaves, their unspent allowance goes to the liquidity. `harvest` collects the
-/// liquidity's trading fees, buys RF back with the WETH part, burns the village's burn share
-/// (half by default, set by vote) and shares the rest between members by Friend count.
-/// Nothing can be withdrawn.
-contract DocksVillageTreasury is IDocksVillageTreasury, ReentrancyGuard {
+/// - Fees (arranging, bridges, holes, token launches and claims, items, boosts, raffle tickets)
+///   all go to a permanent RF/ETH pool: the pool of the island's village, or the shared Docks
+///   pool (village 0) for islands in no village.
+/// - Flag RF when a village is founded: half liquidity, half founders' allowances (half of what
+///   each locked). Enrollment fees: half liquidity, half the enrollee's allowance. Allowances are
+///   spent only on items for the member's village island (DocksItems); that RF goes to the
+///   village's liquidity too. A member's unspent allowance goes to liquidity when they leave.
+/// - `harvest` collects a pool's trading fees and buys RF with the WETH part. `poolBpsOf` of
+///   it (half by default, set by village vote) goes back into the pool; the rest is shared
+///   between members by Friend count (for the Docks pool: the Docks build fund).
+/// - Platform fee: a share of every fee (not of flag locks), 0 to start, at most 5%, set by
+///   the platform address. Nothing else can be withdrawn.
+contract DocksVillageTreasury is IDocksVillageTreasury, IDocksFeeSink, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    address public constant BURN = 0x000000000000000000000000000000000000dEaD;
-    uint16 public constant DEFAULT_BURN_BPS = 5000; // half of every buyback burned
+    uint16 public constant DEFAULT_POOL_BPS = 5000; // half of every buyback back into the pool
+    uint16 public constant MAX_PLATFORM_FEE_BPS = 500; // 5%
+    uint256 public constant DOCKS_POOL = 0; // the shared pool of islands in no village
 
     error NotVillages();
     error NotItems();
     error NotMember();
     error NotFounded();
     error NoFunds();
+    error NotPlatform();
+    error FeeTooHigh();
+    error NotFeePayer();
+    error AlreadyInitialized();
 
     event VillageFunded(uint256 indexed villageId, uint256 allowances, uint256 liquidityRf);
     event Deposited(uint256 indexed villageId, address indexed wallet, uint256 allowance, uint256 queuedForLiquidity);
     event LiquidityQueued(uint256 indexed villageId, uint256 rf);
     event LiquidityAdded(uint256 indexed villageId, uint256 rf);
-    event Harvested(uint256 indexed villageId, uint256 rfFees, uint256 wethFees, uint256 rfBought, uint256 burned, uint256 shared);
+    event Harvested(uint256 indexed villageId, uint256 rfFees, uint256 wethFees, uint256 rfBought, uint256 toPool, uint256 shared);
+    event FeeReceived(uint256 indexed villageId, uint256 amount, uint256 platformCut);
+    event PlatformFeeSet(uint16 bps);
+    event PlatformSet(address platform);
     event AllowanceSpent(uint256 indexed villageId, address indexed wallet, uint256 amount);
     event Forfeited(uint256 indexed villageId, address indexed wallet, uint256 amount);
-    event BurnShareSet(uint256 indexed villageId, uint16 burnBps);
+    event PoolShareSet(uint256 indexed villageId, uint16 poolBps);
 
     IERC20 public immutable rf;
     IERC20 public immutable weth;
@@ -61,7 +74,12 @@ contract DocksVillageTreasury is IDocksVillageTreasury, ReentrancyGuard {
     mapping(uint256 villageId => bool) public funded;
     mapping(uint256 villageId => mapping(address wallet => uint256)) public credited; // beyond the founder half
     mapping(uint256 villageId => mapping(address wallet => uint256)) public spent;
-    mapping(uint256 villageId => uint16) private _burnBps; // stored +1 so 0 can mean "unset"
+    mapping(uint256 villageId => uint16) private _poolBps; // stored +1 so 0 can mean "unset"
+    uint256 public docksFund; // the Docks pool's share of its buybacks, for the shared space
+    address public platform;
+    uint16 public platformFeeBps;
+    address public launchpad;
+    address private immutable _deployer;
 
     constructor(IERC20 rf_, IERC20 weth_, DocksVillages villages_, IDocksLiquidity liquidity_, IDocksBuyback buyback_) {
         rf = rf_;
@@ -69,6 +87,39 @@ contract DocksVillageTreasury is IDocksVillageTreasury, ReentrancyGuard {
         villages = villages_;
         liquidity = liquidity_;
         buyback = buyback_;
+        platform = msg.sender;
+        _deployer = msg.sender;
+    }
+
+    /// @notice One-time wiring to the launchpad (deployed after this contract).
+    function initLaunchpad(address launchpad_) external {
+        if (msg.sender != _deployer || launchpad != address(0)) revert AlreadyInitialized();
+        launchpad = launchpad_;
+    }
+
+    /* ── platform fee: 0 to start, never above 5% ── */
+
+    function setPlatformFee(uint16 bps) external {
+        if (msg.sender != platform) revert NotPlatform();
+        if (bps > MAX_PLATFORM_FEE_BPS) revert FeeTooHigh();
+        platformFeeBps = bps;
+        emit PlatformFeeSet(bps);
+    }
+
+    function setPlatform(address platform_) external {
+        if (msg.sender != platform) revert NotPlatform();
+        platform = platform_;
+        emit PlatformSet(platform_);
+    }
+
+    /* ── fees ── */
+
+    /// @inheritdoc IDocksFeeSink
+    function onFee(uint256 islandId, uint256 amount) external {
+        if (msg.sender != address(villages.islands()) && msg.sender != launchpad && msg.sender != address(villages.items())) {
+            revert NotFeePayer();
+        }
+        _fee(villages.villageOf(islandId), amount);
     }
 
     modifier onlyVillages() {
@@ -97,6 +148,7 @@ contract DocksVillageTreasury is IDocksVillageTreasury, ReentrancyGuard {
 
     /// @inheritdoc IDocksVillageTreasury
     function deposit(uint256 villageId, address wallet, uint256 amount) external onlyVillages {
+        amount -= _platformCut(amount);
         uint256 half = amount / 2;
         credited[villageId][wallet] += half;
         pendingLiquidity[villageId] += amount - half;
@@ -112,9 +164,9 @@ contract DocksVillageTreasury is IDocksVillageTreasury, ReentrancyGuard {
     }
 
     /// @inheritdoc IDocksVillageTreasury
-    function setBurnBps(uint256 villageId, uint16 burnBps) external onlyVillages {
-        _burnBps[villageId] = burnBps + 1;
-        emit BurnShareSet(villageId, burnBps);
+    function setPoolBps(uint256 villageId, uint16 poolBps) external onlyVillages {
+        _poolBps[villageId] = poolBps + 1;
+        emit PoolShareSet(villageId, poolBps);
     }
 
     /// @notice An item bought with `wallet`'s allowance: its RF goes to the village's liquidity.
@@ -125,10 +177,9 @@ contract DocksVillageTreasury is IDocksVillageTreasury, ReentrancyGuard {
         emit AllowanceSpent(villageId, wallet, amount);
     }
 
-    /// @notice RF already sent here for a village's liquidity (items, tickets, boosts).
+    /// @notice RF already sent here for a village's liquidity (raffle tickets).
     function queueLiquidity(uint256 villageId, uint256 amount) external onlyItems {
-        pendingLiquidity[villageId] += amount;
-        emit LiquidityQueued(villageId, amount);
+        _fee(villageId, amount);
     }
 
     /// @notice Add the RF queued for a village to its permanent liquidity. Anyone.
@@ -138,12 +189,15 @@ contract DocksVillageTreasury is IDocksVillageTreasury, ReentrancyGuard {
         pendingLiquidity[villageId] = amount - _provide(villageId, amount);
     }
 
-    /// @notice Collect the village's trading fees, buy RF with the WETH part, burn the
-    /// village's burn share and share the rest between members by Friend count. Members only,
-    /// since they set the minimum RF the buyback must return.
-    function harvest(uint256 villageId, uint256 minRfOut) external nonReentrant returns (uint256 burned, uint256 shared) {
-        if (!funded[villageId]) revert NotFounded();
-        if (!villages.inVillage(villageId, msg.sender)) revert NotMember();
+    /// @notice Collect a pool's trading fees and buy RF with the WETH part: the pool share goes
+    /// back into the pool, the rest is shared between members by Friend count (the Docks pool's
+    /// goes to the Docks build fund). Members only for a village (they set the minimum RF the
+    /// buyback must return); anyone for the Docks pool.
+    function harvest(uint256 villageId, uint256 minRfOut) external nonReentrant returns (uint256 toPool, uint256 shared) {
+        if (villageId != DOCKS_POOL) {
+            if (!funded[villageId]) revert NotFounded();
+            if (!villages.inVillage(villageId, msg.sender)) revert NotMember();
+        }
         (uint256 rfFees, uint256 wethFees) = liquidity.collect(villageId, address(this));
         uint256 bought;
         if (wethFees > 0) {
@@ -151,10 +205,15 @@ contract DocksVillageTreasury is IDocksVillageTreasury, ReentrancyGuard {
             bought = buyback.buyRf(wethFees, minRfOut, address(this));
         }
         uint256 total = rfFees + bought;
-        burned = total * burnBpsOf(villageId) / 10_000;
-        if (burned > 0) rf.safeTransfer(BURN, burned);
-        shared = _share(villageId, total - burned);
-        emit Harvested(villageId, rfFees, wethFees, bought, burned, shared);
+        toPool = total * poolBpsOf(villageId) / 10_000;
+        pendingLiquidity[villageId] += toPool;
+        if (villageId == DOCKS_POOL) {
+            shared = total - toPool;
+            docksFund += shared;
+        } else {
+            shared = _share(villageId, total - toPool);
+        }
+        emit Harvested(villageId, rfFees, wethFees, bought, toPool, shared);
     }
 
     /// @dev Credits `amount` to members by Friend count; any rest (rounding, or nobody to
@@ -171,9 +230,20 @@ contract DocksVillageTreasury is IDocksVillageTreasury, ReentrancyGuard {
         pendingLiquidity[villageId] += amount - shared;
     }
 
-    function burnBpsOf(uint256 villageId) public view returns (uint16) {
-        uint16 b = _burnBps[villageId];
-        return b == 0 ? DEFAULT_BURN_BPS : b - 1;
+    function poolBpsOf(uint256 villageId) public view returns (uint16) {
+        uint16 b = _poolBps[villageId];
+        return b == 0 ? DEFAULT_POOL_BPS : b - 1;
+    }
+
+    function _fee(uint256 villageId, uint256 amount) private {
+        uint256 cut = _platformCut(amount);
+        pendingLiquidity[villageId] += amount - cut;
+        emit FeeReceived(villageId, amount, cut);
+    }
+
+    function _platformCut(uint256 amount) private returns (uint256 cut) {
+        cut = amount * platformFeeBps / 10_000;
+        if (cut > 0) rf.safeTransfer(platform, cut);
     }
 
     /// @dev Returns the RF actually used (any rounding dust stays queued).

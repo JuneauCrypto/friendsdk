@@ -42,8 +42,9 @@ contract DocksForkTest is Test {
         vm.skip(bytes(rpc).length == 0);
         vm.createSelectFork(rpc);
         IDocksGenerations gen = IDocksGenerations(GENERATIONS);
-        DocksIslands reg = new DocksIslands(gen, IERC20(RF));
-        DocksLaunchpad pad = new DocksLaunchpad(IERC20(RF), reg, new DocksVillages(IERC20(RF), reg, 1_000_000 ether, 30 days, 1000 ether, 10_000 ether), address(0x7EA));
+        (DocksIslands reg, DocksVillages vil, DocksVillageTreasury tre) = _stack();
+        DocksLaunchpad pad = new DocksLaunchpad(IERC20(RF), reg, vil, tre);
+        tre.initLaunchpad(address(pad));
 
         assertTrue(reg.isActive(67111));
         assertTrue(reg.isActive(7153));
@@ -51,7 +52,7 @@ contract DocksForkTest is Test {
 
         address a = gen.ownerOf(67111);
         address b = gen.ownerOf(7153);
-        _dock(reg, address(pad), a, b);
+        _dock(reg, tre, address(pad), a, b);
         DocksLaunchpad.LaunchParams memory p;
         p.name = "Market Coin";
         p.symbol = "MKT";
@@ -61,16 +62,31 @@ contract DocksForkTest is Test {
         p.claimEach = 100 ether;
         p.claimPrice = 1 ether;
         p.scope = DocksLaunchpad.Scope.IslandAndNeighbours;
+        uint256 docksPool = tre.pendingLiquidity(0);
         vm.prank(a);
         uint256 id = pad.launch(p);
         vm.prank(b);
         pad.claim(id, 7153);
+        assertEq(tre.pendingLiquidity(0) - docksPool, 1001 ether, "launch fee + claim price to the Docks pool");
         IERC20 t = IERC20(address(pad.launches(id).token));
         assertEq(t.balanceOf(gen.tokenBoundAccount(7153)), 100 ether);
         assertEq(t.balanceOf(gen.tokenBoundAccount(67111)), 990_000 ether);
     }
 
-    function _dock(DocksIslands reg, address pad, address a, address b) private returns (uint256 plotA, uint256 plotB) {
+    /// Islands, villages, the Uniswap liquidity and the treasury, wired together.
+    function _stack() private returns (DocksIslands reg, DocksVillages vil, DocksVillageTreasury tre) {
+        reg = new DocksIslands(IDocksGenerations(GENERATIONS), IERC20(RF));
+        vil = new DocksVillages(IERC20(RF), reg, 1_000_000 ether, 30 days, 1000 ether, 10_000 ether);
+        DocksUniV3Liquidity liq = new DocksUniV3Liquidity(
+            IERC20(RF), IERC20(WETH), IUniV3Factory(V3_FACTORY), IUniV3PositionManager(V3_POSITIONS), ISwapRouter02(SWAP_ROUTER02), 3000
+        );
+        tre = new DocksVillageTreasury(IERC20(RF), IERC20(WETH), vil, liq, liq);
+        vil.init(tre, IDocksVillageItems(address(0)));
+        reg.init(vil, tre);
+        liq.init(address(tre));
+    }
+
+    function _dock(DocksIslands reg, DocksVillageTreasury tre, address pad, address a, address b) private returns (uint256 plotA, uint256 plotB) {
         deal(RF, a, 2000 ether);
         deal(RF, b, 100 ether);
         uint256[] memory ids = new uint256[](1);
@@ -81,18 +97,18 @@ contract DocksForkTest is Test {
         IERC20(RF).approve(address(reg), type(uint256).max);
         IERC20(RF).approve(address(pad), type(uint256).max);
         plotA = reg.create("Market");
-        uint256 burnBefore = IERC20(RF).balanceOf(reg.BURN());
-        reg.arrange(plotA, ids, xs, ys); // Gen 2: burns 50 RF
+        uint256 before = tre.pendingLiquidity(0);
+        reg.arrange(plotA, ids, xs, ys); // Gen 2: 50 RF, to the Docks pool
         reg.dock(plotA, 0, 0);
         vm.stopPrank();
-        assertEq(IERC20(RF).balanceOf(reg.BURN()) - burnBefore, 50 ether);
+        assertEq(tre.pendingLiquidity(0) - before, 50 ether);
         ids[0] = 7153;
         xs[0] = 0; // its own island's grid
         vm.startPrank(b);
         IERC20(RF).approve(address(reg), type(uint256).max);
         IERC20(RF).approve(address(pad), type(uint256).max);
         plotB = reg.create("Reading Row");
-        reg.arrange(plotB, ids, xs, ys); // Gen 3: burns 20 RF
+        reg.arrange(plotB, ids, xs, ys); // Gen 3: 20 RF
         reg.dock(plotB, 1, 0); // loading zone next to the Market island
         vm.stopPrank();
         assertTrue(reg.connected(plotA, plotB));
@@ -100,26 +116,20 @@ contract DocksForkTest is Test {
     }
 
     /// A village founded on the real chain: its liquidity half goes one-sided into a real
-    /// Uniswap v3 RF/WETH pool, traders buy through it, and the harvest buys back and burns RF.
+    /// Uniswap v3 RF/WETH pool, traders buy through it, and the harvest buys back RF: half back
+    /// into the pool, half shared by Friends.
     function testForkVillageOnUniswap() public {
         string memory rpc = vm.envOr("FRIENDSDK_FORK_RPC", string(""));
         vm.skip(bytes(rpc).length == 0);
         vm.createSelectFork(rpc);
         IDocksGenerations gen = IDocksGenerations(GENERATIONS);
-        DocksIslands reg = new DocksIslands(gen, IERC20(RF));
-        DocksVillages vil = new DocksVillages(IERC20(RF), reg, 1_000_000 ether, 30 days, 1000 ether, 10_000 ether);
-        DocksUniV3Liquidity liq = new DocksUniV3Liquidity(
-            IERC20(RF), IERC20(WETH), IUniV3Factory(V3_FACTORY), IUniV3PositionManager(V3_POSITIONS), ISwapRouter02(SWAP_ROUTER02), 3000
-        );
-        DocksVillageTreasury tre = new DocksVillageTreasury(IERC20(RF), IERC20(WETH), vil, liq, liq);
-        vil.init(tre, IDocksVillageItems(address(0)));
-        reg.init(vil);
-        liq.init(address(tre));
+        (DocksIslands reg, DocksVillages vil, DocksVillageTreasury tre) = _stack();
+        DocksUniV3Liquidity liq = DocksUniV3Liquidity(address(tre.liquidity()));
 
         address pool = _seedPool();
         address a = gen.ownerOf(67111);
         address b = gen.ownerOf(7153);
-        (uint256 plotA, uint256 plotB) = _dock(reg, address(0xBEEF), a, b);
+        (uint256 plotA, uint256 plotB) = _dock(reg, tre, address(0xBEEF), a, b);
 
         deal(RF, a, 400_000 ether);
         vm.startPrank(a);
@@ -162,13 +172,13 @@ contract DocksForkTest is Test {
     }
 
     function _harvest(DocksVillageTreasury tre, uint256 v, address a, address b) private {
-        uint256 burnBefore = IERC20(RF).balanceOf(tre.BURN());
+        uint256 pool = tre.pendingLiquidity(v);
         uint256 before = tre.allowanceOf(v, a) + tre.allowanceOf(v, b);
         vm.prank(a);
-        (uint256 burned, uint256 shared) = tre.harvest(v, 1);
-        assertGt(burned, 0, "fees bought back RF and burned half");
-        assertApproxEqAbs(burned, shared, 2);
-        assertEq(IERC20(RF).balanceOf(tre.BURN()) - burnBefore, burned);
+        (uint256 toPool, uint256 shared) = tre.harvest(v, 1);
+        assertGt(toPool, 0, "fees bought back RF: half back into the pool");
+        assertApproxEqAbs(toPool, shared, 2);
+        assertApproxEqAbs(tre.pendingLiquidity(v) - pool, toPool, 2); // plus rounding dust
         assertEq(tre.allowanceOf(v, a) + tre.allowanceOf(v, b), before + shared, "the rest shared by Friends");
     }
 

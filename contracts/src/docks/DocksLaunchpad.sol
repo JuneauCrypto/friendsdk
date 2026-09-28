@@ -5,7 +5,7 @@ import { IERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.
 import { ERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
 import { SafeERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import { ReentrancyGuard } from "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
-import { DocksIslands, IDocksGenerations } from "./DocksIslands.sol";
+import { DocksIslands, IDocksGenerations, IDocksFeeSink } from "./DocksIslands.sol";
 import { DocksVillages } from "./DocksVillages.sol";
 
 /// @notice Fixed-supply token launched from an island. No owner, no minting after launch.
@@ -17,9 +17,10 @@ contract DocksToken is ERC20 {
     }
 }
 
-/// @notice Launch a token from your island (DocksIslands) for 1,000 RF (half burned, half to the treasury),
+/// @notice Launch a token from your island (DocksIslands) for 1,000 RF (to the pool of the island's
+/// village, or the shared Docks pool),
 /// airdrop it into Friend wallets and/or open a claim pool. Every claim costs the launch's
-/// RF claim price, which is burned. Tokens always land in the Friend's own wallet.
+/// RF claim price, which goes to the same pool. Tokens always land in the Friend's own wallet.
 /// @dev Airdrops and claims are sent in batches (`airdrop`, `claimMany`) so they scale to
 /// islands and docks of any size; eligibility is checked per Friend when each batch lands.
 contract DocksLaunchpad is ReentrancyGuard {
@@ -62,7 +63,6 @@ contract DocksLaunchpad is ReentrancyGuard {
     }
 
     uint256 public constant LAUNCH_FEE = 1000 ether;
-    address public constant BURN = 0x000000000000000000000000000000000000dEaD;
 
     error NotHolder();
     error NotDocked();
@@ -83,19 +83,19 @@ contract DocksLaunchpad is ReentrancyGuard {
         uint256 claimPrice
     );
     event Airdropped(uint256 indexed launchId, uint256 indexed friendId, uint256 amount);
-    event Claimed(uint256 indexed launchId, uint256 indexed friendId, uint256 amount, uint256 rfBurned);
+    event Claimed(uint256 indexed launchId, uint256 indexed friendId, uint256 amount, uint256 rfPaid);
 
     IERC20 public immutable rf;
     DocksIslands public immutable registry;
     IDocksGenerations public immutable generations;
     DocksVillages public immutable villages;
-    address public immutable treasury;
+    IDocksFeeSink public immutable treasury;
 
     Launch[] private _launches;
     mapping(uint256 launchId => mapping(uint256 friendId => bool)) public claimed;
     mapping(uint256 launchId => mapping(uint256 friendId => bool)) public airdropped;
 
-    constructor(IERC20 rf_, DocksIslands registry_, DocksVillages villages_, address treasury_) {
+    constructor(IERC20 rf_, DocksIslands registry_, DocksVillages villages_, IDocksFeeSink treasury_) {
         rf = rf_;
         registry = registry_;
         villages = villages_;
@@ -116,8 +116,9 @@ contract DocksLaunchpad is ReentrancyGuard {
             revert BadAllocation();
         }
 
-        rf.safeTransferFrom(msg.sender, BURN, LAUNCH_FEE / 2);
-        rf.safeTransferFrom(msg.sender, treasury, LAUNCH_FEE - LAUNCH_FEE / 2);
+        uint256 creatorIsland = registry.islandOf(p.creatorFriendId);
+        rf.safeTransferFrom(msg.sender, address(treasury), LAUNCH_FEE);
+        treasury.onFee(creatorIsland, LAUNCH_FEE);
 
         DocksToken token = new DocksToken(p.name, p.symbol, p.supply);
         address creator = generations.ownerOf(p.creatorFriendId);
@@ -195,7 +196,7 @@ contract DocksLaunchpad is ReentrancyGuard {
             emit Claimed(launchId, id, l.claimEach, l.claimPrice);
             ++made;
         }
-        if (made > 0 && l.claimPrice > 0) rf.safeTransferFrom(msg.sender, BURN, made * l.claimPrice);
+        if (made > 0 && l.claimPrice > 0) _fee(l.creatorIslandId, made * l.claimPrice);
     }
 
     /// @notice Claim for a docked Friend you hold (from your wallet or the Friend's wallet).
@@ -209,7 +210,7 @@ contract DocksLaunchpad is ReentrancyGuard {
 
         claimed[launchId][friendId] = true;
         l.claimRemaining -= l.claimEach;
-        if (l.claimPrice > 0) rf.safeTransferFrom(msg.sender, BURN, l.claimPrice);
+        if (l.claimPrice > 0) _fee(l.creatorIslandId, l.claimPrice);
         IERC20(address(l.token)).safeTransfer(_wallet(friendId), l.claimEach);
         emit Claimed(launchId, friendId, l.claimEach, l.claimPrice);
     }
@@ -232,6 +233,12 @@ contract DocksLaunchpad is ReentrancyGuard {
         if (scope == Scope.IslandAndNeighbours) return registry.connected(island, l.creatorIslandId);
         if (scope == Scope.Village) return villages.sameVillage(island, l.creatorIslandId);
         return registry.canVisit(l.creatorIslandId, generations.ownerOf(friendId));
+    }
+
+    /// @dev Claim prices go to the pool of the launching island's village (or the Docks pool).
+    function _fee(uint256 islandId, uint256 amount) private {
+        rf.safeTransferFrom(msg.sender, address(treasury), amount);
+        treasury.onFee(islandId, amount);
     }
 
     function launchCount() external view returns (uint256) {

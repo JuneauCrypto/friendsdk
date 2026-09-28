@@ -27,6 +27,12 @@ interface IDocksPlacementGate {
     function onLeave(uint256 friendId, uint256 islandId) external;
 }
 
+/// @dev Where every fee goes (DocksVillageTreasury): the RF was just sent to it; it adds it to
+/// the pool of the island's village, or the shared Docks pool.
+interface IDocksFeeSink {
+    function onFee(uint256 islandId, uint256 amount) external;
+}
+
 /// @notice The Docks: floating islands made of activated Rare Friends.
 ///
 /// The only NFTs are the activated Rare Friends. An island is not a token and can't be sold
@@ -35,8 +41,10 @@ interface IDocksPlacementGate {
 /// - Island: the creator's Friends laid out on the island's own grid of 4x4-tile cells (each
 ///   Friend covers its land at true size: Gen 1 8x8 cells ... Gen 6 1x1). A Friend is on at
 ///   most one island; a holder can deploy their Friends across as many islands as they like.
-/// - Arranging is the core action and is paid in RF: saving burns RF for every Friend whose
+/// - Arranging is the core action and is paid in RF: saving pays RF for every Friend whose
 ///   spot changes (new to the island or moved), by generation. Unmoved Friends are free.
+///   Every fee goes to a permanent RF/ETH pool (the island's village's, or the shared Docks
+///   pool) rather than being burned.
 /// - Holes: if a saved Friend leaves the wallet (a transfer also clears its activation) or is
 ///   deactivated, its spot becomes a hole in the island. The hole stays, reserved, until the
 ///   same Friend returns and is active again (it heals by itself, free) or the owner fills it
@@ -44,7 +52,7 @@ interface IDocksPlacementGate {
 /// - Docking: islands float on one shared berth grid, one island per berth whatever its size,
 ///   so the world grows with the number of islands. Dock at a free berth next to another
 ///   island (a loading zone); islands on neighbouring berths are connected. Gas only.
-/// - Bridges: link your island to one you can't dock next to, for RF burned per berth of
+/// - Bridges: link your island to one you can't dock next to, for RF paid per berth of
 ///   distance. A bridge lasts until either island moves.
 /// - Access: each island is open or invite-only with approved visitors.
 /// - Gone Friends: anyone can burn the hole of a placed Friend that is no longer valid
@@ -75,14 +83,14 @@ contract DocksIslands {
     }
 
     address public constant BURN = 0x000000000000000000000000000000000000dEaD;
-    /// @notice RF burned per Friend moved on its island, by generation (Gen 1 ... Gen 6).
+    /// @notice RF paid per Friend moved on its island, by generation (Gen 1 ... Gen 6).
     uint256 public constant FEE_GEN1 = 100 ether;
     uint256 public constant FEE_GEN2 = 50 ether;
     uint256 public constant FEE_GEN3 = 20 ether;
     uint256 public constant FEE_GEN4 = 10 ether;
     uint256 public constant FEE_GEN5 = 5 ether;
     uint256 public constant FEE_GEN6 = 1 ether;
-    /// @notice RF burned per berth of distance a bridge spans.
+    /// @notice RF paid per berth of distance a bridge spans.
     uint256 public constant BRIDGE_FEE_PER_BERTH = 10 ether;
 
     error NotIslandOwner();
@@ -102,14 +110,14 @@ contract DocksIslands {
     error AlreadyInitialized();
 
     event IslandCreated(uint256 indexed islandId, address indexed owner, string name);
-    event Arranged(uint256 indexed islandId, uint256 moved, uint256 rfBurned);
+    event Arranged(uint256 indexed islandId, uint256 moved, uint256 rfPaid);
     event Placed(uint256 indexed friendId, uint256 indexed islandId, int32 x, int32 y);
     event Removed(uint256 indexed friendId, uint256 indexed islandId);
     event HoleBurned(uint256 indexed islandId, uint256 indexed friendId, int32 x, int32 y);
     event HoleFilled(uint256 indexed islandId, uint256 indexed oldFriendId, uint256 indexed newFriendId);
     event Docked(uint256 indexed islandId, int32 x, int32 y);
     event Undocked(uint256 indexed islandId);
-    event BridgeBuilt(uint256 indexed from, uint256 indexed to, uint256 rfBurned);
+    event BridgeBuilt(uint256 indexed from, uint256 indexed to, uint256 rfPaid);
     event IslandUpdated(uint256 indexed islandId, string name, bool inviteOnly);
     event VisitorSet(uint256 indexed islandId, address indexed visitor, bool approved);
     event VisitRequested(uint256 indexed islandId, address indexed visitor);
@@ -136,6 +144,7 @@ contract DocksIslands {
     mapping(bytes32 pair => uint128 epochs) private _bridge;
 
     IDocksPlacementGate public gate;
+    IDocksFeeSink public fees;
     address private immutable _deployer;
 
     constructor(IDocksGenerations generations_, IERC20 rf_) {
@@ -145,9 +154,10 @@ contract DocksIslands {
     }
 
     /// @notice One-time wiring to DocksVillages (deployed after this contract). No other admin.
-    function init(IDocksPlacementGate gate_) external {
+    function init(IDocksPlacementGate gate_, IDocksFeeSink fees_) external {
         if (msg.sender != _deployer || address(gate) != address(0)) revert AlreadyInitialized();
         gate = gate_;
+        fees = fees_;
     }
 
     /* ── islands (not tokens: they belong to the wallet that made them) ── */
@@ -182,12 +192,12 @@ contract DocksIslands {
 
     /* ── arranging (the core action) ── */
 
-    /// @notice RF burned per Friend moved, by generation.
+    /// @notice RF paid per Friend moved, by generation.
     function feeOf(uint256 friendId) public view returns (uint256) {
         return _fee(generations.generation(friendId));
     }
 
-    /// @notice The RF an `arrange` call would burn (Friends whose spot would change).
+    /// @notice The RF an `arrange` call would cost (Friends whose spot would change).
     function arrangeCost(
         uint256 islandId,
         uint256[] calldata friendIds,
@@ -205,14 +215,14 @@ contract DocksIslands {
 
     /// @notice Save island positions for Friends you hold on an island you own (also deploys a
     /// Friend from another of your islands, or brings in a Friend that was on someone else's
-    /// island, which burns a hole there). Friends whose spot changes burn their generation's
+    /// island, which burns a hole there). Friends whose spot changes pay their generation's
     /// fee; the rest are free. Cells vacated earlier in the call can be reused.
     function arrange(
         uint256 islandId,
         uint256[] calldata friendIds,
         int32[] calldata xs,
         int32[] calldata ys
-    ) external returns (uint256 burned) {
+    ) external returns (uint256 paid) {
         _onlyOwner(islandId);
         if (friendIds.length != xs.length || friendIds.length != ys.length) revert LengthMismatch();
         uint256 moved;
@@ -223,15 +233,15 @@ contract DocksIslands {
             if (!isActive(id)) revert NotActive();
             if (!_changes(islandId, id, xs[i], ys[i])) continue;
             changed[i] = true;
-            burned += feeOf(id);
+            paid += feeOf(id);
             ++moved;
             _leave(id, false);
         }
         for (uint256 i; i < friendIds.length; ++i) {
             if (changed[i]) _place(islandId, friendIds[i], xs[i], ys[i]);
         }
-        if (burned > 0) rf.safeTransferFrom(msg.sender, BURN, burned);
-        emit Arranged(islandId, moved, burned);
+        _charge(islandId, paid);
+        emit Arranged(islandId, moved, paid);
     }
 
     /// @notice Take Friends you hold off their islands. Free. (A Friend you hold, taken off
@@ -259,17 +269,17 @@ contract DocksIslands {
     /// pays its normal arrange fee.
     function fillHole(uint256 islandId, uint256 oldFriendId, uint256 newFriendId)
         external
-        returns (uint256 burned)
+        returns (uint256 paid)
     {
         _onlyOwner(islandId);
         if (generations.ownerOf(newFriendId) != msg.sender) revert NotHolder();
         if (!isActive(newFriendId)) revert NotActive();
         (int32 x, int32 y, uint8 gen) = _takeHole(islandId, oldFriendId);
         if (generations.generation(newFriendId) != gen) revert WrongSize();
-        if (newFriendId != oldFriendId) burned = _fee(gen);
+        if (newFriendId != oldFriendId) paid = _fee(gen);
         _leave(newFriendId, false);
         _place(islandId, newFriendId, x, y);
-        if (burned > 0) rf.safeTransferFrom(msg.sender, BURN, burned);
+        _charge(islandId, paid);
         emit HoleFilled(islandId, oldFriendId, newFriendId);
     }
 
@@ -317,7 +327,7 @@ contract DocksIslands {
         return v == 0 ? 0 : v - 1;
     }
 
-    /* ── bridges (RF burned per berth of distance) ── */
+    /* ── bridges (RF per berth of distance) ── */
 
     function bridgeCost(uint256 from, uint256 to) public view returns (uint256) {
         Berth storage a = berthOf[from];
@@ -326,13 +336,13 @@ contract DocksIslands {
         return _distance(a, b) * BRIDGE_FEE_PER_BERTH;
     }
 
-    function buildBridge(uint256 from, uint256 to) external returns (uint256 burned) {
+    function buildBridge(uint256 from, uint256 to) external returns (uint256 paid) {
         _onlyOwner(from);
         if (connected(from, to) || from == to) revert AlreadyConnected();
-        burned = bridgeCost(from, to);
+        paid = bridgeCost(from, to);
         _bridge[_pair(from, to)] = _epochs(from, to);
-        rf.safeTransferFrom(msg.sender, BURN, burned);
-        emit BridgeBuilt(from, to, burned);
+        _charge(from, paid);
+        emit BridgeBuilt(from, to, paid);
     }
 
     function hasBridge(uint256 a, uint256 b) public view returns (bool) {
@@ -431,6 +441,18 @@ contract DocksIslands {
     }
 
     /* ── internals ── */
+
+    /// @dev A fee: to the pool of the island's village or the shared Docks pool. Burned only
+    /// while the contracts aren't wired together yet (before `init`).
+    function _charge(uint256 islandId, uint256 amount) private {
+        if (amount == 0) return;
+        if (address(fees) == address(0)) {
+            rf.safeTransferFrom(msg.sender, BURN, amount);
+            return;
+        }
+        rf.safeTransferFrom(msg.sender, address(fees), amount);
+        fees.onFee(islandId, amount);
+    }
 
     function _onlyOwner(uint256 islandId) private view {
         if (ownerOf[islandId] != msg.sender) revert NotIslandOwner();

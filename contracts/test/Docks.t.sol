@@ -169,9 +169,10 @@ contract DocksTest is Test {
         (prices[0], prices[1], prices[2]) = (1000 ether, 10_000 ether, 50_000 ether); // lantern, stall, tower
         (builds[0], builds[1], builds[2]) = (1 hours, 1 days, 7 days);
         items = new DocksItems(IERC20(address(rf)), vil, dice, address(0xD1CE), 100 ether, 36, prices, builds);
-        reg.init(vil);
+        reg.init(vil, tre);
         vil.init(tre, items);
-        pad = new DocksLaunchpad(IERC20(address(rf)), reg, vil, treasury);
+        pad = new DocksLaunchpad(IERC20(address(rf)), reg, vil, tre);
+        tre.initLaunchpad(address(pad));
         _friend(1, alice);
         _friend(2, alice);
         _friend(3, alice);
@@ -210,8 +211,10 @@ contract DocksTest is Test {
         reg.arrange(plotOf[who], _one(id), _i(x), _i(y));
     }
 
+    /// Fees from islands in no village: the shared Docks pool (nothing is burned any more).
     function _burned() internal view returns (uint256) {
-        return rf.balanceOf(reg.BURN());
+        assertEq(rf.balanceOf(reg.BURN()), 0, "nothing burned");
+        return tre.pendingLiquidity(0);
     }
 
     function _dock(address who, int32 bx, int32 by) internal {
@@ -539,8 +542,7 @@ contract DocksTest is Test {
         uint256 rfBefore = rf.balanceOf(alice);
         vm.prank(alice);
         uint256 id = pad.launch(p);
-        assertEq(_burned() - burnBefore, 500 ether);
-        assertEq(rf.balanceOf(treasury), 500 ether);
+        assertEq(_burned() - burnBefore, 1000 ether, "the launch fee goes to the Docks pool");
         assertEq(rfBefore - rf.balanceOf(alice), 1000 ether);
         IERC20 t = IERC20(address(pad.launches(id).token));
         assertEq(t.balanceOf(gen.tokenBoundAccount(1)), 1_000_000 ether - 1000 ether - 100_000 ether);
@@ -809,7 +811,7 @@ contract DocksTest is Test {
         assertEq(liq.provided(v), 500_000 ether, "half to permanent liquidity");
         assertEq(tre.allowanceOf(v, alice), 200_000 ether, "half of what each locked is their allowance");
         assertEq(tre.allowanceOf(v, bob), 150_000 ether);
-        assertEq(rf.balanceOf(address(tre)), 500_000 ether);
+        assertEq(rf.balanceOf(address(tre)), 500_000 ether + tre.pendingLiquidity(0), "allowances + the Docks pool's arrange fees");
         assertEq(rf.balanceOf(address(vil)), 0, "nothing left to withdraw");
         assertEq(vil.enrollPrice(v), ENROLL, "open enrollment for the first week");
         vm.expectRevert(DocksVillages.NotRising.selector);
@@ -1078,28 +1080,59 @@ contract DocksTest is Test {
         assertEq(vil.enrollPrice(v), 0);
     }
 
-    function testHarvestSharesByFriendsAndTheBurnShareIsVoted() public {
+    function testPlatformFeeStartsAtZeroAndIsCappedAtFivePercent() public {
+        assertEq(tre.platformFeeBps(), 0);
+        vm.prank(alice);
+        vm.expectRevert(DocksVillageTreasury.NotPlatform.selector);
+        tre.setPlatformFee(100);
+        vm.expectRevert(DocksVillageTreasury.FeeTooHigh.selector);
+        tre.setPlatformFee(501);
+        address platform = address(0x9A7F);
+        tre.setPlatform(platform);
+        vm.prank(platform);
+        tre.setPlatformFee(500);
+        uint256 pool = _burned();
+        _friend(4, alice);
+        gen.setGen(4, 3); // 20 RF to place
+        _place(alice, 4, 0, 0);
+        assertEq(rf.balanceOf(platform), 1 ether, "5% of the fee");
+        assertEq(_burned() - pool, 19 ether, "the rest to the pool");
+        vm.expectRevert(DocksVillageTreasury.NotFeePayer.selector);
+        tre.onFee(1, 1 ether);
+    }
+
+    function testDocksPoolHarvestFillsTheBuildFund() public {
+        _place(alice, 1, 0, 0);
+        liq.setFees(100 ether, 0);
+        vm.prank(carol);
+        (uint256 toPool, uint256 shared) = tre.harvest(0, 0); // anyone, for the shared pool
+        assertEq(toPool, 50 ether);
+        assertEq(tre.docksFund(), 50 ether);
+        assertEq(shared, 50 ether);
+    }
+
+    function testHarvestSharesByFriendsAndThePoolShareIsVoted() public {
         uint256 v = _village();
         _bring(bob, v);
         liq.setFees(1000 ether, 2 ether); // 2 WETH buys 2,000 RF -> 3,000 RF
         vm.prank(carol);
         vm.expectRevert(DocksVillageTreasury.NotMember.selector);
         tre.harvest(v, 0);
-        uint256 burned = _burned();
+        uint256 pool = tre.pendingLiquidity(v);
         vm.prank(bob);
-        (uint256 b, uint256 shared) = tre.harvest(v, 2000 ether);
-        assertEq(b, 1500 ether);
+        (uint256 toPool, uint256 shared) = tre.harvest(v, 2000 ether);
+        assertEq(toPool, 1500 ether, "half back into the pool");
         assertEq(shared, 1500 ether);
-        assertEq(_burned() - burned, 1500 ether);
+        assertEq(tre.pendingLiquidity(v) - pool, 1500 ether);
         assertEq(tre.allowanceOf(v, alice), 200_000 ether + 1000 ether, "2 of 3 Friends");
         assertEq(tre.allowanceOf(v, bob), 300_000 ether + 500 ether);
         vm.prank(bob);
-        uint256 share = vil.proposeBurnShare(v, 2500);
+        uint256 share = vil.proposePoolShare(v, 2500);
         vm.prank(bob);
         vil.vote(share, 1);
         vm.warp(block.timestamp + 3 days);
         vil.settle(share);
-        assertEq(tre.burnBpsOf(v), 2500);
+        assertEq(tre.poolBpsOf(v), 2500);
     }
 
     /* ── items ── */
@@ -1145,7 +1178,7 @@ contract DocksTest is Test {
         uint256 burned = _burned();
         vm.prank(carol);
         uint256 lantern = items.buy(0, plotOf[carol], 0, 0);
-        assertEq(_burned() - burned, 1000 ether, "no village: burned");
+        assertEq(_burned() - burned, 1000 ether, "no village: the Docks pool");
         vm.prank(carol);
         items.takeOff(lantern);
         vm.prank(carol);

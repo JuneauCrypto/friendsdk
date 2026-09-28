@@ -15,7 +15,7 @@ interface IDocksVillageTreasury {
     function deposit(uint256 villageId, address wallet, uint256 amount) external;
     /// @dev `wallet`'s island left: its unspent allowance goes to the village's liquidity.
     function forfeit(uint256 villageId, address wallet) external;
-    function setBurnBps(uint256 villageId, uint16 burnBps) external;
+    function setPoolBps(uint256 villageId, uint16 poolBps) external;
 }
 
 /// @notice Village items (DocksItems) as seen by DocksVillages.
@@ -30,7 +30,7 @@ interface IDocksVillageItems {
 /// Anyone can lock more until it reaches `flagTarget` (e.g. 1,000,000 RF). Every locker gets a
 /// soulbound founder mark recording what they locked. Not full by the deadline: everyone can
 /// take their RF back. Full: `found` (anyone) sends it all to the village treasury: half
-/// becomes permanent liquidity, half the members' allowances. Nothing can be withdrawn after.
+/// becomes permanent liquidity, half the founders' allowances. Nothing can be withdrawn after.
 ///
 /// People. Everyone brings one island (one per wallet; a wallet's other islands can be in
 /// other villages, one village per island): the planter's is the seat; founders bring theirs
@@ -50,7 +50,7 @@ interface IDocksVillageItems {
 /// Votes. Every Friend on a member's island is one vote, and founders multiply theirs by
 /// (1 + their share of the pool): power = Friends × (1 + locked / pool). Enrollment fees grow
 /// the pool, so every newcomer dilutes founder shares a little while adding their own Friends.
-///  - The buyback burn share: yes/no, VOTE_PERIOD, yes > no with QUORUM_BPS of all power voting.
+///  - The pool share of buybacks (the rest fills allowances): yes/no, VOTE_PERIOD, yes > no with QUORUM_BPS of all power voting.
 ///  - Enrollment (starts at founding and ends with the open window; any member can start one
 ///    later): keep open at the current price · change the price · close now · cap the
 ///    population. Changing the price or setting a cap closes enrollment until a
@@ -69,7 +69,7 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
     uint256 private constant BPS = 10_000;
 
     enum Kind {
-        BurnShare,
+        PoolShare,
         Enrollment,
         EnrollPrice,
         EnrollCap
@@ -111,7 +111,7 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
         Kind kind;
         uint64 ends;
         bool settled;
-        uint256[3] options; // BurnShare: bps · EnrollPrice / EnrollCap: the three choices
+        uint256[3] options; // PoolShare: bps · EnrollPrice / EnrollCap: the three choices
         uint256[4] tally; // yes/no: [no, yes]; enrollment: per choice
     }
 
@@ -367,14 +367,15 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
 
     /* ── votes ── */
 
-    /// @notice Propose a new share of each buyback to burn (the rest fills allowances).
-    function proposeBurnShare(uint256 villageId, uint16 burnBps) external returns (uint256 proposalId) {
+    /// @notice Propose a new share of each buyback to put back into the pool (the rest fills
+    /// allowances).
+    function proposePoolShare(uint256 villageId, uint16 poolBps) external returns (uint256 proposalId) {
         if (!_villages[villageId].founded) revert NotFounded();
         if (islandOf[villageId][msg.sender] == 0) revert NotInVillage();
-        if (burnBps > BPS) revert BadProposal();
+        if (poolBps > BPS) revert BadProposal();
         uint256[3] memory opts;
-        opts[0] = burnBps;
-        return _propose(villageId, Kind.BurnShare, opts, VOTE_PERIOD);
+        opts[0] = poolBps;
+        return _propose(villageId, Kind.PoolShare, opts, VOTE_PERIOD);
     }
 
     /// @notice Start an enrollment vote (keep open · change price · close now · close at a
@@ -411,9 +412,9 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
         p.settled = true;
         uint256 id = p.villageId;
         Village storage v = _villages[id];
-        if (p.kind == Kind.BurnShare) {
+        if (p.kind == Kind.PoolShare) {
             winner = passed(proposalId) ? 1 : 0;
-            if (winner == 1) treasury.setBurnBps(id, uint16(p.options[0]));
+            if (winner == 1) treasury.setPoolBps(id, uint16(p.options[0]));
         } else {
             winner = _plurality(p);
             v.enrollVote = 0;

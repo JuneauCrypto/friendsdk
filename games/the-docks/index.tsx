@@ -15,7 +15,7 @@ import {
 } from "./world.js";
 import { DocksView, clampZoom, spawnOn, type CrewMember, type ViewApi } from "./view.js";
 import { ChainMap } from "./chainmap.js";
-import { LAUNCH_FEE, SCOPES, claimAll, createEconomy, eligibleFriends, fmt, launch, seedLaunch, type Economy, type Launch, type Scope } from "./launch.js";
+import { LAUNCH_FEE, PLATFORM_FEE_BPS, SCOPES, poolName, toPool, claimAll, createEconomy, eligibleFriends, fmt, launch, seedLaunch, type Economy, type Launch, type Scope } from "./launch.js";
 import * as VX from "./villages.js";
 import type { Item, Proposal } from "./world.js";
 
@@ -206,11 +206,11 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     const w = world.current!, pl = myPlots(w).flatMap(q => q.friends).find(x => x.m.id === id);
     if (!pl) return;
     const cost = id === h.id ? 0 : feeOf(pl.m);
-    if (econ.current.rf < cost) { say(`Filling this hole burns ${cost} RF; you have ${fmt(econ.current.rf)}.`); return; }
+    if (econ.current.rf < cost) { say(`Filling this hole costs ${cost} RF; you have ${fmt(econ.current.rf)}.`); return; }
     if (!fillHole(w, p, h, pl.m)) { say("Holes can only be filled by a Friend of the same generation."); return; }
-    econ.current.rf -= cost; econ.current.burned += cost;
+    econ.current.rf -= cost; toPool(econ.current, w, p, cost);
     savedRef.current.set(id, { plot: p.id, x: h.x, y: h.y });
-    bump(); say(`Hole on ${p.name} filled with #${id} (simulated)${cost ? `: ${cost} RF burned` : ": free"} + gas.`);
+    bump(); say(`Hole on ${p.name} filled with #${id} (simulated)${cost ? `: ${cost} RF into ${poolName(w, p)}` : ": free"} + gas.`);
   }
   /** Preview only: pretend a Friend was sent to another wallet (or brought back), to see what happens. */
   function previewSend(id: bigint) {
@@ -419,7 +419,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     }
     setArranging(false); setSelected([]); goTo(home()); bump();
   }
-  /** Save every changed island on chain (simulated): create islands as needed, burn RF per Friend moved. */
+  /** Save every changed island on chain (simulated): create islands as needed, pay RF per Friend moved into each island's pool. */
   async function saveOnChain() {
     const w = world.current!;
     for (const p of myPlots(w)) {
@@ -428,16 +428,18 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     }
     const c = pendingChanges(w, savedRef.current);
     if (!c.moved.length && !c.gone.length) { say("Nothing to save: your islands match the chain."); return; }
-    if (econ.current.rf < c.rf) { say(`Saving burns ${fmt(c.rf)} RF; you have ${fmt(econ.current.rf)}.`); return; }
+    if (econ.current.rf < c.rf) { say(`Saving costs ${fmt(c.rf)} RF; you have ${fmt(econ.current.rf)}.`); return; }
     setSaving(true);
     await new Promise(r => setTimeout(r, 900));               // stands in for wallet confirmation + receipt
     const minted: number[] = [];
     for (const p of myPlots(w)) if (p.friends.length && !onChain.current.has(p.id)) { const n = 1 + Math.floor(Math.random() * 900); onChain.current.set(p.id, n); minted.push(n); }
-    econ.current.rf -= c.rf; econ.current.burned += c.rf;
+    econ.current.rf -= c.rf;
+    for (const pl of c.moved) toPool(econ.current, w, plotOf(w, pl.m.id), feeOf(pl.m));
+    const pools = [...new Set(c.moved.map(pl => poolName(w, plotOf(w, pl.m.id))))];
     savedRef.current = new Map(myPlots(w).flatMap(p => p.friends.map(pl => [pl.m.id, { plot: p.id, x: pl.x, y: pl.y }] as const)));
     setSaving(false); setArranging(false); setSelected([]);
     const txs = Math.max(1, c.plots.length, Math.ceil(c.moved.length / 100));
-    say(`Saved on chain (simulated)${minted.length ? `: created Island #${minted.join(", #")} on chain` : ""} · ${c.moved.length.toLocaleString()} Friend${c.moved.length === 1 ? "" : "s"} moved · ${fmt(c.rf)} RF burned · ${txs} transaction${txs === 1 ? "" : "s"} + gas.`);
+    say(`Saved on chain (simulated)${minted.length ? `: created Island #${minted.join(", #")} on chain` : ""} · ${c.moved.length.toLocaleString()} Friend${c.moved.length === 1 ? "" : "s"} moved · ${fmt(c.rf)} RF into ${pools.join(" and ")} · ${txs} transaction${txs === 1 ? "" : "s"} + gas.`);
   }
   function discardChanges() {
     const w = world.current!;
@@ -465,10 +467,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   }
   function buildBridge(to: Plot) {
     const w = world.current!, p = island(), cost = bridgeCost(p, to);
-    if (econ.current.rf < cost) { say(`That bridge burns ${cost} RF; you have ${fmt(econ.current.rf)}.`); return; }
+    if (econ.current.rf < cost) { say(`That bridge costs ${cost} RF; you have ${fmt(econ.current.rf)}.`); return; }
     if (!addBridge(w, p, to)) { say("You're already connected to that island."); return; }
-    econ.current.rf -= cost; econ.current.burned += cost; setMenu(null); bump();
-    say(`Bridge built from ${p.name} to ${to.name} (simulated): ${cost} RF burned + gas. It lasts until either island moves.`);
+    econ.current.rf -= cost; toPool(econ.current, w, p, cost); setMenu(null); bump();
+    say(`Bridge built from ${p.name} to ${to.name} (simulated): ${cost} RF into ${poolName(w, p)} + gas. It lasts until either island moves.`);
   }
   /* ── villages: plant a flag, everyone locks RF until it's full, then it's a village ── */
   /** Samples: Market Town (founded by Market Cluster + Rooftop Pair) and a rising flag on Crystal Keep. */
@@ -514,10 +516,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   function doRefund(v: Village) { act(() => { const n = VX.refund(world.current!, econ.current, v); say(`${fmt(n)} RF came back from ${v.name}'s flag.`); }); }
   function doHarvest(v: Village) {
     act(() => { const r = VX.harvest(v, econ.current);
-      say(`Harvested ${v.name} (simulated): ${fmt(r.rf)} RF + ${r.eth.toFixed(3)} ETH in fees → bought ${fmt(r.bought)} RF · burned ${fmt(r.burned)} · ${fmt(r.kept)} shared by Friends as allowances.`); });
+      say(`Harvested ${v.name} (simulated): ${fmt(r.rf)} RF + ${r.eth.toFixed(3)} ETH in fees → bought ${fmt(r.bought)} RF · ${fmt(r.toPool)} back into the pool · ${fmt(r.kept)} shared by Friends as allowances.`); });
   }
   function doPropose(v: Village) {
-    act(() => { const p = VX.proposeBurnShare(v, VX.YOU, Math.round(Math.min(100, Math.max(0, Number(burnPct) || 0)) * 100));
+    act(() => { const p = VX.proposePoolShare(v, VX.YOU, Math.round(Math.min(100, Math.max(0, Number(burnPct) || 0)) * 100));
       say(`Proposal #${p.id + 1} is up for ${v.name} (${VX.VOTE_DAYS}-day vote; every Friend is a vote).`); });
   }
   function doBring(v: Village, p: Plot) {
@@ -622,13 +624,13 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       const l = launch(econ.current, w, { name: form.name, symbol: form.symbol, supply: n(form.supply), creator: h, creatorFriend: friendId,
         airdropScope: form.airdropScope, airdropEach: n(form.airdropEach), claimScope: form.claimScope, claimPool: n(form.claimPool), claimEach: n(form.claimEach), claimPrice: n(form.claimPrice) }, canVisit);
       setForm(f => ({ ...f, name: "", symbol: "" })); bump();
-      say(`$${l.symbol} launched (simulated): ${LAUNCH_FEE.toLocaleString()} RF paid, ${LAUNCH_FEE / 2} burned.`);
+      say(`$${l.symbol} launched (simulated): ${LAUNCH_FEE.toLocaleString()} RF into ${poolName(w, h)}.`);
     } catch (e) { setLaunchError(errText(e)); }
   }
   function doClaimAll(l: Launch) {
     const w = world.current!;
     const n = claimAll(econ.current, w, l, myPlots(w).flatMap(p => p.friends.map(pl => pl.m.id)), canVisit);
-    bump(); say(n ? `${n.toLocaleString()} of your Friends claimed ${fmt(l.claimEach)} $${l.symbol} each (simulated) · ${fmt(n * l.claimPrice)} RF burned.` : `Nothing to claim for $${l.symbol}.`);
+    bump(); say(n ? `${n.toLocaleString()} of your Friends claimed ${fmt(l.claimEach)} $${l.symbol} each (simulated) · ${fmt(n * l.claimPrice)} RF into ${poolName(w, l.creator)}.` : `Nothing to claim for $${l.symbol}.`);
   }
 
   /* ── render ── */
@@ -697,7 +699,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         {isl.friends.length > 1 && <button type="button" onClick={reArrange}>Auto-arrange</button>}
       </div>
       <div className="docks-save">
-        <small>{dirty ? `${pending.moved.length.toLocaleString()} moved · burns ${fmt(pending.rf)} RF + gas` : "Matches the chain"}</small>
+        <small>{dirty ? `${pending.moved.length.toLocaleString()} moved · ${fmt(pending.rf)} RF + gas` : "Matches the chain"}</small>
         <div className="docks-row tight">
           <button type="button" onClick={finishArranging}>Done</button>
           <button type="button" className="rf-frame-primary" disabled={!dirty || saving} onClick={() => void saveOnChain()}>{saving ? "Saving…" : nftOf(isl) ? "⛓ Save on chain" : "⛓ Save on chain"}</button>
@@ -744,8 +746,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           <small>Reward weight {fmtW(rankOf(isl).weight)}{rankOf(isl).next ? ` · ${fmtW(rankOf(isl).next)} to ${RANKS[rankOf(isl).index + 1].name}` : ""}{byGen.length ? ` · ${byGen.map(([g, n]) => `${n.toLocaleString()}× Gen ${g}`).join(" · ")}` : ""}</small>
           {rosterNote && <small>{rosterNote}{roster.error ? `: ${roster.error}` : ""}</small>}</span></div>
         <div className="docks-item"><span><strong>⛓ {nftOf(isl) ? `Island #${nftOf(isl)} · saved on chain to your wallet` : "Not on chain yet"}</strong>
-          <small>{dirty ? `${pending.moved.length.toLocaleString()} Friend${pending.moved.length === 1 ? "" : "s"} moved since the last save · saving burns ${fmt(pending.rf)} RF + gas` : "Your islands match the chain."}</small>
-          <small>Saving burns RF for each Friend whose spot on its island changed: {Object.entries(ARRANGE_FEE).map(([g, f]) => `Gen ${g} ${f}`).join(" · ")} RF. Docking and moving islands cost only gas.<span className="docks-sim">SIMULATED</span></small></span>
+          <small>{dirty ? `${pending.moved.length.toLocaleString()} Friend${pending.moved.length === 1 ? "" : "s"} moved since the last save · saving costs ${fmt(pending.rf)} RF + gas` : "Your islands match the chain."}</small>
+          <small>Saving costs RF for each Friend whose spot on its island changed: {Object.entries(ARRANGE_FEE).map(([g, f]) => `Gen ${g} ${f}`).join(" · ")} RF, paid into {poolName(w, isl)} (nothing is burned: pools earn trading fees that buy RF to build with). Docking and moving islands cost only gas.<span className="docks-sim">SIMULATED</span></small></span>
           <button type="button" className="rf-frame-primary" disabled={!dirty || saving} onClick={() => { setMenu(null); void saveOnChain(); }}>Save</button></div>
         <div className="docks-row">
           <button type="button" onClick={startArranging} disabled={!isl.friends.length}>✥ Arrange</button>
@@ -796,7 +798,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <p>{isl.berth ? `${isl.name} is docked${neighboursOf(w, isl).length ? ` next to ${neighboursOf(w, isl).map(p => p.name).join(", ")}` : ""}. Pick another loading zone to move it, or build a bridge.` : `${isl.name} is floating free. Pick a loading zone next to another island to dock.`} Every island takes one berth, whatever its size, so the docks grow with the number of islands. Docking and moving cost only gas.</p>
         <ChainMap world={w} island={isl} zones={zones} onDock={dockIsland} onBridge={buildBridge} />
         {isl.berth && <div className="docks-row"><button type="button" onClick={() => { undock(w, isl); setMenu(null); goTo(isl); bump(); say(`${isl.name} is floating free.`); }}>Undock</button>
-          <span className="docks-note">Bridges burn {BRIDGE_FEE_PER_BERTH} RF per berth of distance and last until either island moves.</span></div>}
+          <span className="docks-note">Bridges cost {BRIDGE_FEE_PER_BERTH} RF per berth of distance (into {poolName(w, isl)}) and last until either island moves.</span></div>}
         <h3>Everyone here</h3>
         {[...w.plots].filter(p => p.friends.length).sort((a, b) => rankOf(b).weight - rankOf(a).weight).map((p, i) => { const r = rankOf(p);
           return <div className="docks-item" key={p.id}><span><strong>{i + 1}. {p.name}{p.mine ? " (yours)" : ""} · {r.rank}</strong>
@@ -806,8 +808,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
               else { const b = w.box.get(p); if (b) api.current?.focusOn((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2); say(`${p.name} is invite-only: here's the view. Walk up its gangway and ask to visit.`); } }}>{canEnter(w, p) ? "Go" : "Look"}</button></div>; })}
         <p className="docks-note">Rank follows the official Rare Friends reward weight (Generation × Activation tier), summed over an island's Friends. Neighbours are other people's public Friends shown as samples; their answers to visit requests are simulated.</p>
       </> : menu === "village" ? <>
-        <p>Plant a flag to start a village. Anyone can lock RF into it until it reaches {fmt(VX.FLAG_TARGET)} RF; then it's a village. Locked RF never comes back once it's founded (no rug): half becomes permanent RF/ETH liquidity whose fees buy back RF (half burned), half each founder's allowance to build village items on their island. Everyone who locked holds a soulbound founder mark. Not full in {VX.FLAG_DAYS} days? Everyone takes their RF back. Once founded, everyone brings one island: founders free, anyone else enrolls ({fmt(VX.ENROLL_PRICE)} RF: half liquidity, half their allowance). Every Friend votes; founders' votes are multiplied.</p>
-        <div className="docks-rf"><span>Your RF <b>{fmt(econ.current.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Burned <b>{fmt(econ.current.burned)}</b></span>
+        <p>Plant a flag to start a village. Anyone can lock RF into it until it reaches {fmt(VX.FLAG_TARGET)} RF; then it's a village. Locked RF never comes back once it's founded (no rug): half becomes permanent RF/ETH liquidity whose trading fees buy RF (half back into the pool, half shared as allowances), half each founder's allowance to build village items on their island. Everyone who locked holds a soulbound founder mark. Not full in {VX.FLAG_DAYS} days? Everyone takes their RF back. Once founded, everyone brings one island: founders free, anyone else enrolls ({fmt(VX.ENROLL_PRICE)} RF: half liquidity, half their allowance). Every Friend votes; founders' votes are multiplied.</p>
+        <div className="docks-rf"><span>Your RF <b>{fmt(econ.current.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Into pools <b>{fmt(econ.current.pooled)}</b></span>
           <button type="button" onClick={() => { econ.current.rf += 250_000; bump(); }}>＋250k preview RF</button></div>
         {(() => { const mv = mine.map(p => villageOf(w, p) ?? risingFlagOf(w, p)).find(Boolean);
           return mv ? <p className="docks-note">Your islands fly {mv.name}'s flag.</p> : <>
@@ -837,7 +839,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
             {v.founded && (() => { const mine1 = VX.islandOf(v, VX.YOU), price = VX.enrollPrice(v), pop = VX.population(v), myPower = VX.powerOf(v, VX.YOU), total = VX.totalPower(v);
               const why = mine1 ? null : joinProblem(w, v, isl);
               return <>
-              <small>Liquidity <b>{fmt(v.liquidity)} RF</b>{v.pendingLiquidity ? ` (+${fmt(v.pendingLiquidity)} queued)` : ""} one-sided RF/ETH · fees waiting {fmt(v.fees.rf)} RF + {v.fees.eth.toFixed(3)} ETH · burns {v.burnBps / 100}% of buybacks · {fmt(v.burned)} burned so far</small>
+              <small>Liquidity <b>{fmt(v.liquidity)} RF</b>{v.pendingLiquidity ? ` (+${fmt(v.pendingLiquidity)} queued)` : ""} one-sided RF/ETH · fees waiting {fmt(v.fees.rf)} RF + {v.fees.eth.toFixed(3)} ETH · {v.poolBps / 100}% of buybacks back into the pool · {fmt(v.compounded)} compounded so far</small>
               <small>Population <b>{pop.toLocaleString()} Friends</b> on {v.members.length} island{v.members.length === 1 ? "" : "s"} · pool {fmt(v.pool)} RF · enrollment {price ? `open · ${fmt(price)} RF${VX.inWindow(v) ? ` (first week: ${Math.max(0, Math.ceil((v.foundedAt + VX.ENROLL_WINDOW_DAYS * VX.DAY - Date.now()) / VX.DAY))} days left)` : ""}${v.enrollCap ? ` until ${v.enrollCap.toLocaleString()} Friends` : ""}` : "closed"}</small>
               {(mine1 || mineW > 0) && <small>🧱 Your allowance <b>{fmt(Math.floor(VX.allowanceOf(v, VX.YOU)))} RF</b> to build village items on your island here</small>}
               {mine1 ? <small>🗳 {mine1.name}: {mine1.friends.length.toLocaleString()} Friends × {VX.multiplier(v, VX.YOU).toFixed(2)} = <b>{myPower.toFixed(1)} votes</b> ({Math.round(myPower / Math.max(1e-9, total) * 100)}% of {total.toFixed(1)})</small>
@@ -871,7 +873,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
               {v.proposals.length > 0 && <h4>Votes</h4>}
               {v.proposals.slice().reverse().slice(0, 6).map(p => { const ended = Date.now() >= p.ends, labels = p.kind === "enrollment" ? VX.ENROLL_CHOICES
                   : p.kind === "enrollPrice" ? p.options.map(o => `${fmt(o)} RF`) : p.kind === "enrollCap" ? p.options.map(o => `${o.toLocaleString()} Friends`) : ["No", "Yes"];
-                const title = p.kind === "burnShare" ? `Burn ${p.options[0] / 100}% of buybacks`
+                const title = p.kind === "poolShare" ? `Put ${p.options[0] / 100}% of buybacks back into the pool`
                   : p.kind === "enrollment" ? "Enrollment after the vote" : p.kind === "enrollPrice" ? "New enrollment price (24h)" : "Close enrollment at (24h)";
                 const mineChoice = p.voters.get(VX.YOU);
                 return <div className="docks-item" key={p.id}><span><strong>#{p.id + 1} {title}</strong>
@@ -882,14 +884,14 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
                     {!ended && <button type="button" title="Preview only" onClick={() => { p.ends = Date.now() - 1; bump(); }}>⏩ End vote</button>}
                     {ended && !p.settled && <button type="button" className="rf-frame-primary" onClick={() => doSettle(v, p)}>Settle</button>}</span></div>; })}
               {mine1 && <div className="docks-form">
-                <label>Burn % of each buyback<input inputMode="numeric" value={burnPct} onChange={e => setBurnPct(e.target.value)} /></label>
-                <button type="button" onClick={() => doPropose(v)}>Put the burn share to a vote</button>
+                <label>% of each buyback back into the pool<input inputMode="numeric" value={burnPct} onChange={e => setBurnPct(e.target.value)} /></label>
+                <button type="button" onClick={() => doPropose(v)}>Put the pool share to a vote</button>
                 {!v.enrollVote && <button type="button" onClick={() => act(() => { VX.proposeEnrollment(v, VX.YOU); say(`Enrollment vote started for ${v.name} (${VX.VOTE_DAYS} days).`); })}>Start an enrollment vote</button>}</div>}
             </>; })()}
           </div>; })}
-        <p className="docks-note">Every Friend on a member's island is a vote; founders multiply theirs by 1 + their share of the pool, and every enrollment fee grows the pool, so newcomers dilute founders. The burn share passes after {VX.VOTE_DAYS} days with more yes than no and {VX.QUORUM * 100}% of all votes cast. Enrollment: open for the first {VX.ENROLL_WINDOW_DAYS} days at {fmt(VX.ENROLL_PRICE)} RF, then whatever the village votes (keep open, a new price, close, or close at a population; a new price or population is picked in a 24-hour vote between three). Leaving: request removal and your island leaves at the next epoch (every {VX.EPOCH_DAYS} days), no RF back. A Friend that leaves a village island stays bound to that village until the next epoch; it can come back to its spot if the population allows. Items bought with your allowance belong to the village; if you leave they're raffled to those who stayed. More village options are coming. ⏩ buttons only exist in the preview.</p>
+        <p className="docks-note">Every Friend on a member's island is a vote; founders multiply theirs by 1 + their share of the pool, and every enrollment fee grows the pool, so newcomers dilute founders. The pool share passes after {VX.VOTE_DAYS} days with more yes than no and {VX.QUORUM * 100}% of all votes cast. Enrollment: open for the first {VX.ENROLL_WINDOW_DAYS} days at {fmt(VX.ENROLL_PRICE)} RF, then whatever the village votes (keep open, a new price, close, or close at a population; a new price or population is picked in a 24-hour vote between three). Leaving: request removal and your island leaves at the next epoch (every {VX.EPOCH_DAYS} days), no RF back. A Friend that leaves a village island stays bound to that village until the next epoch; it can come back to its spot if the population allows. Items bought with your allowance belong to the village; if you leave they're raffled to those who stayed. More village options are coming. ⏩ buttons only exist in the preview.</p>
         <h3>🧱 Your own items</h3>
-        <p className="docks-note">Buy with your own RF and they're always yours: build them on any of your islands (the RF goes to that island's village liquidity, or is burned if it has none), take them off and put them back.</p>
+        <p className="docks-note">Buy with your own RF and they're always yours: build them on any of your islands (the RF goes to that island's village pool, or the shared Docks pool), take them off and put them back.</p>
         <div className="docks-row tight"><select aria-label="Own item to build" value={buildKind} onChange={e => setBuildKind(Number(e.target.value))}>
           {VX.CATALOG.map((c, i) => <option key={i} value={i}>{c.icon} {c.name} · {fmt(c.price)} RF · {dur(c.build)}</option>)}</select>
           <button type="button" onClick={() => doBuild(null)}>Buy where #{String(lead)} stands · my RF</button></div>
@@ -897,8 +899,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           return <div className="docks-item" key={it.id}><span><strong>{c.icon} {c.name}</strong><small>{it.plot ? `on ${it.plot.name}` : "not placed"}{it.plot && it.readyAt > Date.now() ? ` · 🔨 ${dur(it.readyAt - Date.now())}` : ""}</small></span>
             <span className="docks-row tight">{it.plot ? <button type="button" onClick={() => act(() => VX.takeOff(w, it, VX.YOU))}>Take off</button> : <button type="button" onClick={() => doPlaceOwn(it)}>Place where #{String(lead)} stands</button>}</span></div>; })}
       </> : menu === "tokens" ? <>
-        <div className="docks-rf"><span>Your RF <b>{fmt(econ.current.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Burned <b>{fmt(econ.current.burned)}</b></span><span>Treasury <b>{fmt(econ.current.treasury)}</b></span></div>
-        <p className="docks-note">Launch a token from your island for {LAUNCH_FEE.toLocaleString()} RF (half burned, half to the treasury). Airdrops and claims land in each Friend's own wallet; every claim costs RF, which is burned. In this preview it's all simulated; the contracts are in the submission.</p>
+        <div className="docks-rf"><span>Your RF <b>{fmt(econ.current.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Into pools <b>{fmt(econ.current.pooled)}</b></span><span>Docks pool <b>{fmt(econ.current.docksPool)}</b></span><span>Platform fee <b>{PLATFORM_FEE_BPS / 100}%</b></span></div>
+        <p className="docks-note">Launch a token from your island for {LAUNCH_FEE.toLocaleString()} RF. Airdrops and claims land in each Friend's own wallet; every claim costs RF. Launch fees and claim prices go into {poolName(w, h)} (the launching island's village pool, or the shared Docks pool): nothing is burned. In this preview it's all simulated; the contracts are in the submission.</p>
         <h3>Launch a token from {h.name}</h3>
         <div className="docks-form">
           <label>Name<input value={form.name} maxLength={32} placeholder="Market Coin" onChange={e => setForm({ ...form, name: e.target.value })} /></label>
@@ -911,7 +913,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
             {SCOPES.map(sc => <option key={sc.id} value={sc.id}>{sc.label}</option>)}</select></label>
           <label>Claim pool<input inputMode="numeric" value={form.claimPool} onChange={e => setForm({ ...form, claimPool: e.target.value })} /></label>
           <label>Per claim<input inputMode="numeric" value={form.claimEach} onChange={e => setForm({ ...form, claimEach: e.target.value })} /></label>
-          <label>Claim price (RF, burned)<input inputMode="numeric" value={form.claimPrice} onChange={e => setForm({ ...form, claimPrice: e.target.value })} /></label>
+          <label>Claim price (RF, into the pool)<input inputMode="numeric" value={form.claimPrice} onChange={e => setForm({ ...form, claimPrice: e.target.value })} /></label>
         </div>
         <p className="docks-note">{form.airdropScope === "none" ? "No airdrop." : `Airdrop reaches ${eligibleFriends(w, { scope: form.airdropScope, creator: h }, canVisit).length.toLocaleString()} Friend wallet(s) right now (${SCOPES.find(x => x.id === form.airdropScope)!.hint}).`} The rest of the supply goes to #{String(friendId)}'s wallet.</p>
         {launchError && <p role="alert" className="docks-note">{launchError}</p>}
@@ -936,13 +938,14 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       </> : menu === "help" ? <ul className="docks-help">
         <li><strong>Islands:</strong> every activated Friend is a small floating island; joined, they make one big island. Every activated Friend in your wallet joins automatically, from 1 to 10,000+. Keep them together or deploy them to more islands (＋ New island). Islands are saved to your wallet and can't be sold; the only NFTs are your Friends.</li>
         <li><strong>Holes:</strong> if a saved Friend leaves your wallet (sending it clears its activation) or is deactivated, its spot becomes a hole in the island. The hole stays until that Friend comes back (it heals for free) or you fill it with another activated Friend of the same generation (normal arrange fee).</li>
-        <li><strong>Arranging is the game:</strong> Arrange → tap a Friend and move it, or <em>Pick several</em> / <em>All</em> to move a group together; each Friend must touch another along part of a side. Save on chain burns RF for every Friend whose spot changed ({Object.entries(ARRANGE_FEE).map(([g, f]) => `Gen ${g}: ${f}`).join(", ")}), plus gas. Unmoved Friends are free; Undo returns to your last save.</li>
+        <li><strong>Arranging is the game:</strong> Arrange → tap a Friend and move it, or <em>Pick several</em> / <em>All</em> to move a group together; each Friend must touch another along part of a side. Save on chain pays RF for every Friend whose spot changed ({Object.entries(ARRANGE_FEE).map(([g, f]) => `Gen ${g}: ${f}`).join(", ")}), plus gas, into a pool (your village's, or the shared Docks pool). Unmoved Friends are free; Undo returns to your last save.</li>
+        <li><strong>No burning:</strong> every fee in The Docks goes into a permanent RF/ETH pool: your village's, or the shared Docks pool. Trading through the pools earns fees that buy RF: half back into the pool, half to build with (village members' allowances, or the Docks build fund). The platform fee is {PLATFORM_FEE_BPS / 100}% for now (never above 5%).</li>
         <li><strong>Dock:</strong> Docks → pick a loading zone next to another island. Every island takes one berth whatever its size, so how far you can roam depends on how many islands there are. Docking and moving cost only gas. Neighbours are joined by a gangway.</li>
-        <li><strong>Bridges:</strong> can't dock next to an island? Build a bridge to it: {BRIDGE_FEE_PER_BERTH} RF per berth of distance, burned. It lasts until either island moves.</li>
+        <li><strong>Bridges:</strong> can't dock next to an island? Build a bridge to it: {BRIDGE_FEE_PER_BERTH} RF per berth of distance, into a pool. It lasts until either island moves.</li>
         <li><strong>Visit:</strong> open islands (⇄) let you walk straight in. Invite-only islands (🔒) need approval: walk up the gangway and choose Ask to visit.</li>
         <li><strong>Your crew:</strong> you lead one Friend; everyone else stands on their own land. 👥 Crew → <em>Call all</em> brings every Friend to your lead. Tap Friends on the map to pick them, then <em>Bring picked</em>, <em>Leave picked here</em> (break off and walk on without them) or <em>Take over</em> to lead that Friend instead. <em>All go home</em> sends everyone back to their land.</li>
-        <li><strong>Villages:</strong> 🚩 Village → plant a flag where your lead stands and lock RF. Anyone can lock more until it hits {fmt(VX.FLAG_TARGET)} RF; then it's a village: half permanent RF/ETH liquidity whose fees buy back RF (half burned), half the founders' allowances for building. Lockers hold soulbound founder marks. Everyone brings one island: founders free, others enroll ({fmt(VX.ENROLL_PRICE)} RF, open the first {VX.ENROLL_WINDOW_DAYS} days, then as voted). Every Friend is a vote, founders' multiplied by 1 + their share of the pool; vote on the burn share and enrollment. Spend your allowance on items for your village island (build timers, boost with RF); leaving takes a removal request and an epoch (~21 days), and the village's items on your island are raffled to those who stayed. Not full in {VX.FLAG_DAYS} days? Refunds. Launch tokens to your village.</li>
-        <li><strong>Tokens:</strong> launch a token for 1,000 RF, airdrop it into Friend wallets and open a claim pool; claims burn RF.</li>
+        <li><strong>Villages:</strong> 🚩 Village → plant a flag where your lead stands and lock RF. Anyone can lock more until it hits {fmt(VX.FLAG_TARGET)} RF; then it's a village: half permanent RF/ETH liquidity whose trading fees buy RF (half back into the pool, half shared), half the founders' allowances for building. Lockers hold soulbound founder marks. Everyone brings one island: founders free, others enroll ({fmt(VX.ENROLL_PRICE)} RF, open the first {VX.ENROLL_WINDOW_DAYS} days, then as voted). Every Friend is a vote, founders' multiplied by 1 + their share of the pool; vote on the pool share and enrollment. Spend your allowance on items for your village island (build timers, boost with RF); leaving takes a removal request and an epoch (~21 days), and the village's items on your island are raffled to those who stayed. Not full in {VX.FLAG_DAYS} days? Refunds. Launch tokens to your village.</li>
+        <li><strong>Tokens:</strong> launch a token for 1,000 RF, airdrop it into Friend wallets and open a claim pool; claims cost RF, into the pool.</li>
         <li><strong>Always on-chain:</strong> every Friend is its real on-chain artwork, loaded as you get near it. Re-checked every minute (or tap Check): new Friends join, upgrades update, sold or deactivated Friends leave.</li>
         <li>This preview doesn't save: reloading starts fresh. RF, saves, docking, bridges, launches and claims are simulated.</li>
       </ul> : <>
