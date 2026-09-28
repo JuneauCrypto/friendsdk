@@ -155,3 +155,9 @@
 .docks-chat{max-height:220px;overflow:auto;border:1px solid #000;padding:6px;margin-bottom:8px;background:#fff;color:#000}
 .docks-chat p{margin:2px 0}
 .docks-chat p.me{text-align:right}
+/* war menu: wrap on narrow screens */
+.docks-war .docks-row.tight{flex-wrap:wrap}
+.docks-war select{max-width:100%;min-width:0}
+.docks-war .docks-item{flex-wrap:wrap}
+.docks-war .docks-item>span:first-child{flex:1 1 200px;min-width:0}
+.docks-ship{display:inline-flex;gap:4px;align-items:center;font-size:12px}

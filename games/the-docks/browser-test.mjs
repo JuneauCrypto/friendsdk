@@ -295,13 +295,14 @@ try {
     if (vp) { await page.mouse.move(vp.x + vp.width / 2, vp.y + vp.height / 2); await page.mouse.wheel(0, -600); await page.waitForTimeout(400); }
     await game.getByRole("button", { name: "Center on lead" }).click();
     // villages: plant a flag, lock RF until it's full, found it, harvest, vote
-    assert.equal(await game.locator(".docks-flag").count(), 2, "Market Town and Crystal Hollow's rising flag");
+    assert.equal(await game.locator(".docks-flag").count(), 3, "Market Town, Reed Harbor and Crystal Hollow's rising flag");
     await game.locator(".docks-nav").getByRole("button", { name: /Flags/ }).click();
     await game.getByText(/founded · 2 islands/).first().waitFor();
     for (let i = 0; i < 4; i++) await game.getByRole("button", { name: /250k preview RF/ }).click();
     await game.getByLabel("Flag name").fill("Dock Town");
     await game.getByRole("button", { name: /Plant flag where #\d+ stands/ }).click();
-    await game.getByText(/🚩 Dock Town's flag is up on Your island \(simulated\): 100k of 1M RF locked/).waitFor();
+    // flags follow a bonding curve: 3 flags up already → 100k × 1.25³ ≈ 195k
+    await game.getByText(/🚩 Dock Town's flag is up on Your island \(simulated\): 100k of 195k RF locked/).waitFor();
     assert.equal(await game.locator(".docks-flag.rising").count(), 2, "your flag rises next to Crystal Hollow's");
     await game.locator(".docks-nav").getByRole("button", { name: /Flags/ }).click();
     await game.getByLabel("Lock RF into Dock Town").fill("900000");
@@ -309,7 +310,7 @@ try {
     await game.getByText(/You locked .* RF into Dock Town's flag \(simulated\) · 100% full/).waitFor();
     await game.getByText(/your mark: .* RF \(\d+% of the flag, soulbound\)/).first().waitFor();
     await game.getByRole("button", { name: "🏛 Found Dock Town" }).click();
-    await game.getByText(/🏛 Dock Town is founded! 500k RF into permanent RF\/ETH liquidity, 500k RF as founders' allowances/).waitFor();
+    await game.getByText(/🏛 Dock Town is founded! 78k RF into permanent RF\/ETH liquidity, 97\.5k RF as founders' allowances to build with, 19\.5k RF into its loot vault/).waitFor();
     assert.equal(await game.locator(".docks-flag.rising").count(), 1, "only Crystal Hollow still rising");
     await game.locator(".docks-nav").getByRole("button", { name: /Flags/ }).click();
     const town = game.locator(".docks-village", { hasText: "Dock Town" });
@@ -330,7 +331,7 @@ try {
     await town.getByRole("button", { name: "Settle" }).click();
     await game.getByText(/Dock Town's enrollment is open at 20,000 RF/).waitFor();
     // build a village item where the lead stands (allowance), finish it with RF, and one of your own
-    await town.getByText(/Your allowance 500(\.\d)?k RF/).waitFor();
+    await town.getByText(/Your allowance \d+(\.\d)?k RF/).waitFor();
     await town.getByLabel("Item to build").selectOption({ index: 1 });
     await town.getByRole("button", { name: /Build where #\d+ stands · allowance/ }).click();
     await game.getByText(/🏪 Market stall is being built on Your island \(simulated\): ready in 24 h\. Paid from your Dock Town allowance/).waitFor();
@@ -342,6 +343,40 @@ try {
     await shot("village-menu");
     await game.getByRole("button", { name: "Close Flags" }).click();
     await page.waitForTimeout(300); await shot("village");
+    // war: a new flag is shielded for a week; then raid a flag of the same tier with ships
+    await btn("War").click();
+    // (the first-week skip above also ended Dock Town's 7-day shield)
+    await game.getByText(/Dock Town · Tier 1 · Driftwood/).waitFor();
+    await game.getByText(/open to raids/).waitFor();
+    await game.getByLabel("Ship to build").selectOption("1");
+    await game.getByRole("button", { name: "Build · my RF" }).click();
+    await game.getByText(/⛵ Sloop on the slipway for Dock Town \(your RF, simulated\): ready in 6 h/).waitFor();
+    await game.getByRole("button", { name: "⏩ Finish ships" }).click();
+    await game.locator(".docks-ship", { hasText: "Sloop" }).locator("input").check();
+    const reed = game.locator(".docks-item", { hasText: "Reed Harbor ·" });
+    await reed.getByText(/3 seats picked/).waitFor();
+    await reed.getByRole("button", { name: "⚔️ Raid" }).click();
+    await game.getByText(/Dock Town (won|lost) the raid on Reed Harbor \([✓✗ ]+, simulated\)/).waitFor();
+    await game.locator(".docks-battle").waitFor();
+    await shot("war");
+    // declare war by vote: passes with Dock Town's votes, then raids skip the cooldown
+    await reed.getByRole("button", { name: "🗳 Vote for war" }).click();
+    await game.getByText(/Dock Town votes on war with Reed Harbor/).waitFor();
+    await game.getByRole("button", { name: "Close War" }).click();
+    await game.locator(".docks-nav").getByRole("button", { name: /Flags/ }).click();
+    const warVote = town.locator(".docks-item", { hasText: "Declare war on Reed Harbor" });
+    await warVote.getByRole("button", { name: "Yes" }).click();
+    await warVote.getByRole("button", { name: "⏩ End vote" }).click();
+    await warVote.getByRole("button", { name: "Settle" }).click();
+    await game.getByText(/⚔️ Dock Town voted for war on Reed Harbor!/).waitFor();
+    await game.getByRole("button", { name: "Close Flags" }).click();
+    await btn("War").click();
+    await game.getByText(/Reed Harbor · Tier \d · \w+ · ⚔️ at war/).waitFor();
+    if (await game.getByRole("button", { name: /^Claim to #/ }).isEnabled()) {
+      await game.getByRole("button", { name: /^Claim to #/ }).click();
+      await game.getByText(/Claimed .* RF of loot to #7730's wallet/).waitFor();
+    }
+    await game.getByRole("button", { name: "Close War" }).click();
     // deploy #7573 to a second island: joining a new island counts as a move (Gen 3: 20 RF)
     await btn("Islands").click();
     await game.getByRole("button", { name: "＋ New island" }).click();

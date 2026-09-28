@@ -84,7 +84,7 @@ export type Village = {
   raffles: Raffle[];
   proposals: Proposal[];
 };
-export type ProposalKind = "poolShare" | "enrollment" | "enrollPrice" | "enrollCap";
+export type ProposalKind = "poolShare" | "enrollment" | "enrollPrice" | "enrollCap" | "war";
 export type Proposal = {
   id: number; kind: ProposalKind; options: number[]; memo: string;
   tally: number[]; voters: Map<string, number>; ends: number; settled: boolean; winner: number;

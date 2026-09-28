@@ -20,11 +20,11 @@ export type Launch = {
   scope: Scope; claimEach: number; claimPrice: number; claimRemaining: number; claimed: Set<bigint>;
 };
 export type Economy = {
-  rf: number; pooled: number; docksPool: number; docksFund: number; platform: number; launches: Launch[];
+  rf: number; pooled: number; docksPool: number; docksFund: number; /* the Docks rewards reserve (simulated start: 50k RF) */ platform: number; launches: Launch[];
   /** token balances in each Friend's own wallet: friendId → symbol → amount */
   wallets: Map<bigint, Map<string, number>>;
 };
-export const createEconomy = (): Economy => ({ rf: START_RF, pooled: 0, docksPool: 0, docksFund: 0, platform: 0, launches: [], wallets: new Map() });
+export const createEconomy = (): Economy => ({ rf: START_RF, pooled: 0, docksPool: 0, docksFund: 50_000, platform: 0, launches: [], wallets: new Map() });
 /** Platform fee on every fee: 0 to start, never above 5% (DocksVillageTreasury). */
 export const PLATFORM_FEE_BPS = 0;
 /** A fee: into the pool of the island's village, or the shared Docks pool (minus the platform fee). */

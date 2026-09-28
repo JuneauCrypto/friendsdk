@@ -88,6 +88,42 @@ app's built-in browser (the SDK has no WalletConnect).
 
 Controls: WASD / arrow keys or tap to walk; zoom with ＋/－, the mouse wheel, pinch, or the +/- keys; drag to pan; ⤢ fits every island on screen and ⌖ returns to your lead (zoomed far out, lands are drawn as outlines so 10,000 Friends stay fast); reduced-motion in More.
 
+## War (simulated; tunable)
+
+Only founded flags go to war. Every number is a setting (`WAR` and `SHIPS` in `war.ts`), shown
+in-game under ⚔️ War → War rules, so the balance can be tuned and new dynamics added.
+
+- **Flags on a bonding curve.** The next flag needs 100k RF × 1.25 per flag already up (at most
+  1M): cheap to start early, joining an existing flag makes more sense later.
+- **Loot vault.** Each flag has one, and it's the only thing a flag can lose: never a member's
+  wallet or allowance. It starts with 10% of the flag's founding RF (from the liquidity half),
+  gets 20% of each harvest's shared half, and anyone can add to it. A bigger vault is a bigger
+  target, and a bigger buffer, because losses are a percentage.
+- **Shield.** A new flag has 7 days to get battle ready (a readiness checklist: islands, a
+  defense item, an attack item, a real ship, a funded vault). No raids either way. After that,
+  anyone matched to it can raid it; nobody has to declare anything.
+- **Tiers.** From the flag's battle power (islands' level × √Friends × items). Raid your tier or
+  one up, never down. Tier 1 (Driftwood) is wide because there are few players at first. Tier
+  skins come later.
+- **Ships.** A raid needs ships; their seats cap how many islands attack (Dinghy 1, Sloop 3,
+  Frigate 6, Galleon 12; bigger ones cost more and add attack). Every new flag gets 2 free
+  dinghies. The defender gets the same number of seats. Islands join first come, first served;
+  empty defense seats are held by the defender's strongest islands at half strength.
+- **Battle.** Best of 3 rounds: Broadside (ships + attack items), Boarding (raw strength), Siege
+  (defense items count double; home advantage +10%). Each round the attacker wins with chance
+  A ÷ (A + D); on chain each round is a Dice roll.
+- **Loot.** The winner takes a share of the loser's vault (10% in tier 1, gentler as tiers go
+  up: 6.7%, 5%, 4%, 3.3%) plus a 1% bounty from the Docks rewards reserve (double in a declared
+  war). Half goes to the islands that fought, split by level and claimable to the Friend's own
+  wallet; half into the winner's vault. Lose a raid and the ships that sailed sink.
+- **War items.** Cannon, Sea wall, Armory, Fort (plus the Watchtower) add attack or defense to
+  the island they're on, capped at +60% a side.
+- **Declaring war.** A flag votes to declare war on another; for 3 days its raids on that flag
+  skip the 24 h raid cooldown and pay a double bounty.
+
+Not built yet: a war contract (vaults, ships, seats, Dice rounds), real-time joining between
+players, and tier skins.
+
 ## Preview limits (what needs a server next)
 
 - **No saving.** The SDK sandbox has no storage and no save API; islands, positions,

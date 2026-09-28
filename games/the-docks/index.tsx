@@ -15,6 +15,7 @@ import {
 } from "./world.js";
 import { DocksView, clampZoom, spawnOn, type CrewMember, type ViewApi } from "./view.js";
 import { ChainMap } from "./chainmap.js";
+import * as WR from "./war.js";
 import { LAUNCH_FEE, PLATFORM_FEE_BPS, SCOPES, poolName, toPool, claimAll, createEconomy, eligibleFriends, fmt, launch, seedLaunch, type Economy, type Launch, type Scope } from "./launch.js";
 import * as VX from "./villages.js";
 import type { Item, Proposal } from "./world.js";
@@ -23,7 +24,7 @@ const dur = (ms: number) => { const m = Math.max(0, Math.ceil(ms / 60_000)); ret
 import "@rarefriends/friendsdk/frame.css";
 import "./style.css";
 
-type Menu = "control" | "plot" | "docks" | "village" | "tokens" | "help" | "settings" | null;
+type Menu = "control" | "plot" | "docks" | "village" | "war" | "tokens" | "help" | "settings" | null;
 const CHECK_EVERY_MS = 60_000;
 const MAX_DRAWN = 40;                             // crew sprites drawn at once (the rest are counted)
 const ART_CONCURRENCY = 6, ART_CACHE = 500;       // lazy on-chain art: parallel reads, Friends kept in memory
@@ -96,6 +97,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const [saving, setSaving] = useState(false);
   const world = useRef<World | null>(null);
   const econ = useRef<Economy>(createEconomy());
+  const book = useRef<WR.WarBook>(WR.newWarBook());                               // war: loot vaults, ships, battles (simulated)
+  const [warShips, setWarShips] = useState<number[]>([]);                         // ships picked for a raid
+  const [shipKind, setShipKind] = useState(1), [vaultAdd, setVaultAdd] = useState("10000");
+  const [lastBattle, setLastBattle] = useState<WR.Battle | null>(null);
   const owner = useRef("");
   const api = useRef<ViewApi | null>(null);
   const epoch = useRef(0);
@@ -128,7 +133,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         const home: Plot = { id: "me-1", name: "Your island", mine: true, access: "invite", friends: [{ m: walker, x: 0, y: 0 }], berth: null };
         plotSeq.current = 1;
         world.current = createWorld(samples.filter(s => s.friends.length), [home]);
-        econ.current = createEconomy(); setLead(friendId); setPrimary(friendId); setCrewLeader(new Map()); setQuick(null); setCrewModes(new Map()); setCrewSel(new Set()); setCrewBar(false); setApprovedVisitors([]); setRequests([]); onChain.current = new Map(); savedRef.current = new Map(); simGone.current = new Set(); setIslandId("me-1");
+        econ.current = createEconomy(); book.current = WR.newWarBook(); setLastBattle(null); setWarShips([]); setLead(friendId); setPrimary(friendId); setCrewLeader(new Map()); setQuick(null); setCrewModes(new Map()); setCrewSel(new Set()); setCrewBar(false); setApprovedVisitors([]); setRequests([]); onChain.current = new Map(); savedRef.current = new Map(); simGone.current = new Set(); setIslandId("me-1");
         const market = world.current.plots.find(p => p.id === "s4" && p.friends.length);
         if (market) seedLaunch(econ.current, { name: "Market Coin", symbol: "MKT", supply: 1_000_000, creator: market, creatorFriend: market.friends[0].m.id,
           scope: "anyDocked", claimEach: 500, claimPrice: 5, claimRemaining: 50_000 });
@@ -598,6 +603,15 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       v.lockers.set(market.name, 700_000); v.lockers.set(rooftop?.name ?? "Rooftop Pair", 300_000); v.locked = VX.FLAG_TARGET;
       VX.found(w, v); if (rooftop) VX.bring(w, v, rooftop);
       v.foundedAt -= 10 * VX.DAY; if (v.enrollVote) { v.enrollVote.ends = Date.now() - 1; VX.settle(v, v.enrollVote); }   // founded 10 days ago, kept open
+      WR.onFounded(book.current, v); WR.fund(book.current, { ...econ.current, rf: Infinity }, v, 50_000);
+      book.current.ships.set(v, [...WR.shipsOf(book.current, v), { id: book.current.seq++, kind: 1, readyAt: 0, owner: v.name }]);
+    }
+    const reed = w.plots.find(p => p.id === "s1" && p.friends.length);
+    if (reed) {   // a small flag: a fair first target
+      const v = newVillage(w, reed, "Reed Harbor", at(reed), 200_000, Date.now() - VX.DAY);
+      v.lockers.set(reed.name, 200_000); v.locked = 200_000;
+      VX.found(w, v); v.foundedAt -= 30 * VX.DAY; if (v.enrollVote) { v.enrollVote.ends = Date.now() - 1; VX.settle(v, v.enrollVote); }
+      WR.onFounded(book.current, v); WR.fund(book.current, { ...econ.current, rf: Infinity }, v, 5_000);
     }
     if (keep) {
       const v = newVillage(w, keep, "Crystal Hollow", at(keep), VX.FLAG_TARGET, Date.now() + 12 * VX.DAY);
@@ -625,13 +639,13 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       say(`You locked ${fmt(n)} RF into ${v.name}'s flag (simulated) · ${VX.pct(v)}% full. Your founder mark grew.`); });
   }
   function doFound(v: Village) {
-    act(() => { VX.found(world.current!, v); setMenu(null); lookAtFlag(v);
-      say(`🏛 ${v.name} is founded! ${fmt(v.liquidity)} RF into permanent RF/ETH liquidity, ${fmt(v.locked / 2)} RF as founders' allowances to build with (simulated). Nobody can pull it.`); });
+    act(() => { VX.found(world.current!, v); const loot = WR.onFounded(book.current, v); setMenu(null); lookAtFlag(v);
+      say(`🏛 ${v.name} is founded! ${fmt(v.liquidity)} RF into permanent RF/ETH liquidity, ${fmt(v.locked / 2)} RF as founders' allowances to build with, ${fmt(loot)} RF into its loot vault (simulated). Nobody can pull it. ${WR.WAR.SHIELD_DAYS} days of shield to get battle ready.`); });
   }
   function doRefund(v: Village) { act(() => { const n = VX.refund(world.current!, econ.current, v); say(`${fmt(n)} RF came back from ${v.name}'s flag.`); }); }
   function doHarvest(v: Village) {
-    act(() => { const r = VX.harvest(v, econ.current);
-      say(`Harvested ${v.name} (simulated): ${fmt(r.rf)} RF + ${r.eth.toFixed(3)} ETH in fees → bought ${fmt(r.bought)} RF · ${fmt(r.toPool)} back into the pool · ${fmt(r.kept)} shared by Friends as allowances.`); });
+    act(() => { const r = VX.harvest(v, econ.current, VX.YOU, WR.WAR.LOOT_FROM_HARVEST_BPS); book.current.loot.set(v, WR.lootOf(book.current, v) + r.loot);
+      say(`Harvested ${v.name} (simulated): ${fmt(r.rf)} RF + ${r.eth.toFixed(3)} ETH in fees → bought ${fmt(r.bought)} RF · ${fmt(r.toPool)} back into the pool · ${fmt(r.kept)} shared by Friends as allowances · ${fmt(r.loot)} into the loot vault.`); });
   }
   function doPropose(v: Village) {
     act(() => { const p = VX.proposePoolShare(v, VX.YOU, Math.round(Math.min(100, Math.max(0, Number(burnPct) || 0)) * 100));
@@ -643,7 +657,22 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   function doEnroll(v: Village, p: Plot) {
     act(() => { const n = VX.enroll(world.current!, econ.current, v, p); say(`${p.name} enrolled in ${v.name} for ${fmt(n)} RF (simulated): ${fmt(n / 2)} to liquidity, ${fmt(n / 2)} your allowance. Its ${p.friends.length.toLocaleString()} Friends vote.`); });
   }
-  function doSettle(v: Village, p: Proposal) { act(() => say(VX.settle(v, p))); }
+  function doSettle(v: Village, p: Proposal) {
+    act(() => { const msg = VX.settle(v, p);
+      if (p.kind === "war" && p.winner === 1) { const t = world.current!.villages[p.options[0]]; if (t) { const war = WR.declareWar(book.current, v, t); say(`⚔️ ${msg} For ${WR.WAR.WAR_DAYS} days: raids on ${t.name} skip the cooldown and pay a double bounty (until ${new Date(war.until).toLocaleDateString()}).`); return; } }
+      say(msg); });
+  }
+  /* ── war (simulated): raids between founded flags of a similar tier ── */
+  const myFlag = () => myPlots(world.current!).map(p => villageOf(world.current!, p)).find((v): v is Village => Boolean(v)) ?? null;
+  function doRaid(a: Village, d: Village) {
+    act(() => {
+      const mineIsl = a.members.filter(p => p.mine), others = a.members.filter(p => !p.mine);
+      const b = WR.raid(world.current!, book.current, econ.current, a, d, warShips, [...mineIsl, ...others], WR.autoDefenders(d));
+      setWarShips([]); setLastBattle(b);
+      const won = b.attackerWon, you = b.shares.get(VX.YOU) ?? 0;
+      say(`${won ? "🏆" : "💥"} ${a.name} ${won ? "won" : "lost"} the raid on ${d.name} (${b.rounds.map(r => r ? "✓" : "✗").join(" ")}, simulated): ${fmt(b.loot + b.bounty)} RF of loot to ${won ? a.name : d.name}${you ? `, ${fmt(Math.floor(you))} RF earned by your island (claim it in ⚔️ War)` : ""}.${won ? "" : ` ${a.name}'s ships that sailed sank.`}`);
+    });
+  }
   function doRequestRemoval(v: Village, p: Plot) {
     act(() => { const at = VX.requestRemoval(world.current!, v, p); say(`${p.name} leaves ${v.name} at the next epoch, ${new Date(at).toLocaleDateString()} (simulated). No RF back; your unspent allowance stays with the flag and its items there go to a raffle.`); });
   }
@@ -846,6 +875,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <button type="button" onClick={() => setMenu("docks")} disabled={uiBlocked}>⚓<span>Docks</span></button>
         {chatNeighbours().length > 0 && <button type="button" onClick={() => openChat()} disabled={uiBlocked}>💬<span>Chat</span></button>}
         <button type="button" onClick={() => { setVillageError(""); setMenu("village"); }} disabled={uiBlocked}>🚩<span>Flags</span></button>
+        <button type="button" onClick={() => { setVillageError(""); setMenu("war"); }} disabled={uiBlocked}>⚔️<span>War</span></button>
         <button type="button" onClick={() => setMenu("tokens")} disabled={uiBlocked}>🚀<span>Tokens</span></button>
         <button type="button" onClick={() => void checkChain(true)} disabled={uiBlocked || checking}>{checking ? "⏳" : "🔄"}<span>Check</span></button>
         <button type="button" onClick={() => setZoom(z => clampZoom(z * 1.4))} disabled={uiBlocked} aria-label="Zoom in">＋</button>
@@ -906,7 +936,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         {nameOf(naming) && <button type="button" onClick={() => saveName(naming, "")}>Clear</button>}
       </div>
     </GameMenu>}
-    {menu && <GameMenu onClose={() => setMenu(null)} title={menu === "control" ? "Change Friend" : menu === "plot" ? "My islands" : menu === "docks" ? "The Docks" : menu === "village" ? "Flags" : menu === "tokens" ? "Tokens" : menu === "help" ? "How it works" : "Settings"}>
+    {menu && <GameMenu onClose={() => setMenu(null)} title={menu === "control" ? "Change Friend" : menu === "plot" ? "My islands" : menu === "docks" ? "The Docks" : menu === "village" ? "Flags" : menu === "war" ? "War" : menu === "tokens" ? "Tokens" : menu === "help" ? "How it works" : "Settings"}>
       {menu === "control" ? <>
         <p>Control any of your Friends: tap one on the map, or pick it here. A Friend in a line breaks off when you take it over; make it the primary leader to call the others to it.</p>
         <div className="docks-list">{[lead, ...[...crewModes.keys()], ...allMine.map(x => x.m.id).filter(id => id !== lead && !crewModes.has(id))].slice(0, 150).map(id => { const pl = allMine.find(x => x.m.id === id), m = id === lead ? "you" : crewModes.get(id) ?? "home";
@@ -1008,7 +1038,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           </div>; })}</div> : <p className="docks-note">No flags yet. Plant one in 🚩 Flags.</p>}
         <p className="docks-note">Rank follows the official Rare Friends reward weight (Generation × Activation tier), summed over an island's Friends. Neighbours are other people's public Friends shown as samples; their answers to visit requests are simulated.</p>
       </> : menu === "village" ? <>
-        <p>Plant a flag and raise it together. Anyone can lock RF into it until it reaches {fmt(VX.FLAG_TARGET)} RF; then it's founded. Locked RF never comes back once it's founded (no rug): half becomes permanent RF/ETH liquidity whose trading fees buy RF (half back into the pool, half shared as allowances), half each founder's allowance to build flag items on their island. Everyone who locked holds a soulbound founder mark. Not full in {VX.FLAG_DAYS} days? Everyone takes their RF back. Once founded, everyone brings one island: founders free, anyone else enrolls ({fmt(VX.ENROLL_PRICE)} RF: half liquidity, half their allowance). Every Friend votes; founders' votes are multiplied.</p>
+        <p>Plant a flag and raise it together. Anyone can lock RF into it until it reaches its target; then it's founded. Targets follow a bonding curve: the next flag needs {fmt(VX.flagPrice(w))} RF ({fmt(VX.FLAG_BASE)} RF × {VX.FLAG_CURVE} per flag already up, at most {fmt(VX.FLAG_TARGET)}), so early flags are cheap and joining makes more sense later. Locked RF never comes back once it's founded (no rug): half becomes permanent RF/ETH liquidity whose trading fees buy RF (half back into the pool, half shared as allowances), half each founder's allowance to build flag items on their island. Everyone who locked holds a soulbound founder mark. Not full in {VX.FLAG_DAYS} days? Everyone takes their RF back. Once founded, everyone brings one island: founders free, anyone else enrolls ({fmt(VX.ENROLL_PRICE)} RF: half liquidity, half their allowance). Every Friend votes; founders' votes are multiplied.</p>
         <div className="docks-rf"><span>Your RF <b>{fmt(econ.current.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Into pools <b>{fmt(econ.current.pooled)}</b></span>
           <button type="button" onClick={() => { econ.current.rf += 250_000; bump(); }}>＋250k preview RF</button></div>
         {(() => { const mv = mine.map(p => villageOf(w, p) ?? risingFlagOf(w, p)).find(Boolean);
@@ -1073,7 +1103,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
               {v.proposals.length > 0 && <h4>Votes</h4>}
               {v.proposals.slice().reverse().slice(0, 6).map(p => { const ended = Date.now() >= p.ends, labels = p.kind === "enrollment" ? VX.ENROLL_CHOICES
                   : p.kind === "enrollPrice" ? p.options.map(o => `${fmt(o)} RF`) : p.kind === "enrollCap" ? p.options.map(o => `${o.toLocaleString()} Friends`) : ["No", "Yes"];
-                const title = p.kind === "poolShare" ? `Put ${p.options[0] / 100}% of buybacks back into the pool`
+                const title = p.kind === "war" ? `⚔️ Declare war on ${p.memo} (${WR.WAR.WAR_DAYS} days)` : p.kind === "poolShare" ? `Put ${p.options[0] / 100}% of buybacks back into the pool`
                   : p.kind === "enrollment" ? "Enrollment after the vote" : p.kind === "enrollPrice" ? "New enrollment price (24h)" : "Close enrollment at (24h)";
                 const mineChoice = p.voters.get(VX.YOU);
                 return <div className="docks-item" key={p.id}><span><strong>#{p.id + 1} {title}</strong>
@@ -1098,7 +1128,49 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         {w.items.filter(it => it.owner === VX.YOU).map(it => { const c = VX.CATALOG[it.kind];
           return <div className="docks-item" key={it.id}><span><strong>{c.icon} {c.name}</strong><small>{it.plot ? `on ${it.plot.name}` : "not placed"}{it.plot && it.readyAt > Date.now() ? ` · 🔨 ${dur(it.readyAt - Date.now())}` : ""}</small></span>
             <span className="docks-row tight">{it.plot ? <button type="button" onClick={() => act(() => VX.takeOff(w, it, VX.YOU))}>Take off</button> : <button type="button" onClick={() => doPlaceOwn(it)}>Place where #{String(lead)} stands</button>}</span></div>; })}
-      </> : menu === "tokens" ? <>
+      </> : menu === "war" ? (() => { const bk = book.current, v = myFlag(), e = econ.current;
+        const earned = Math.floor(bk.earned.get(VX.YOU) ?? 0);
+        return <div className="docks-war">
+        <p>Only founded flags go to war. Raid a flag of your tier (or one up) with ships; islands board first come, first served, and the defender gets as many seats. Best of 3 rounds: ⛵ Broadside (ships + attack items), 🤺 Boarding (raw strength), 🏰 Siege (defense items). Win and you take part of the loser's <b>loot vault</b> plus a bounty from the Docks rewards reserve: half to the islands that fought (by level, claimable to your Friend's wallet), half into your vault. Lose and your ships sink and your vault pays. Only a flag's loot vault is ever at risk: never your wallet or allowance.</p>
+        <div className="docks-rf"><span>Your RF <b>{fmt(e.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Docks rewards reserve <b>{fmt(e.docksFund)}</b></span>
+          <span>Your earned loot <b>{fmt(earned)}</b></span>
+          <button type="button" className="rf-frame-primary" disabled={!earned} onClick={() => act(() => { const n = WR.claim(bk, e); say(`Claimed ${fmt(n)} RF of loot to #${friendId}'s wallet (simulated). It's yours now: never at risk.`); })}>Claim to #{String(friendId)}'s wallet</button></div>
+        {villageError && <p role="alert" className="docks-note">{villageError}</p>}
+        {!v ? <p className="docks-note">Your islands fly no founded flag yet. Plant or join one in 🚩 Flags to go to war.</p> : (() => {
+          const tier = WR.tierOf(w, v), shield = WR.shielded(v), ready = WR.readiness(w, bk, v), ships = WR.shipsOf(bk, v), rs = WR.readyShips(bk, v), picked = rs.filter(s => warShips.includes(s.id));
+          return <>
+          <h3><i className="docks-pennant" style={{ background: v.color }} />{v.name} · {WR.tierName(tier)}</h3>
+          <small>Battle power <b>{fmt(Math.round(WR.flagPower(w, v)))}</b> · {v.members.length} island{v.members.length === 1 ? "" : "s"} · loot vault <b>{fmt(WR.lootOf(bk, v))} RF</b> (loses {WR.lossBps(tier) / 100}% per lost battle) · {shield ? `🛡 shield: ${Math.ceil((WR.shieldEnds(v) - Date.now()) / VX.DAY)} days to build up, no raids either way` : "open to raids"}</small>
+          {shield && <div className="docks-item"><span><strong>🛠 Battle readiness {ready.pct}%</strong><small>{ready.checks.map(c => `${c.ok ? "✅" : "⬜"} ${c.label}`).join(" · ")}</small></span>
+            <button type="button" title="Preview only" onClick={() => { v.foundedAt -= WR.WAR.SHIELD_DAYS * VX.DAY; bump(); }}>⏩ End shield</button></div>}
+          <div className="docks-row tight"><input aria-label={`Add RF to ${v.name}'s loot vault`} inputMode="numeric" value={vaultAdd} onChange={e2 => setVaultAdd(e2.target.value)} />
+            <button type="button" onClick={() => act(() => { const n = rfIn(vaultAdd); WR.fund(bk, e, v, n); say(`${fmt(n)} RF into ${v.name}'s loot vault (simulated): a bigger target, and a bigger buffer.`); })}>Add to loot vault</button></div>
+          <h4>⛵ Ships ({WR.seatsOf(ships)} seats)</h4>
+          <div className="docks-row tight">{ships.map(sh => { const c = WR.SHIPS[sh.kind], left = sh.readyAt - Date.now();
+            return <label key={sh.id} className="docks-ship"><input type="checkbox" disabled={left > 0} checked={warShips.includes(sh.id)} onChange={() => setWarShips(x => x.includes(sh.id) ? x.filter(i => i !== sh.id) : [...x, sh.id])} />{c.icon} {c.name} · {c.seats} seat{c.seats === 1 ? "" : "s"}{left > 0 ? ` · 🔨 ${dur(left)}` : ""}</label>; })}</div>
+          <div className="docks-row tight"><select aria-label="Ship to build" value={shipKind} onChange={e2 => setShipKind(Number(e2.target.value))}>
+            {WR.SHIPS.map((c, i) => <option key={i} value={i}>{c.icon} {c.name} · {c.seats} seats · +{c.attack * 100}% attack · {fmt(c.price)} RF · {dur(c.build)}</option>)}</select>
+            <button type="button" onClick={() => act(() => { const sh = WR.buildShip(bk, e, v, shipKind, "allowance"); say(`${WR.SHIPS[sh.kind].icon} ${WR.SHIPS[sh.kind].name} on the slipway for ${v.name} (allowance, simulated): ready in ${dur(WR.SHIPS[sh.kind].build)}.`); })}>Build · allowance</button>
+            <button type="button" onClick={() => act(() => { const sh = WR.buildShip(bk, e, v, shipKind, "rf"); say(`${WR.SHIPS[sh.kind].icon} ${WR.SHIPS[sh.kind].name} on the slipway for ${v.name} (your RF, simulated): ready in ${dur(WR.SHIPS[sh.kind].build)}.`); })}>Build · my RF</button>
+            {ships.some(sh => sh.readyAt > Date.now()) && <button type="button" title="Preview only" onClick={() => { WR.finishShips(bk, v); bump(); }}>⏩ Finish ships</button>}</div>
+          <small>War items on your islands count in battle: {Object.entries(WR.ITEM_WAR).map(([n, x]) => `${n} ${x.attack ? `+${x.attack * 100}% attack` : ""}${x.attack && x.defense ? " " : ""}${x.defense ? `+${x.defense * 100}% defense` : ""}`).join(" · ")} (build them in 🚩 Flags; at most +{WR.WAR.ITEM_BONUS_CAP * 100}% per island and side).</small>
+          <h4>🎯 Targets</h4>
+          {WR.targets(w, bk, v).map(d => { const why = WR.raidProblem(w, bk, v, d), td = WR.tierOf(w, d), war = WR.atWar(bk, v, d);
+            const voting = v.proposals.some(p => p.kind === "war" && !p.settled && w.villages[p.options[0]] === d);
+            return <div className="docks-item" key={d.id}><span><strong><i className="docks-pennant" style={{ background: d.color }} />{d.name} · {WR.tierName(td)}{war ? " · ⚔️ at war" : ""}</strong>
+              <small>power {fmt(Math.round(WR.flagPower(w, d)))} · {d.members.length} island{d.members.length === 1 ? "" : "s"} · {VX.population(d).toLocaleString()} Friends · loot vault {fmt(WR.lootOf(bk, d))} RF{why ? ` · ${why}` : ` · ${picked.length ? `${WR.seatsOf(picked)} seats picked` : "pick ships above"}`}</small></span>
+              <span className="docks-row tight">
+                <button type="button" className="rf-frame-primary" disabled={Boolean(why) || !picked.length} onClick={() => doRaid(v, d)}>⚔️ Raid</button>
+                {!war && !voting && <button type="button" onClick={() => act(() => { VX.proposeWar(w, v, VX.YOU, d); say(`🗳 ${v.name} votes on war with ${d.name} (1 day). See the votes in 🚩 Flags.`); })}>🗳 Vote for war</button>}
+                {voting && <small>war vote open</small>}</span></div>; })}
+          </>; })()}
+        {lastBattle && <div className="docks-item docks-battle"><span><strong>{lastBattle.attackerWon ? "🏆" : "💥"} {lastBattle.attacker.name} → {lastBattle.defender.name}: {lastBattle.attackerWon ? "raid won" : "raid beaten off"}</strong>
+          <small>{["⛵ Broadside", "🤺 Boarding", "🏰 Siege"].slice(0, lastBattle.rounds.length).map((n, i) => `${n} ${lastBattle.rounds[i] ? "✓" : "✗"}`).join(" · ")} · {lastBattle.seats} seats a side · loot {fmt(lastBattle.loot)} + bounty {fmt(lastBattle.bounty)} RF{lastBattle.war ? " (war: double bounty)" : ""}</small>
+          <small>{[...lastBattle.shares].map(([who, n]) => `${who === VX.YOU ? "you" : who} ${fmt(Math.floor(n))}`).join(" · ")}</small></span></div>}
+        {book.current.battles.length > 1 && <small>{book.current.battles.length} battles fought on the docks so far.</small>}
+        <details><summary>War rules (all settings, tunable)</summary>
+          <p className="docks-note">Shield {WR.WAR.SHIELD_DAYS} days after founding · loot vault starts with {WR.WAR.LOOT_FROM_FOUNDING_BPS / 100}% of the flag's RF and gets {WR.WAR.LOOT_FROM_HARVEST_BPS / 100}% of every harvest's shared half; anyone can add to it · bounty {WR.WAR.DOCKS_BOUNTY_BPS / 100}% of the Docks rewards reserve per win (double in a declared war) · {WR.WAR.TO_FIGHTERS_BPS / 100}% of loot to the fighters by level, the rest to the winner's vault · loss per battle {WR.WAR.TIER_NAMES.map((n, t) => `${n} ${WR.lossBps(t) / 100}%`).join(", ")} · home advantage {WR.WAR.HOME_ADVANTAGE * 100}% · empty defense seats filled by the defender's strongest islands at {WR.WAR.EMPTY_SEAT_STRENGTH * 100}% · raid cooldown {WR.WAR.RAID_COOLDOWN_HOURS} h per target outside a war · war lasts {WR.WAR.WAR_DAYS} days · {WR.WAR.INTRO_DINGHIES} free dinghies per new flag · tiers by battle power: {WR.WAR.TIERS.map((m, t) => `${WR.WAR.TIER_NAMES[t]} ${fmt(m)}+`).join(", ")} (tier skins later). Island level = rank (reward weight) + log₂(Friends); strength = level × √Friends. On chain, each round is one Dice roll.</p></details>
+      </div>; })() : menu === "tokens" ? <>
         <div className="docks-rf"><span>Your RF <b>{fmt(econ.current.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Into pools <b>{fmt(econ.current.pooled)}</b></span><span>Docks pool <b>{fmt(econ.current.docksPool)}</b></span><span>Platform fee <b>{PLATFORM_FEE_BPS / 100}%</b></span></div>
         <p className="docks-note">Launch a token from your island for {LAUNCH_FEE.toLocaleString()} RF. Airdrops and claims land in each Friend's own wallet; every claim costs RF. Launch fees and claim prices go into {poolName(w, h)} (the launching island's flag pool, or the shared Docks pool): nothing is burned. In this preview it's all simulated; the contracts are in the submission.</p>
         <h3>Launch a token from {h.name}</h3>

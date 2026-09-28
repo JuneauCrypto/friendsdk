@@ -11,7 +11,7 @@
  *    flag items are raffled to the members who stayed (RF tickets → liquidity);
  *  - votes: every Friend on a member's island is a vote; founders ×(1 + their share of the pool);
  *  - harvest: fees buy back RF; the pool share (half) goes back into the pool, the rest is
- *    shared by Friends. Nothing is burned. */
+ *    shared by Friends (less the flag's loot-vault share, see war.ts). Nothing is burned. */
 import { addMember, CELL, flagProblem, newVillage, villageOf, walletOf, type Item, type Plot, type Proposal, type ProposalKind, type Raffle, type Village, type World } from "./world.js";
 import { toPool, type Economy } from "./launch.js";
 
@@ -38,7 +38,20 @@ export const CATALOG = [
   { name: "Market stall", icon: "🏪", price: 10_000, build: DAY },
   { name: "Fountain", icon: "⛲", price: 25_000, build: 3 * DAY },
   { name: "Watchtower", icon: "🗼", price: 50_000, build: 7 * DAY },
+  // war items (their battle value is in war.ts ITEM_WAR)
+  { name: "Cannon", icon: "💣", price: 20_000, build: DAY },
+  { name: "Sea wall", icon: "🧱", price: 20_000, build: DAY },
+  { name: "Armory", icon: "⚔️", price: 60_000, build: 3 * DAY },
+  { name: "Fort", icon: "🏰", price: 60_000, build: 3 * DAY },
 ];
+/** Flags get dearer as more are planted (a bonding curve): cheap to start early, joining makes
+ *  more sense later. FLAG_BASE × FLAG_CURVE^(flags so far), capped at FLAG_TARGET. */
+export const FLAG_BASE = 100_000;
+export const FLAG_CURVE = 1.25;
+export function flagPrice(w: World) {
+  const n = w.villages.filter(v => v.founded || rising(v)).length;
+  return Math.min(FLAG_TARGET, Math.round(FLAG_BASE * Math.pow(FLAG_CURVE, n) / 1_000) * 1_000);
+}
 
 export const ENROLL_CHOICES = ["Keep open at the current price", "Open at a different price", "Close now", "Close at a population"];
 
@@ -74,7 +87,7 @@ export function plant(w: World, e: Economy | null, seat: Plot, name: string, at:
   const why = flagProblem(w, seat, at); if (why) throw new Error(why);
   if (amount < MIN_LOCK) throw new Error(`Lock at least ${MIN_LOCK.toLocaleString()} RF to plant a flag.`);
   if (!name.trim()) throw new Error("Name your flag.");
-  const v = newVillage(w, seat, name, at, FLAG_TARGET, Date.now() + FLAG_DAYS * DAY);
+  const v = newVillage(w, seat, name, at, flagPrice(w), Date.now() + FLAG_DAYS * DAY);
   lock(w, e, v, amount, who);
   return v;
 }
@@ -143,12 +156,12 @@ export function accrueFees(v: Village, rand = Math.random) {
 }
 
 /** Collect fees, buy back RF with the ETH: the pool share back into the pool, the rest shared by Friends. Members only. */
-export function harvest(v: Village, e: Economy, who = YOU) {
+export function harvest(v: Village, e: Economy, who = YOU, lootBps = 0) {
   if (!v.founded) throw new Error(`${v.name} isn't founded yet.`);
   if (!islandOf(v, who)) throw new Error(`Only ${v.name}'s members harvest (they set the buyback's minimum).`);
   const bought = Math.round(v.fees.eth * RF_PER_ETH), total = v.fees.rf + bought;
-  const toPoolRf = Math.round(total * v.poolBps / 10_000), kept = total - toPoolRf;
-  const out = { rf: v.fees.rf, eth: v.fees.eth, bought, toPool: toPoolRf, kept };
+  const toPoolRf = Math.round(total * v.poolBps / 10_000), loot = Math.round((total - toPoolRf) * lootBps / 10_000), kept = total - toPoolRf - loot;
+  const out = { rf: v.fees.rf, eth: v.fees.eth, bought, toPool: toPoolRf, kept, loot };
   v.fees = { rf: 0, eth: 0 }; v.pendingLiquidity += toPoolRf; v.compounded += toPoolRf; void e;
   const pop = population(v);
   for (const m of v.members) { const who = walletOf(m); v.credited.set(who, (v.credited.get(who) ?? 0) + (pop ? kept * m.friends.length / pop : 0)); }
@@ -158,7 +171,15 @@ export function harvest(v: Village, e: Economy, who = YOU) {
 
 /* ── votes: Friends × founder multiplier ── */
 
-const CHOICES: Record<ProposalKind, number> = { poolShare: 2, enrollment: 4, enrollPrice: 3, enrollCap: 3 };
+/** Propose declaring war on another founded flag (`target` = its index in w.villages). Members propose. */
+export function proposeWar(w: World, v: Village, who: string, target: Village) {
+  if (!v.founded || !target.founded) throw new Error("Only founded flags go to war.");
+  if (!islandOf(v, who)) throw new Error(`Only ${v.name}'s members make proposals.`);
+  if (v.proposals.some(p => p.kind === "war" && !p.settled && w.villages[p.options[0]] === target)) throw new Error(`A vote on war with ${target.name} is already open.`);
+  return newProposal(v, "war", [w.villages.indexOf(target)], target.name, 1);
+}
+
+const CHOICES: Record<ProposalKind, number> = { poolShare: 2, enrollment: 4, enrollPrice: 3, enrollCap: 3, war: 2 };
 function newProposal(v: Village, kind: ProposalKind, options: number[], memo: string, days: number): Proposal {
   const p: Proposal = { id: v.proposals.length, kind, options, memo: memo.trim().slice(0, 140), tally: Array(CHOICES[kind]).fill(0),
     voters: new Map(), ends: Date.now() + days * DAY, settled: false, winner: -1 };
@@ -197,6 +218,10 @@ export function settle(v: Village, p: Proposal): string {
   if (p.settled) throw new Error("Already settled.");
   if (Date.now() < p.ends) throw new Error("Voting is still open.");
   p.settled = true;
+  if (p.kind === "war") {
+    p.winner = passed(v, p) ? 1 : 0;
+    return p.winner ? `${v.name} voted for war on ${p.memo}!` : `${v.name} voted against war on ${p.memo}.`;
+  }
   if (p.kind === "poolShare") {
     p.winner = passed(v, p) ? 1 : 0;
     if (!p.winner) return `${v.name}'s vote didn't pass.`;
