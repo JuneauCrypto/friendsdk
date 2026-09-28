@@ -43,7 +43,7 @@ contract DocksForkTest is Test {
         vm.createSelectFork(rpc);
         IDocksGenerations gen = IDocksGenerations(GENERATIONS);
         DocksIslands reg = new DocksIslands(gen, IERC20(RF));
-        DocksLaunchpad pad = new DocksLaunchpad(IERC20(RF), reg, new DocksVillages(IERC20(RF), reg, 1_000_000 ether, 30 days, 1000 ether), address(0x7EA));
+        DocksLaunchpad pad = new DocksLaunchpad(IERC20(RF), reg, new DocksVillages(IERC20(RF), reg, 1_000_000 ether, 30 days, 1000 ether, 10_000 ether), address(0x7EA));
 
         assertTrue(reg.isActive(67111));
         assertTrue(reg.isActive(7153));
@@ -107,7 +107,7 @@ contract DocksForkTest is Test {
         vm.createSelectFork(rpc);
         IDocksGenerations gen = IDocksGenerations(GENERATIONS);
         DocksIslands reg = new DocksIslands(gen, IERC20(RF));
-        DocksVillages vil = new DocksVillages(IERC20(RF), reg, 1_000_000 ether, 30 days, 1000 ether);
+        DocksVillages vil = new DocksVillages(IERC20(RF), reg, 1_000_000 ether, 30 days, 1000 ether, 10_000 ether);
         DocksUniV3Liquidity liq = new DocksUniV3Liquidity(
             IERC20(RF), IERC20(WETH), IUniV3Factory(V3_FACTORY), IUniV3PositionManager(V3_POSITIONS), ISwapRouter02(SWAP_ROUTER02), 3000
         );
@@ -139,9 +139,8 @@ contract DocksForkTest is Test {
         assertGt(liquidity, 0);
         assertGt(lower, tickBefore, "one-sided: only RF, just above the price");
 
-        vm.startPrank(b);
-        vil.join(v, plotB, plotA);
-        vm.stopPrank();
+        vm.prank(b);
+        vil.bring(v, plotB);
         assertTrue(vil.sameVillage(plotA, plotB));
 
         _tradeThrough(pool, lower);

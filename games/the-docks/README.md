@@ -67,7 +67,7 @@ app's built-in browser (the SDK has no WalletConnect).
 | **Scale** | Layout needs no artwork: footprints come from generation. Occupancy is per 4 × 4-tile cell. Only Friends near the camera are drawn; their on-chain art loads lazily (6 at a time, 500 kept in memory). The crew shows up to 24 walkers. Tested with 10,002 Friends on desktop and phone. |
 | **Chain checks** | Every 60 s and on **Check**: re-read every Friend's tokenURI; if its art or traits changed (e.g. tier upgrade) the art, footprint and rank update. Deactivated Friends leave the docks; Friends no longer held by your wallet leave your plot. |
 | **Lead & crew** | You lead one Friend (the one you walk as); every other Friend stands on its own land, as the on-chain art shows. 👥 Crew → **Call all** brings every Friend over to the lead (40 drawn walking, the rest counted). Tap Friends on the map to pick them, then **Bring picked**, **Leave picked here** (break off and walk on without them), **Take over** (lead that Friend instead; the old lead stays where it was), **Everyone wait** or **All go home**. The Islands list has the same per Friend (*On its land / With the lead / Lead*). |
-| **Villages** *(simulated)* | 🚩 Village → name it, set your first lock and **Plant flag** where your lead stands on a saved, docked island of yours. The flag rises up its pole as RF is locked in: **anyone** can **Lock RF** into any rising flag until it reaches **1,000,000 RF** (a contract setting). Each locker holds a **soulbound founder mark** (can't be moved or sold) recording what they locked, which is their vote weight. Full → **Found** (anyone can): half the RF becomes the village treasury (RF only), half permanent one-sided RF/ETH liquidity. Nothing can be withdrawn after founding, so a village can't be rugged. **Harvest** (founders): trading fees are collected, the ETH part buys back RF, half is burned and half fills the treasury. **Votes**: founders propose spending treasury RF on marketplace upgrades or changing the burn share; 3-day vote, more yes than no, 20% of founder weight must vote. Not full in 30 days → everyone takes their RF back. Islands docked next to (or bridged to) a founded village choose to join (gas only); the flag's island stays the seat. Samples: *Market Town* (founded) and *Crystal Hollow* (rising, open to your RF); sample islands lock RF, trade, vote and join over time. ⏩ buttons skip time in the preview. |
+| **Villages** *(simulated)* | 🚩 Village → name it, set your first lock and **Plant flag** where your lead stands on a saved, docked island of yours. The flag rises up its pole as RF is locked in: **anyone** can **Lock RF** until it reaches **1,000,000 RF** (a contract setting). Each locker holds a **soulbound founder mark** with what they locked. Full → **Found** (anyone): half the RF becomes the village treasury (RF only), half permanent one-sided RF/ETH liquidity; nothing can be withdrawn after that, so it can't be rugged. Not full in 30 days → everyone takes their RF back. **People:** everyone brings **one island**: the planter's is the seat, founders bring theirs free, anyone else **enrolls** for 10,000 RF paid into the pool (half treasury, half liquidity). Enrollment is open for the first 7 days; after that it's what the village votes: keep open at the current price, a new price, close now, or close at a population (Friends in the village). A new price or population closes enrollment until a 24-hour vote between three options (half / double / five times the price; 1.5× / 2× / 4× the population). **Votes:** every Friend on a member's island is a vote; founders multiply theirs by 1 + their share of the pool, and every enrollment fee grows the pool, so newcomers dilute founders while adding their own Friends. Spend treasury RF on marketplace upgrades or change the burn share: 3-day vote, yes > no, 20% of all votes cast. **Harvest** (members): trading fees buy back RF, half burned, half to the treasury. Samples: *Market Town* (founded, open) and *Crystal Hollow* (rising); sample islands lock, enroll and vote over time. ⏩ buttons skip time in the preview. |
 | **Tokens** *(simulated)* | 🚀 Tokens → launch: name, ticker, supply; airdrop scope and amount; claim pool, per-claim amount, claim price. Costs **1,000 RF** (500 burned, 500 treasury). Airdrops and claims land in each Friend's own wallet. Every claim burns the launch's RF price. A sample plot's `$MKT` is there to claim. |
 | **Rank** | Sum of the official reward weight (Generation × Activation tier, per rarefriends.com/docs/generations) of a plot's Friends: Speck 0+ · Hamlet 5+ · Village 50+ · Town 500+ · City 5,000+ · Capital 50,000+. |
 
@@ -147,27 +147,30 @@ needs backing.
   and one claim per Friend per launch; claim price burned; scopes as above. Batches
   keep 10,000-Friend plots practical (a client sends ~100 placements or claims per
   transaction).
-- `DocksVillages.sol` — `plant(islandId, name, x, y, amount)` puts a flag on a land cell of your docked
-  island and locks the first RF; `lock(villageId, amount)` lets anyone add until `flagTarget`
-  (constructor setting, e.g. 1,000,000 RF; the last lock is trimmed, smallest lock `minLock`);
-  `found(villageId)` (anyone, once full) sends half to the village treasury and half to
-  permanent liquidity; `refund` after `flagDuration` (plus 7 days for a full flag nobody could
-  found). No owner or withdraw. `join(villageId, islandId, viaIslandId)` (gas only) needs your
-  docked island `connected` to a village island; `leaveVillage` is free; the seat stays.
+- `DocksVillages.sol` — flags: `plant(islandId, name, x, y, amount)`, `lock` (anyone, until
+  `flagTarget`, last lock trimmed, smallest `minLock`), `found` (anyone, once full: all RF to the
+  treasury, half treasury / half liquidity), `refund` after `flagDuration` (plus 7 days for a
+  full flag nobody could found). People: one island per wallet: the seat, `bring` (founders,
+  free) or `enroll` (the enrollment price, into the pool); `leaveVillage` (free; the seat stays).
+  Votes: power = Friends on your village island × (1 + locked / pool); `propose` Spend /
+  BurnShare (3 days, yes > no, 20% of `totalPower`); enrollment: the first vote runs through the
+  7-day open window, members can start more (`proposeEnrollment`), 4 choices (keep open, change
+  price, close now, close at a population), plurality wins, ties go to the earlier choice; a new
+  price or population closes enrollment until a 1-day follow-up between three options;
+  `settle` (anyone) carries out a result. No owner or withdraw.
 - `DocksFounderMarks.sol` — soulbound ERC-721 (ERC-5192 `locked`): one mark per wallet per
   flag, holding the RF it locked; every transfer and approval reverts; burned only on refund.
-- `DocksVillageTreasury.sol` — per-village RF treasury. `harvest(villageId, minRfOut)`
-  (founders) collects fees, buys RF with the WETH part, burns `burnBps` (50% by default) and
-  keeps the rest. `propose` / `vote` / `execute`: weight = founder mark; passes after 3 days
-  with yes > no and 20% quorum. Options today: **Spend** (treasury RF to a recipient, e.g. a
-  marketplace upgrade) and **SetBurnShare**.
+- `DocksVillageTreasury.sol` — per-village RF treasury. Enrollment fees: half treasury, half
+  queued and added to liquidity by `provideLiquidity` (anyone). `harvest(villageId, minRfOut)`
+  (members) collects fees, buys RF with the WETH part, burns `burnBps` (50% by default) and
+  keeps the rest. `spend` and `setBurnBps` only run when a DocksVillages vote passes.
 - `DocksUniV3Liquidity.sol` — the village's liquidity on Uniswap v3 (live on Robinhood Chain:
   factory `0x1f7d…2EfA`, positions `0x7399…E0D3`, SwapRouter02 `0xCaf6…5cb2`, WETH
   `0x0Bd7…AD73`). RF goes in one-sided (from just past the price to the end of the curve), so
   no ETH is needed up front; buyers fill it with ETH over time. The position NFT stays in the
   contract, which has no remove-liquidity function; `collect` takes fees only. `buyRf` is the
   buyback swap. There is no RF/WETH v3 pool on chain yet, so one must be created first.
-- Tests: `forge test --match-contract DocksTest` (40 unit tests, including flags filled by many lockers with the last lock trimmed, soulbound marks, refunds after the deadline and after the grace week, founding splits, joining only while connected, harvest buyback and burn, votes (spend, rejection, burn share), the village launch scope, islands are not tokens, per-generation burn, only moved Friends charged, deploying between islands, holes (reserved, healed on return, burned in when placed elsewhere, filled by same-size Friends), loading zones, size-independent berths, bridge pricing and expiry, launch scopes over gangways and bridges, 300 Friends arranged and claimed in one transaction each) and
+- Tests: `forge test --match-contract DocksTest` (44 unit tests, including flags filled by many lockers with the last lock trimmed, soulbound marks, refunds after the deadline and after the grace week, founding splits, one island per wallet (bring free / enroll paid, fee split, leaving and re-enrolling), power = Friends × founder share with enrollees diluting it, the enrollment window and every enrollment vote outcome (keep, new price via the 24h vote, close, close at a population), spend votes won and lost by Friend count, harvest buyback and burn, the burn share vote, the village launch scope, islands are not tokens, per-generation burn, only moved Friends charged, deploying between islands, holes (reserved, healed on return, burned in when placed elsewhere, filled by same-size Friends), loading zones, size-independent berths, bridge pricing and expiry, launch scopes over gangways and bridges, 300 Friends arranged and claimed in one transaction each) and
   `FRIENDSDK_FORK_RPC=https://rpc.mainnet.chain.robinhood.com forge test --match-contract DocksForkTest`
   (real Generations, activation manager and RF on a local fork: creates two islands, arranges
   #67111 (burns 50 RF) and #7153, docks them side by side, launches, claims; and a village on the

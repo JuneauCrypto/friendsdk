@@ -65,16 +65,22 @@ export type World = {
 /** A flag planted on an island rises as people lock RF into it; full, it's founded as a village
  *  and other islands choose to join while connected to it. Mirrors contracts/src/docks/DocksVillages.sol. */
 export type Village = {
-  id: string; name: string; seat: Plot; flag: { x: number; y: number }; members: Plot[]; color: string;
-  target: number; deadline: number; locked: number; lockers: Map<string, number>;   // who (a wallet label) → RF locked
-  founded: boolean; failed: boolean;
-  treasury: number; liquidity: number; fees: { rf: number; eth: number }; burnBps: number; burned: number;
+  id: string; name: string; seat: Plot; flag: { x: number; y: number }; color: string;
+  members: Plot[];                                                // one island per wallet (walletOf)
+  target: number; deadline: number; locked: number; lockers: Map<string, number>;   // founder (wallet label) → RF locked
+  founded: boolean; failed: boolean; foundedAt: number;
+  pool: number;                                                   // locked + enrollment fees: founder shares are of this
+  enrollOpen: boolean; enrollPrice: number; enrollCap: number; enrollVote: Proposal | null;
+  treasury: number; liquidity: number; pendingLiquidity: number; fees: { rf: number; eth: number }; burnBps: number; burned: number;
   proposals: Proposal[];
 };
+export type ProposalKind = "spend" | "burnShare" | "enrollment" | "enrollPrice" | "enrollCap";
 export type Proposal = {
-  id: number; kind: "spend" | "burnShare"; amount: number; burnBps: number; memo: string;
-  yes: number; no: number; voters: Set<string>; ends: number; executed: boolean;
+  id: number; kind: ProposalKind; options: number[]; memo: string;
+  tally: number[]; voters: Map<string, number>; ends: number; settled: boolean; winner: number;
 };
+/** Who an island's votes belong to: you, or the sample neighbour's wallet (named after it). */
+export const walletOf = (p: Plot) => (p.mine ? "you" : p.name);
 
 // Numeric keys (fast for large islands). Coordinates stay well inside ±2^20.
 const K = 1 << 21, HALF = 1 << 20;
@@ -327,24 +333,25 @@ export function flagProblem(w: World, p: Plot, at: { x: number; y: number }): st
 }
 export function newVillage(w: World, seat: Plot, name: string, at: { x: number; y: number }, target: number, deadline: number): Village {
   const clean = name.trim().slice(0, 32); if (!clean) throw new Error("Name your village.");
-  const v: Village = { id: `v${w.villages.length + 1}-${seat.id}`, name: clean, seat, flag: { ...at }, members: [seat],
-    color: FLAG_COLORS[w.villages.length % FLAG_COLORS.length], target, deadline, locked: 0, lockers: new Map(), founded: false, failed: false,
-    treasury: 0, liquidity: 0, fees: { rf: 0, eth: 0 }, burnBps: 5000, burned: 0, proposals: [] };
+  const v: Village = { id: `v${w.villages.length + 1}-${seat.id}`, name: clean, seat, flag: { ...at }, members: [],
+    color: FLAG_COLORS[w.villages.length % FLAG_COLORS.length], target, deadline, locked: 0, lockers: new Map(), founded: false, failed: false, foundedAt: 0,
+    pool: 0, enrollOpen: false, enrollPrice: 0, enrollCap: 0, enrollVote: null,
+    treasury: 0, liquidity: 0, pendingLiquidity: 0, fees: { rf: 0, eth: 0 }, burnBps: 5000, burned: 0, proposals: [] };
   w.villages.push(v); w.version++; return v;
 }
-/** An island can join a founded village while it's docked and connected to any island in it. */
+/** Everyone in a village brings exactly one island (one per wallet). Why `p` can't (null: it can). */
 export function joinProblem(w: World, v: Village, p: Plot): string | null {
-  if (!v.founded) return `${v.name}'s flag is still rising: islands join once it's full and founded.`;
+  if (!v.founded) return `${v.name}'s flag is still rising: islands join once it's founded.`;
   if (!p.berth) return `Dock ${p.name} first.`;
   const cur = villageOf(w, p) ?? risingFlagOf(w, p); if (cur) return cur === v ? `${p.name} is in ${v.name}.` : `${p.name} already flies ${cur.name}'s flag.`;
-  if (!v.members.some(m => connected(w, p, m))) return `Dock next to, or bridge to, an island in ${v.name} to join.`;
+  if (v.members.some(m => walletOf(m) === walletOf(p))) return `You already have an island in ${v.name}: everyone brings one.`;
   return null;
 }
-export function joinVillage(w: World, v: Village, p: Plot) {
+export function addMember(w: World, v: Village, p: Plot) {
   const why = joinProblem(w, v, p); if (why) throw new Error(why);
   v.members.push(p); w.version++;
 }
-/** Leaving is free. The seat island, where the flag stands, stays: the RF under it is locked for good. */
+/** Leaving is free. The seat island, where the flag stands, stays. */
 export function leaveVillage(w: World, p: Plot) {
   const v = villageOf(w, p); if (!v) return null;
   if (v.seat === p) throw new Error(`${p.name} is ${v.name}'s seat: the flag stays.`);

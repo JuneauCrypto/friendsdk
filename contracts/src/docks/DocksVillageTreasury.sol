@@ -19,61 +19,31 @@ interface IDocksBuyback {
     function buyRf(uint256 wethIn, uint256 minRfOut, address to) external returns (uint256 rfOut);
 }
 
-/// @notice Village treasuries and votes.
+/// @notice Village treasuries.
 ///
 /// When a village is founded, half its flag's RF lands here as the village treasury (RF only)
-/// and half becomes permanent liquidity (IDocksLiquidity). `harvest` collects the liquidity's
-/// trading fees, buys RF back with the WETH part, burns `burnBps` of all the RF (half by
-/// default) and adds the rest to the treasury.
-///
-/// Founders vote with the RF they locked (their soulbound founder marks). A proposal passes
-/// after VOTING_PERIOD when yes > no and at least QUORUM_BPS of the village's founder weight
-/// voted. What a village can vote on today:
-///  - Spend: send treasury RF to a recipient, e.g. to buy upgrades on a Rare Friends marketplace.
-///  - SetBurnShare: change how much of each harvest is burned (the rest fills the treasury).
-/// More options are meant to be added for every village to choose from.
+/// and half becomes permanent liquidity (IDocksLiquidity). Enrollment fees are split the same
+/// way: half to the treasury, half queued and added to liquidity by `provideLiquidity`.
+/// `harvest` collects the liquidity's trading fees, buys RF back with the WETH part, burns the
+/// village's burn share (half by default) and adds the rest to the treasury. Spending and the
+/// burn share are decided by the village's votes in DocksVillages; nothing else moves the RF.
 contract DocksVillageTreasury is IDocksVillageTreasury, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     address public constant BURN = 0x000000000000000000000000000000000000dEaD;
-    uint256 public constant VOTING_PERIOD = 3 days;
-    uint256 public constant QUORUM_BPS = 2000; // 20% of founder weight must vote
     uint16 public constant DEFAULT_BURN_BPS = 5000; // half of every buyback burned
 
-    enum Kind {
-        Spend,
-        SetBurnShare
-    }
-
-    struct Proposal {
-        uint256 villageId;
-        Kind kind;
-        address to;
-        uint256 amount;
-        uint16 burnBps;
-        uint64 ends;
-        bool executed;
-        uint256 yes;
-        uint256 no;
-        string memo;
-    }
-
     error NotVillages();
-    error NotFounder();
+    error NotMember();
     error NotFounded();
-    error BadProposal();
-    error VotingClosed();
-    error AlreadyVoted();
-    error VotingOpen();
-    error Rejected();
-    error Executed();
     error NoFunds();
 
     event VillageFunded(uint256 indexed villageId, uint256 treasuryRf, uint256 liquidityRf);
+    event Deposited(uint256 indexed villageId, uint256 treasuryRf, uint256 queuedForLiquidity);
+    event LiquidityAdded(uint256 indexed villageId, uint256 rf);
     event Harvested(uint256 indexed villageId, uint256 rfFees, uint256 wethFees, uint256 rfBought, uint256 burned, uint256 toTreasury);
-    event Proposed(uint256 indexed proposalId, uint256 indexed villageId, Kind kind, address to, uint256 amount, uint16 burnBps, string memo);
-    event Voted(uint256 indexed proposalId, address indexed wallet, bool support, uint256 weight);
-    event ProposalExecuted(uint256 indexed proposalId);
+    event Spent(uint256 indexed villageId, address indexed to, uint256 amount);
+    event BurnShareSet(uint256 indexed villageId, uint16 burnBps);
 
     IERC20 public immutable rf;
     IERC20 public immutable weth;
@@ -82,10 +52,9 @@ contract DocksVillageTreasury is IDocksVillageTreasury, ReentrancyGuard {
     IDocksBuyback public immutable buyback;
 
     mapping(uint256 villageId => uint256) public balanceOf; // treasury RF
+    mapping(uint256 villageId => uint256) public pendingLiquidity;
     mapping(uint256 villageId => bool) public funded;
     mapping(uint256 villageId => uint16) private _burnBps; // stored +1 so 0 can mean "unset"
-    Proposal[] private _proposals;
-    mapping(uint256 proposalId => mapping(address wallet => bool)) public voted;
 
     constructor(IERC20 rf_, IERC20 weth_, DocksVillages villages_, IDocksLiquidity liquidity_, IDocksBuyback buyback_) {
         rf = rf_;
@@ -95,23 +64,54 @@ contract DocksVillageTreasury is IDocksVillageTreasury, ReentrancyGuard {
         buyback = buyback_;
     }
 
-    /// @inheritdoc IDocksVillageTreasury
-    function found(uint256 villageId, uint256 treasuryRf, uint256 liquidityRf) external nonReentrant {
+    modifier onlyVillages() {
         if (msg.sender != address(villages)) revert NotVillages();
+        _;
+    }
+
+    /// @inheritdoc IDocksVillageTreasury
+    function found(uint256 villageId, uint256 treasuryRf, uint256 liquidityRf) external onlyVillages nonReentrant {
         funded[villageId] = true;
-        rf.forceApprove(address(liquidity), liquidityRf);
-        uint256 used = liquidity.provide(villageId, liquidityRf);
-        rf.forceApprove(address(liquidity), 0);
-        balanceOf[villageId] += treasuryRf + (liquidityRf - used); // any rounding dust stays with the village
-        emit VillageFunded(villageId, treasuryRf, used);
+        balanceOf[villageId] += treasuryRf + (liquidityRf - _provide(villageId, liquidityRf));
+        emit VillageFunded(villageId, treasuryRf, liquidityRf);
+    }
+
+    /// @inheritdoc IDocksVillageTreasury
+    function deposit(uint256 villageId, uint256 amount) external onlyVillages {
+        uint256 toTreasury = amount / 2;
+        balanceOf[villageId] += toTreasury;
+        pendingLiquidity[villageId] += amount - toTreasury;
+        emit Deposited(villageId, toTreasury, amount - toTreasury);
+    }
+
+    /// @notice Add the enrollment RF queued for a village to its permanent liquidity. Anyone.
+    function provideLiquidity(uint256 villageId) external nonReentrant {
+        uint256 amount = pendingLiquidity[villageId];
+        if (amount == 0) revert NoFunds();
+        pendingLiquidity[villageId] = 0;
+        balanceOf[villageId] += amount - _provide(villageId, amount);
+    }
+
+    /// @inheritdoc IDocksVillageTreasury
+    function spend(uint256 villageId, address to, uint256 amount) external onlyVillages {
+        if (balanceOf[villageId] < amount) revert NoFunds();
+        balanceOf[villageId] -= amount;
+        rf.safeTransfer(to, amount);
+        emit Spent(villageId, to, amount);
+    }
+
+    /// @inheritdoc IDocksVillageTreasury
+    function setBurnBps(uint256 villageId, uint16 burnBps) external onlyVillages {
+        _burnBps[villageId] = burnBps + 1;
+        emit BurnShareSet(villageId, burnBps);
     }
 
     /// @notice Collect the village's trading fees, buy RF with the WETH part, burn the
-    /// village's burn share and add the rest to its treasury. Founders only, since they set
+    /// village's burn share and add the rest to its treasury. Members only, since they set
     /// the minimum RF the buyback must return.
     function harvest(uint256 villageId, uint256 minRfOut) external nonReentrant returns (uint256 burned, uint256 kept) {
         if (!funded[villageId]) revert NotFounded();
-        if (villages.weightOf(villageId, msg.sender) == 0) revert NotFounder();
+        if (!villages.inVillage(villageId, msg.sender)) revert NotMember();
         (uint256 rfFees, uint256 wethFees) = liquidity.collect(villageId, address(this));
         uint256 bought;
         if (wethFees > 0) {
@@ -131,65 +131,11 @@ contract DocksVillageTreasury is IDocksVillageTreasury, ReentrancyGuard {
         return b == 0 ? DEFAULT_BURN_BPS : b - 1;
     }
 
-    /* ── votes ── */
-
-    function propose(uint256 villageId, Kind kind, address to, uint256 amount, uint16 burnBps, string calldata memo)
-        external
-        returns (uint256 proposalId)
-    {
-        if (!funded[villageId]) revert NotFounded();
-        if (villages.weightOf(villageId, msg.sender) == 0) revert NotFounder();
-        if (kind == Kind.Spend && (to == address(0) || amount == 0)) revert BadProposal();
-        if (kind == Kind.SetBurnShare && burnBps > 10_000) revert BadProposal();
-        if (bytes(memo).length > 140) revert BadProposal();
-        proposalId = _proposals.length;
-        _proposals.push(
-            Proposal(villageId, kind, to, amount, burnBps, uint64(block.timestamp + VOTING_PERIOD), false, 0, 0, memo)
-        );
-        emit Proposed(proposalId, villageId, kind, to, amount, burnBps, memo);
-    }
-
-    /// @notice Vote with the RF you locked into the village's flag.
-    function vote(uint256 proposalId, bool support) external {
-        Proposal storage p = _proposals[proposalId];
-        if (block.timestamp >= p.ends) revert VotingClosed();
-        if (voted[proposalId][msg.sender]) revert AlreadyVoted();
-        uint256 w = villages.weightOf(p.villageId, msg.sender);
-        if (w == 0) revert NotFounder();
-        voted[proposalId][msg.sender] = true;
-        if (support) p.yes += w;
-        else p.no += w;
-        emit Voted(proposalId, msg.sender, support, w);
-    }
-
-    /// @notice Carry out a proposal that passed. Anyone may call it.
-    function execute(uint256 proposalId) external nonReentrant {
-        Proposal storage p = _proposals[proposalId];
-        if (p.executed) revert Executed();
-        if (block.timestamp < p.ends) revert VotingOpen();
-        if (!passed(proposalId)) revert Rejected();
-        p.executed = true;
-        if (p.kind == Kind.Spend) {
-            if (balanceOf[p.villageId] < p.amount) revert NoFunds();
-            balanceOf[p.villageId] -= p.amount;
-            rf.safeTransfer(p.to, p.amount);
-        } else {
-            _burnBps[p.villageId] = p.burnBps + 1;
-        }
-        emit ProposalExecuted(proposalId);
-    }
-
-    function passed(uint256 proposalId) public view returns (bool) {
-        Proposal storage p = _proposals[proposalId];
-        uint256 quorum = villages.totalWeight(p.villageId) * QUORUM_BPS / 10_000;
-        return p.yes > p.no && p.yes + p.no >= quorum;
-    }
-
-    function proposals(uint256 proposalId) external view returns (Proposal memory) {
-        return _proposals[proposalId];
-    }
-
-    function proposalCount() external view returns (uint256) {
-        return _proposals.length;
+    /// @dev Returns the RF actually used (any rounding dust stays with the village).
+    function _provide(uint256 villageId, uint256 amount) private returns (uint256 used) {
+        rf.forceApprove(address(liquidity), amount);
+        used = liquidity.provide(villageId, amount);
+        rf.forceApprove(address(liquidity), 0);
+        emit LiquidityAdded(villageId, used);
     }
 }
