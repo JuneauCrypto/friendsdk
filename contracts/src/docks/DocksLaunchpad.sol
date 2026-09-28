@@ -6,6 +6,7 @@ import { ERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.so
 import { SafeERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import { ReentrancyGuard } from "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
 import { DocksIslands, IDocksGenerations } from "./DocksIslands.sol";
+import { DocksVillages } from "./DocksVillages.sol";
 
 /// @notice Fixed-supply token launched from an island. No owner, no minting after launch.
 contract DocksToken is ERC20 {
@@ -28,7 +29,8 @@ contract DocksLaunchpad is ReentrancyGuard {
         AnyDocked,
         HolderIsland,
         IslandAndNeighbours,
-        Visitors
+        Visitors,
+        Village
     }
 
     struct Launch {
@@ -86,15 +88,17 @@ contract DocksLaunchpad is ReentrancyGuard {
     IERC20 public immutable rf;
     DocksIslands public immutable registry;
     IDocksGenerations public immutable generations;
+    DocksVillages public immutable villages;
     address public immutable treasury;
 
     Launch[] private _launches;
     mapping(uint256 launchId => mapping(uint256 friendId => bool)) public claimed;
     mapping(uint256 launchId => mapping(uint256 friendId => bool)) public airdropped;
 
-    constructor(IERC20 rf_, DocksIslands registry_, address treasury_) {
+    constructor(IERC20 rf_, DocksIslands registry_, DocksVillages villages_, address treasury_) {
         rf = rf_;
         registry = registry_;
+        villages = villages_;
         generations = registry_.generations();
         treasury = treasury_;
     }
@@ -216,7 +220,8 @@ contract DocksLaunchpad is ReentrancyGuard {
     }
 
     /// @dev Scopes: any Friend on a docked island · the launching island · the launching island
-    /// and every island docked next to it or bridged to it · visitors allowed onto it.
+    /// and every island docked next to it or bridged to it · visitors allowed onto it · every
+    /// island in the launching island's village (under its flag).
     function _eligible(Launch storage l, Scope scope, uint256 friendId) private view returns (bool) {
         if (!registry.isValid(friendId)) return false;
         uint256 island = registry.islandOf(friendId);
@@ -225,6 +230,7 @@ contract DocksLaunchpad is ReentrancyGuard {
         if (!docked || scope == Scope.HolderIsland) return false;
         if (scope == Scope.AnyDocked) return true;
         if (scope == Scope.IslandAndNeighbours) return registry.connected(island, l.creatorIslandId);
+        if (scope == Scope.Village) return villages.sameVillage(island, l.creatorIslandId);
         return registry.canVisit(l.creatorIslandId, generations.ownerOf(friendId));
     }
 

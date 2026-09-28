@@ -1,14 +1,16 @@
 /* Token launches — SIMULATED in this preview. Mirrors contracts/src/docks/DocksLaunchpad.sol:
  * 1,000 RF per launch (500 burned, 500 to the treasury); fixed supply, no owner; airdrops and
  * claims land in the Friend's own wallet; every claim costs the launch's RF price, burned. */
-import { connected, type Plot, type World } from "./world.js";
+import { connected, villageOf, type Plot, type World } from "./world.js";
 
 export const LAUNCH_FEE = 1000;
+export const FLAG_FEE = 100_000;                                // plant a flag: half burned, half to the treasury
 export const START_RF = 5000;                                   // simulated RF for the preview
-export type Scope = "anyDocked" | "holderPlot" | "plotAndNeighbours" | "visitors";
+export type Scope = "anyDocked" | "holderPlot" | "plotAndNeighbours" | "visitors" | "village";
 export const SCOPES: { id: Scope; label: string; hint: string }[] = [
   { id: "holderPlot", label: "My island", hint: "only Friends on the launching island" },
   { id: "plotAndNeighbours", label: "My island + neighbours", hint: "plus every island docked next to it or bridged to it" },
+  { id: "village", label: "My village", hint: "every island under your village's flag" },
   { id: "visitors", label: "Visitors", hint: "islands allowed onto the launching island (open, or approved)" },
   { id: "anyDocked", label: "Everyone docked", hint: "any Friend on a docked island" },
 ];
@@ -33,7 +35,8 @@ export function eligibleFriends(w: World, l: Pick<Launch, "scope" | "creator">, 
   for (const p of w.plots) {
     const docked = Boolean(p.berth);
     const ok = p === l.creator || (docked && (l.scope === "anyDocked" || (l.scope === "visitors" && canVisit(p, l.creator))
-      || (l.scope === "plotAndNeighbours" && connected(w, p, l.creator))));
+      || (l.scope === "plotAndNeighbours" && connected(w, p, l.creator))
+      || (l.scope === "village" && villageOf(w, p) !== null && villageOf(w, p) === villageOf(w, l.creator))));
     if (ok) for (const pl of p.friends) out.push({ plot: p, id: pl.m.id });
   }
   return out;
@@ -61,6 +64,12 @@ export function launch(e: Economy, w: World, input: LaunchInput, canVisit: (p: P
   const rest = input.supply - dropTotal - input.claimPool;
   if (rest > 0) credit(e, input.creatorFriend, symbol, rest);
   return l;
+}
+
+/** Planting a flag (the village itself lives in world.ts). */
+export function payFlag(e: Economy) {
+  if (e.rf < FLAG_FEE) throw new Error(`Planting a flag costs ${FLAG_FEE.toLocaleString()} RF; you have ${e.rf.toLocaleString()}.`);
+  e.rf -= FLAG_FEE; e.burned += FLAG_FEE / 2; e.treasury += FLAG_FEE / 2;
 }
 
 /** Sample launches by other plots have their own RF; the player's claims spend the player's RF. */

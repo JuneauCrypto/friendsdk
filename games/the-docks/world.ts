@@ -60,7 +60,11 @@ export type World = {
   box: Map<Plot, Box>;                                             // island bounds, world tiles
   cols: { b: number; x0: number; x1: number }[]; rows: { b: number; y0: number; y1: number }[];
   walk: Map<number, "gangway" | "bridge">;                         // walkway tiles over the water
+  villages: Village[];
 };
+/** A flag planted on an island starts a village; other islands choose to join while connected
+ *  to it (docked next to, or bridged to, a member). Mirrors contracts/src/docks/DocksVillages.sol. */
+export type Village = { id: string; name: string; founder: Plot; flag: { x: number; y: number }; members: Plot[]; color: string };
 
 // Numeric keys (fast for large islands). Coordinates stay well inside ±2^20.
 const K = 1 << 21, HALF = 1 << 20;
@@ -72,7 +76,7 @@ export const plotOf = (w: World, id: bigint) => w.plots.find(p => p.friends.some
 /* ── building the world ── */
 
 export function emptyWorld(): World {
-  return { plots: [], visits: new Map(), version: 0, bridges: [], occ: new Map(), holeOcc: new Map(), berths: new Map(), origin: new Map(), box: new Map(), cols: [], rows: [], walk: new Map() };
+  return { plots: [], visits: new Map(), version: 0, bridges: [], occ: new Map(), holeOcc: new Map(), berths: new Map(), origin: new Map(), box: new Map(), cols: [], rows: [], walk: new Map(), villages: [] };
 }
 
 export function rebuild(w: World) {
@@ -294,6 +298,45 @@ export function bridgeCost(a: Plot, b: Plot) { return a.berth && b.berth ? dist(
 export function addBridge(w: World, a: Plot, b: Plot) {
   if (!a.berth || !b.berth || connected(w, a, b)) return false;
   w.bridges.push({ a, b, at: [{ ...a.berth }, { ...b.berth }] }); rebuild(w); return true;
+}
+
+/* ── villages ── */
+
+const FLAG_COLORS = ["#ff4d6d", "#4dabf7", "#ffd43b", "#69db7c", "#b197fc", "#ff922b"];
+export const villageOf = (w: World, p: Plot) => w.villages.find(v => v.members.includes(p)) ?? null;
+/** Why `p` can't plant a flag (null: it can). `at` is an island-local tile the flag stands on. */
+export function flagProblem(w: World, p: Plot, at: { x: number; y: number }): string | null {
+  if (!p.berth) return `Dock ${p.name} first: flags go on docked islands.`;
+  const v = villageOf(w, p); if (v) return `${p.name} is already in ${v.name}.`;
+  const cx = Math.floor(at.x / CELL), cy = Math.floor(at.y / CELL);
+  if (!w.occ.get(p)?.has(ck(cx, cy))) return "Stand on your island's land to plant the flag.";
+  return null;
+}
+export function plantFlag(w: World, p: Plot, name: string, at: { x: number; y: number }): Village {
+  const why = flagProblem(w, p, at); if (why) throw new Error(why);
+  const clean = name.trim().slice(0, 32); if (!clean) throw new Error("Name your village.");
+  const v: Village = { id: `v${w.villages.length + 1}-${p.id}`, name: clean, founder: p, flag: { ...at }, members: [p], color: FLAG_COLORS[w.villages.length % FLAG_COLORS.length] };
+  w.villages.push(v); w.version++; return v;
+}
+/** An island can join while it's docked and connected to any island already in the village. */
+export function joinProblem(w: World, v: Village, p: Plot): string | null {
+  if (!p.berth) return `Dock ${p.name} first.`;
+  const cur = villageOf(w, p); if (cur) return cur === v ? `${p.name} is in ${v.name}.` : `${p.name} is already in ${cur.name}.`;
+  if (!v.members.some(m => connected(w, p, m))) return `Dock next to, or bridge to, an island in ${v.name} to join.`;
+  return null;
+}
+export function joinVillage(w: World, v: Village, p: Plot) {
+  const why = joinProblem(w, v, p); if (why) throw new Error(why);
+  v.members.push(p); w.version++;
+}
+/** Leaving is free. When the founding island leaves, the flag comes down for everyone. */
+export function leaveVillage(w: World, p: Plot) {
+  const v = villageOf(w, p); if (!v) return null;
+  if (v.founder === p) w.villages = w.villages.filter(x => x !== v); else v.members = v.members.filter(x => x !== p);
+  w.version++; return v;
+}
+export function flagTile(w: World, v: Village) {
+  const o = w.origin.get(v.founder); return o ? { x: o.x + v.flag.x, y: o.y + v.flag.y } : null;
 }
 
 /* ── walking & access (world tiles) ── */

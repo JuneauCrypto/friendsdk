@@ -67,10 +67,11 @@ app's built-in browser (the SDK has no WalletConnect).
 | **Scale** | Layout needs no artwork: footprints come from generation. Occupancy is per 4 × 4-tile cell. Only Friends near the camera are drawn; their on-chain art loads lazily (6 at a time, 500 kept in memory). The crew shows up to 24 walkers. Tested with 10,002 Friends on desktop and phone. |
 | **Chain checks** | Every 60 s and on **Check**: re-read every Friend's tokenURI; if its art or traits changed (e.g. tier upgrade) the art, footprint and rank update. Deactivated Friends leave the docks; Friends no longer held by your wallet leave your plot. |
 | **Lead & crew** | You lead one Friend (the one you walk as); every other Friend stands on its own land, as the on-chain art shows. 👥 Crew → **Call all** brings every Friend over to the lead (40 drawn walking, the rest counted). Tap Friends on the map to pick them, then **Bring picked**, **Leave picked here** (break off and walk on without them), **Take over** (lead that Friend instead; the old lead stays where it was), **Everyone wait** or **All go home**. The Islands list has the same per Friend (*On its land / With the lead / Lead*). |
+| **Villages** *(simulated)* | 🚩 Village → name it and **Plant flag** where your lead stands on a saved, docked island of yours: **100,000 RF** (half burned, half treasury). A waving flag goes up there. Islands docked next to (or bridged to) any island in the village can choose to **Join** (gas only), so a village grows island by island; one village per island; **Leave** is free and the founder leaving takes the flag down. Sample *Market Town* (Market Cluster + Rooftop Pair) is there to join; sample islands next to your village choose to join it (Crystal Keep passes). Tokens can be launched to **My village**. The preview's 5,000 simulated RF can be topped up to try it. |
 | **Tokens** *(simulated)* | 🚀 Tokens → launch: name, ticker, supply; airdrop scope and amount; claim pool, per-claim amount, claim price. Costs **1,000 RF** (500 burned, 500 treasury). Airdrops and claims land in each Friend's own wallet. Every claim burns the launch's RF price. A sample plot's `$MKT` is there to claim. |
 | **Rank** | Sum of the official reward weight (Generation × Activation tier, per rarefriends.com/docs/generations) of a plot's Friends: Speck 0+ · Hamlet 5+ · Village 50+ · Town 500+ · City 5,000+ · Capital 50,000+. |
 
-Controls: WASD / arrow keys or tap to walk; ＋/－ zoom; reduced-motion in More.
+Controls: WASD / arrow keys or tap to walk; zoom with ＋/－, the mouse wheel, pinch, or the +/- keys; drag to pan; ⤢ fits every island on screen and ⌖ returns to your lead (zoomed far out, lands are drawn as outlines so 10,000 Friends stay fast); reduced-motion in More.
 
 ## Preview limits (what needs a server next)
 
@@ -146,7 +147,13 @@ needs backing.
   and one claim per Friend per launch; claim price burned; scopes as above. Batches
   keep 10,000-Friend plots practical (a client sends ~100 placements or claims per
   transaction).
-- Tests: `forge test --match-contract DocksTest` (31 unit tests: islands are not tokens, per-generation burn, only moved Friends charged, deploying between islands, holes (reserved, healed on return, burned in when placed elsewhere, filled by same-size Friends), loading zones, size-independent berths, bridge pricing and expiry, launch scopes over gangways and bridges, 300 Friends arranged and claimed in one transaction each) and
+- `DocksVillages.sol` — `plant(islandId, name, x, y)` puts a flag on a land cell of your docked
+  island for `FLAG_FEE = 100,000 RF` (half burned, half treasury) and starts a village;
+  `join(villageId, islandId, viaIslandId)` (gas only) needs your docked island `connected` to
+  `via`, an island already in the village; one village per island; `leave` is free and the
+  founding island leaving takes the flag down (`villageOf` → 0 for everyone). Villages are not
+  tokens. The launchpad adds a `Village` scope (`sameVillage`).
+- Tests: `forge test --match-contract DocksTest` (35 unit tests, including flag cost and land/dock checks, joining only while connected, growing a village island by island, the flag coming down, and the village launch scope: islands are not tokens, per-generation burn, only moved Friends charged, deploying between islands, holes (reserved, healed on return, burned in when placed elsewhere, filled by same-size Friends), loading zones, size-independent berths, bridge pricing and expiry, launch scopes over gangways and bridges, 300 Friends arranged and claimed in one transaction each) and
   `FRIENDSDK_FORK_RPC=https://rpc.mainnet.chain.robinhood.com forge test --match-contract DocksForkTest`
   (real Generations, activation manager and RF on a local fork: creates two islands, arranges
   #67111 (burns 50 RF) and #7153, docks them side by side, launches, claims).

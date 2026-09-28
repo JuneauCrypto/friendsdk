@@ -111,3 +111,11 @@
   .docks-crewbar{bottom:46px;gap:3px;padding:5px}.docks-crewbar button{padding:4px 6px;font-size:10px}
   .docks-crewbar .docks-arrange-info{width:100%;text-align:center}.docks-crewbar .docks-arrange-info strong{font-size:11px}.docks-crewbar .docks-arrange-info small{font-size:9px}
 }
+/* villages: a flag planted on an island */
+.docks-flag{position:absolute;width:0;height:0;pointer-events:none}
+.docks-flag .pole{position:absolute;left:-.5px;bottom:0;width:1.2px;height:34px;background:#fff;box-shadow:0 0 0 .4px #000}
+.docks-flag .cloth{position:absolute;left:.7px;bottom:22px;width:17px;height:12px;background:var(--flag);border:.5px solid #000;clip-path:polygon(0 0,100% 18%,82% 50%,100% 82%,0 100%);animation:docks-wave 1.6s ease-in-out infinite;transform-origin:left center}
+.docks-flag b{position:absolute;left:0;bottom:36px;transform:translateX(-50%);white-space:nowrap;font-size:5.5px;font-weight:700;padding:.5px 3px;background:var(--flag);color:#000;border:.5px solid #000}
+.docks-pennant{display:inline-block;width:5px;height:5px;margin-right:2px;border:.4px solid #000;clip-path:polygon(0 0,100% 50%,0 100%)}
+@keyframes docks-wave{50%{transform:skewY(-6deg) scaleX(.9)}}
+@media (prefers-reduced-motion:reduce){.docks-flag .cloth{animation:none}}

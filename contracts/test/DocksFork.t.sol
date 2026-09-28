@@ -5,6 +5,7 @@ import { Test } from "forge-std/Test.sol";
 import { IERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import { DocksIslands, IDocksGenerations } from "../src/docks/DocksIslands.sol";
 import { DocksLaunchpad } from "../src/docks/DocksLaunchpad.sol";
+import { DocksVillages } from "../src/docks/DocksVillages.sol";
 
 /// @notice Local mainnet-fork check of The Docks against the real Generations, activation
 /// manager and RF. Set FRIENDSDK_FORK_RPC to run; nothing leaves the local fork.
@@ -18,7 +19,7 @@ contract DocksForkTest is Test {
         vm.createSelectFork(rpc);
         IDocksGenerations gen = IDocksGenerations(GENERATIONS);
         DocksIslands reg = new DocksIslands(gen, IERC20(RF));
-        DocksLaunchpad pad = new DocksLaunchpad(IERC20(RF), reg, address(0x7EA));
+        DocksLaunchpad pad = new DocksLaunchpad(IERC20(RF), reg, new DocksVillages(IERC20(RF), reg, address(0x7EA)), address(0x7EA));
 
         assertTrue(reg.isActive(67111));
         assertTrue(reg.isActive(7153));

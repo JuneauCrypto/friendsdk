@@ -243,6 +243,17 @@ try {
     const vp = await game.locator(".docks-viewport, [class*=viewport]").first().boundingBox();
     if (vp) { await page.mouse.move(vp.x + vp.width / 2, vp.y + vp.height / 2); await page.mouse.wheel(0, -600); await page.waitForTimeout(400); }
     await game.getByRole("button", { name: "Center on lead" }).click();
+    // villages: put down a flag where the lead stands; a connected sample island chooses to join
+    assert.equal(await game.locator(".docks-flag").count(), 1, "the sample village's flag");
+    await game.locator(".docks-nav").getByRole("button", { name: /Village/ }).click();
+    await game.getByText(/Market Town · 2 islands/).waitFor();
+    await game.getByRole("button", { name: /preview RF/ }).click();
+    await game.getByLabel("Village name").fill("Dock Town");
+    await game.getByRole("button", { name: /Plant flag where #\d+ stands/ }).click();
+    await game.getByText(/🚩 Dock Town founded on Your island \(simulated\): 100,000 RF paid, 50,000 burned/).waitFor();
+    assert.equal(await game.locator(".docks-flag").count(), 2, "your flag is up");
+    await game.getByText(/\(sample\) (chose to join|passed on joining) Dock Town/).waitFor({ timeout: 10_000 });
+    await page.waitForTimeout(300); await shot("village");
     // deploy #7573 to a second island: joining a new island counts as a move (Gen 3: 20 RF)
     await btn("Islands").click();
     await game.getByRole("button", { name: "＋ New island" }).click();

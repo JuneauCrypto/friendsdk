@@ -10,15 +10,16 @@ import {
   ARRANGE_FEE, BRIDGE_FEE_PER_BERTH, RANKS, addBridge, addToPlot, autoArrange, bridgeCost, canEnter, createWorld, deploy, disconnected,
   dockAt, loadingZones, member, memberOf, moveGroup, myPlots, neighboursOf, pendingChanges, plotOf, rankOf, rebuild,
   refreshMember, removeFromPlot, swapInto, undock, weightOf, burnHole, fillHole, holesOf, feeOf,
+  CELL, flagProblem, joinProblem, joinVillage, leaveVillage, plantFlag, tileAt, villageOf, flagTile, type Village,
   type Access, type Berth, type Hole, type Member, type Placed, type Plot, type World,
 } from "./world.js";
 import { DocksView, clampZoom, spawnOn, type CrewMember, type ViewApi } from "./view.js";
 import { ChainMap } from "./chainmap.js";
-import { LAUNCH_FEE, SCOPES, claimAll, createEconomy, eligibleFriends, fmt, launch, seedLaunch, type Economy, type Launch, type Scope } from "./launch.js";
+import { FLAG_FEE, LAUNCH_FEE, SCOPES, payFlag, claimAll, createEconomy, eligibleFriends, fmt, launch, seedLaunch, type Economy, type Launch, type Scope } from "./launch.js";
 import "@rarefriends/friendsdk/frame.css";
 import "./style.css";
 
-type Menu = "plot" | "docks" | "tokens" | "help" | "settings" | null;
+type Menu = "plot" | "docks" | "village" | "tokens" | "help" | "settings" | null;
 const CHECK_EVERY_MS = 60_000;
 const MAX_DRAWN = 40;                             // crew sprites drawn at once (the rest are counted)
 const ART_CONCURRENCY = 6, ART_CACHE = 500;       // lazy on-chain art: parallel reads, Friends kept in memory
@@ -66,6 +67,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const [form, setForm] = useState({ name: "", symbol: "", supply: "1000000", airdropScope: "plotAndNeighbours" as Scope | "none", airdropEach: "1000",
     claimScope: "anyDocked" as Scope, claimPool: "100000", claimEach: "500", claimPrice: "5" });
   const [launchError, setLaunchError] = useState("");
+  const [flagName, setFlagName] = useState(""), [villageError, setVillageError] = useState("");
+  const asked = useRef<Set<string>>(new Set());                  // sample islands already asked to join your village
   // On chain (simulated in this preview): islands created on chain and their last saved layouts.
   // Islands are not tokens: the only NFTs are the activated Friends.
   const onChain = useRef<Map<string, number>>(new Map());
@@ -111,6 +114,12 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         const market = world.current.plots.find(p => p.id === "s4" && p.friends.length);
         if (market) seedLaunch(econ.current, { name: "Market Coin", symbol: "MKT", supply: 1_000_000, creator: market, creatorFriend: market.friends[0].m.id,
           scope: "anyDocked", claimEach: 500, claimPrice: 5, claimRemaining: 50_000 });
+        const rooftop = world.current.plots.find(p => p.id === "s2" && p.friends.length);
+        if (market) { try {                                    // a sample village: Market Cluster planted a flag, Rooftop Pair joined
+          const f = market.friends[0], v = plantFlag(world.current, market, "Market Town", { x: (f.x + f.m.cw / 2) * CELL, y: (f.y + f.m.ch / 2) * CELL });
+          if (rooftop) joinVillage(world.current, v, rooftop);
+        } catch { /* sample only */ } }
+        asked.current = new Set();
         setReady(true); setLastCheck(new Date());
         say("Finding the rest of your Friends…");
         void loadRoster(v, true);
@@ -453,6 +462,45 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     econ.current.rf -= cost; econ.current.burned += cost; setMenu(null); bump();
     say(`Bridge built from ${p.name} to ${to.name} (simulated): ${cost} RF burned + gas. It lasts until either island moves.`);
   }
+  /* ── villages: plant a flag where your lead stands; islands choose to join ── */
+  function doPlantFlag() {
+    const w = world.current!; setVillageError("");
+    const pos = api.current?.position(); if (!pos) return;
+    const p = tileAt(w, Math.floor(pos.x), Math.floor(pos.y))?.plot ?? null;
+    if (!p || !p.mine) { setVillageError(`Walk #${lead} onto one of your docked islands first: the flag goes where your lead stands.`); return; }
+    if (!onChain.current.has(p.id)) { setVillageError(`Save ${p.name} on chain first (Arrange → Save): flags go on saved, docked islands.`); return; }
+    const o = w.origin.get(p)!, at = { x: pos.x - o.x, y: pos.y - o.y };
+    const why = flagProblem(w, p, at) ?? (flagName.trim() ? null : "Name your village.");
+    if (why) { setVillageError(why); return; }
+    try { payFlag(econ.current); } catch (e) { setVillageError(errText(e)); return; }
+    const v = plantFlag(w, p, flagName, at); setFlagName(""); setMenu(null); bump();
+    say(`🚩 ${v.name} founded on ${p.name} (simulated): ${FLAG_FEE.toLocaleString()} RF paid, ${(FLAG_FEE / 2).toLocaleString()} burned. Islands docked next to it can now choose to join.`);
+  }
+  function doJoin(v: Village, p: Plot) {
+    const w = world.current!; setVillageError("");
+    try { joinVillage(w, v, p); bump(); say(`${p.name} joined ${v.name} (simulated, gas only).`); } catch (e) { setVillageError(errText(e)); }
+  }
+  function doLeave(p: Plot) {
+    const w = world.current!, v = leaveVillage(w, p); if (!v) return; bump();
+    say(v.founder === p ? `You took down ${v.name}'s flag: the village is gone.` : `${p.name} left ${v.name}.`);
+  }
+  function lookAtFlag(v: Village) {
+    const t = flagTile(world.current!, v); setMenu(null); if (t) api.current?.focusOn(t.x, t.y);
+  }
+  // sample islands connected to your village choose whether to join it (simulated)
+  useEffect(() => {
+    const w = world.current; if (!ready || !w) return;
+    const mineV = w.villages.filter(v => v.founder.mine); if (!mineV.length) return;
+    const t = window.setTimeout(() => {
+      for (const v of mineV) for (const q of w.plots) {
+        if (q.mine || asked.current.has(q.id) || joinProblem(w, v, q)) continue;
+        asked.current.add(q.id);
+        if (q.policy === "decline") { say(`${q.name} (sample) passed on joining ${v.name}.`); continue; }
+        joinVillage(w, v, q); bump(); say(`${q.name} (sample) chose to join ${v.name}. 🚩`); return;
+      }
+    }, 3000);
+    return () => window.clearTimeout(t);
+  }, [ready, world.current?.version]); // eslint-disable-line react-hooks/exhaustive-deps
   // arrange with arrow keys
   useEffect(() => {
     if (!arranging) return;
@@ -581,6 +629,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <button type="button" onClick={() => setCrewBar(true)} disabled={uiBlocked}>👥<span>Crew</span></button>
         <button type="button" onClick={() => { setPage(1); setMenu("plot"); }} disabled={uiBlocked}>🏝<span>Islands</span></button>
         <button type="button" onClick={() => setMenu("docks")} disabled={uiBlocked}>⚓<span>Docks</span></button>
+        <button type="button" onClick={() => { setVillageError(""); setMenu("village"); }} disabled={uiBlocked}>🚩<span>Village</span></button>
         <button type="button" onClick={() => setMenu("tokens")} disabled={uiBlocked}>🚀<span>Tokens</span></button>
         <button type="button" onClick={() => void checkChain(true)} disabled={uiBlocked || checking}>{checking ? "⏳" : "🔄"}<span>Check</span></button>
         <button type="button" onClick={() => setZoom(z => clampZoom(z * 1.4))} disabled={uiBlocked} aria-label="Zoom in">＋</button>
@@ -591,7 +640,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       </div>
     </div>}
 
-    {menu && <GameMenu onClose={() => setMenu(null)} title={menu === "plot" ? "My islands" : menu === "docks" ? "The Docks" : menu === "tokens" ? "Tokens" : menu === "help" ? "How it works" : "Settings"}>
+    {menu && <GameMenu onClose={() => setMenu(null)} title={menu === "plot" ? "My islands" : menu === "docks" ? "The Docks" : menu === "village" ? "Villages" : menu === "tokens" ? "Tokens" : menu === "help" ? "How it works" : "Settings"}>
       {menu === "plot" ? <>
         <p>Every activated Friend is a small floating island; joined together they make one big island. Every activated Friend in your wallet is here automatically, exactly as it renders on chain. Keep them together, or deploy them to other islands. Islands belong to your wallet and can't be sold: the only NFTs are your Friends.</p>
         {islandTabs}
@@ -660,6 +709,27 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
               if (canEnter(w, p)) { goTo(p); say(p.mine ? `On ${p.name}.` : `You and your crew walked over to ${p.name}.`); }
               else { const b = w.box.get(p); if (b) api.current?.focusOn((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2); say(`${p.name} is invite-only: here's the view. Walk up its gangway and ask to visit.`); } }}>{canEnter(w, p) ? "Go" : "Look"}</button></div>; })}
         <p className="docks-note">Rank follows the official Rare Friends reward weight (Generation × Activation tier), summed over an island's Friends. Neighbours are other people's public Friends shown as samples; their answers to visit requests are simulated.</p>
+      </> : menu === "village" ? <>
+        <p>Put down a flag to start a village. Islands docked next to a village island (or bridged to one) can choose to join, so a village grows island by island. One village per island; leaving is free, and if the founding island leaves, the flag comes down. Launch tokens to <em>My village</em> from Tokens.</p>
+        <div className="docks-rf"><span>Your RF <b>{fmt(econ.current.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Flag <b>{FLAG_FEE.toLocaleString()} RF</b></span><span>Burned <b>{fmt(econ.current.burned)}</b></span></div>
+        {(() => { const mv = mine.map(p => villageOf(w, p)).find(Boolean);
+          return mv ? <p className="docks-note">Your islands fly the flag of {mv.name}.</p> : <>
+            <h3>🚩 Put down a flag</h3>
+            <div className="docks-form"><label>Village name<input value={flagName} maxLength={32} placeholder="Dock Town" onChange={e => setFlagName(e.target.value)} /></label></div>
+            <div className="docks-row"><button type="button" className="rf-frame-primary" onClick={doPlantFlag}>🚩 Plant flag where #{String(lead)} stands · {FLAG_FEE.toLocaleString()} RF</button>
+              {econ.current.rf < FLAG_FEE && <button type="button" onClick={() => { econ.current.rf += FLAG_FEE; bump(); }}>＋{fmt(FLAG_FEE)} preview RF</button>}</div>
+            <p className="docks-note">The flag goes on the spot your lead is standing, on a saved, docked island of yours. Costs {FLAG_FEE.toLocaleString()} RF: half burned, half to the treasury. The preview starts you with {fmt(5000)} simulated RF; top up to try it.</p></>; })()}
+        {villageError && <p role="alert" className="docks-note">{villageError}</p>}
+        {islandTabs}
+        <h3>Villages on the docks</h3>
+        {w.villages.length === 0 && <p className="docks-note">No flags yet.</p>}
+        {w.villages.map(v => { const inIt = v.members.includes(isl), why = inIt ? null : joinProblem(w, v, isl);
+          return <div className="docks-item" key={v.id}><span><strong><i className="docks-pennant" style={{ background: v.color }} />{v.name} · {v.members.length} island{v.members.length === 1 ? "" : "s"}</strong>
+            <small>flag on {v.founder.name}{v.founder.mine ? " (yours)" : " (sample)"} · {v.members.map(m => m.name).join(", ")}</small>
+            {!inIt && why && <small>{why}</small>}</span>
+            <span className="docks-row tight"><button type="button" onClick={() => lookAtFlag(v)}>Look</button>
+              {inIt ? <button type="button" onClick={() => doLeave(isl)}>{v.founder === isl ? "Take flag down" : `Leave with ${isl.name}`}</button>
+                : <button type="button" className="rf-frame-primary" disabled={Boolean(why)} onClick={() => doJoin(v, isl)}>Join with {isl.name}</button>}</span></div>; })}
       </> : menu === "tokens" ? <>
         <div className="docks-rf"><span>Your RF <b>{fmt(econ.current.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Burned <b>{fmt(econ.current.burned)}</b></span><span>Treasury <b>{fmt(econ.current.treasury)}</b></span></div>
         <p className="docks-note">Launch a token from your island for {LAUNCH_FEE.toLocaleString()} RF (half burned, half to the treasury). Airdrops and claims land in each Friend's own wallet; every claim costs RF, which is burned. In this preview it's all simulated; the contracts are in the submission.</p>
@@ -705,6 +775,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <li><strong>Bridges:</strong> can't dock next to an island? Build a bridge to it: {BRIDGE_FEE_PER_BERTH} RF per berth of distance, burned. It lasts until either island moves.</li>
         <li><strong>Visit:</strong> open islands (⇄) let you walk straight in. Invite-only islands (🔒) need approval: walk up the gangway and choose Ask to visit.</li>
         <li><strong>Your crew:</strong> you lead one Friend; everyone else stands on their own land. 👥 Crew → <em>Call all</em> brings every Friend to your lead. Tap Friends on the map to pick them, then <em>Bring picked</em>, <em>Leave picked here</em> (break off and walk on without them) or <em>Take over</em> to lead that Friend instead. <em>All go home</em> sends everyone back to their land.</li>
+        <li><strong>Villages:</strong> 🚩 Village → put down a flag where your lead stands ({FLAG_FEE.toLocaleString()} RF, half burned). Islands docked next to (or bridged to) a village island choose to join, for gas only. Launch tokens to everyone in your village.</li>
         <li><strong>Tokens:</strong> launch a token for 1,000 RF, airdrop it into Friend wallets and open a claim pool; claims burn RF.</li>
         <li><strong>Always on-chain:</strong> every Friend is its real on-chain artwork, loaded as you get near it. Re-checked every minute (or tap Check): new Friends join, upgrades update, sold or deactivated Friends leave.</li>
         <li>This preview doesn't save: reloading starts fresh. RF, saves, docking, bridges, launches and claims are simulated.</li>

@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { spriteFrame, type GenerationSprites, type SpriteFacing } from "@rarefriends/friendsdk/sprites";
 import { fromScreen, toScreen } from "./land.js";
-import { CELL, canEnter, ck, neighboursOf, plotOf, rankOf, tileAt, type Placed, type Plot, type World } from "./world.js";
+import { CELL, canEnter, ck, neighboursOf, plotOf, rankOf, tileAt, villageOf, flagTile, type Placed, type Plot, type World } from "./world.js";
 
 /** A Friend walking around off its land: following the lead, or left standing somewhere. */
 export type CrewMember = { id: bigint; sprites: GenerationSprites | null; mode: "follow" | "park" };
@@ -259,7 +259,7 @@ export function DocksView(props: Props) {
       }
     };
     const tick = (now: number) => {
-      const dt = Math.min(0.1, (now - last) / 1000); last = now; t += dt;
+      const dt = Math.max(0, Math.min(0.1, (now - last) / 1000)); last = Math.max(last, now); t += dt;
       const st = state.current, p = player.current;
       if (!st.paused && !st.arranging) {
         let mx = 0, my = 0;
@@ -365,8 +365,10 @@ export function DocksView(props: Props) {
   }, [world, version]); // eslint-disable-line react-hooks/exhaustive-deps
   const labels = useMemo(() => world.plots.filter(p => p.friends.length && world.box.get(p)).map(p => {
     const b = world.box.get(p)!, c = toScreen(b.x0, b.y0);
-    return { plot: p, x: c.x, y: c.y - 20, rank: rankOf(p).rank };
+    return { plot: p, x: c.x, y: c.y - 20, rank: rankOf(p).rank, village: villageOf(world, p) };
   }), [world, version]); // eslint-disable-line react-hooks/exhaustive-deps
+  const flags = useMemo(() => world.villages.flatMap(v => { const t = flagTile(world, v); if (!t) return [];
+    const c = toScreen(t.x + 0.5, t.y + 0.5); return [{ v, x: c.x, y: c.y }]; }), [world, version]); // eslint-disable-line react-hooks/exhaustive-deps
   const selSet = new Set(selected);
   const selPlot = selected[0] ? plotOf(world, selected[0].m.id) : null;
   const myVisible = arranging ? visible.filter(v => v.plot === selPlot) : [];
@@ -390,8 +392,10 @@ export function DocksView(props: Props) {
           className={selSet.has(pl) ? "selected-outline" : "other-outline"} />)}
       </svg>
       {gates.map(g => <span key={g.key} className={`docks-gate ${g.open ? "open" : "shut"}`} style={{ left: g.x, top: g.y, zIndex: 600 }}>{g.open ? "⇄" : "🔒"}</span>)}
+      {flags.map(f => <span key={f.v.id} className="docks-flag" style={{ left: f.x, top: f.y, zIndex: 650, ["--flag" as string]: f.v.color }}>
+        <i className="pole" /><i className="cloth" /><b>{f.v.name} · {f.v.members.length}</b></span>)}
       {labels.map(l => <span key={l.plot.id} className={`docks-plot-label ${l.plot.mine ? "mine" : ""}`} style={{ left: l.x, top: l.y, zIndex: 700 }}>
-        {l.plot.name} · {l.rank}{l.plot.mine ? ` · ${l.plot.friends.length}` : l.plot.access === "open" ? " · open" : " · invite"}{l.plot.berth ? "" : " · floating"}</span>)}
+        {l.village && <i className="docks-pennant" style={{ background: l.village.color }} title={l.village.name} />}{l.plot.name} · {l.rank}{l.plot.mine ? ` · ${l.plot.friends.length}` : l.plot.access === "open" ? " · open" : " · invite"}{l.plot.berth ? "" : " · floating"}</span>)}
       {myVisible.length <= 150 && myVisible.map(({ pl, x, y }) => { const c = toScreen(x + T(pl.m.cw) / 2, y + T(pl.m.ch) / 2);
         return <span key={String(pl.m.id)} className={`docks-friend-tag ${selSet.has(pl) ? "sel" : ""}`} style={{ left: c.x, top: c.y, zIndex: 800 }}>#{String(pl.m.id)}</span>; })}
       {crew.map(m => <canvas key={String(m.id)} ref={el => { if (el) crewCanvases.current.set(String(m.id), el); else crewCanvases.current.delete(String(m.id)); }}
