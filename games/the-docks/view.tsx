@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { spriteFrame, type GenerationSprites, type SpriteFacing } from "@rarefriends/friendsdk/sprites";
 import { fromScreen, toScreen } from "./land.js";
+import { CATALOG } from "./villages.js";
 import { CELL, canEnter, ck, neighboursOf, plotOf, rankOf, tileAt, villageOf, flagTile, type Placed, type Plot, type World } from "./world.js";
 
 /** A Friend walking around off its land: following the lead, or left standing somewhere. */
@@ -367,6 +368,9 @@ export function DocksView(props: Props) {
     const b = world.box.get(p)!, c = toScreen(b.x0, b.y0);
     return { plot: p, x: c.x, y: c.y - 20, rank: rankOf(p).rank, village: villageOf(world, p) };
   }), [world, version]); // eslint-disable-line react-hooks/exhaustive-deps
+  const builds = world.items.flatMap(it => { const o = it.plot && world.origin.get(it.plot); if (!o) return [];
+    const c = toScreen(o.x + (it.cx + 0.5) * CELL, o.y + (it.cy + 0.5) * CELL), k = CATALOG[it.kind];
+    return [{ id: it.id, x: c.x, y: c.y, icon: k.icon, name: k.name, ready: Date.now() >= it.readyAt }]; });
   const flags = useMemo(() => world.villages.filter(v => !v.failed).flatMap(v => { const t = flagTile(world, v); if (!t) return [];
     const c = toScreen(t.x + 0.5, t.y + 0.5); return [{ v, x: c.x, y: c.y }]; }), [world, version]); // eslint-disable-line react-hooks/exhaustive-deps
   const selSet = new Set(selected);
@@ -392,6 +396,7 @@ export function DocksView(props: Props) {
           className={selSet.has(pl) ? "selected-outline" : "other-outline"} />)}
       </svg>
       {gates.map(g => <span key={g.key} className={`docks-gate ${g.open ? "open" : "shut"}`} style={{ left: g.x, top: g.y, zIndex: 600 }}>{g.open ? "⇄" : "🔒"}</span>)}
+      {builds.map(b => <span key={b.id} className={`docks-item-mark${b.ready ? "" : " building"}`} style={{ left: b.x, top: b.y, zIndex: 640 }} title={b.name}>{b.icon}{!b.ready && <i>🔨</i>}</span>)}
       {flags.map(f => <span key={f.v.id} className={`docks-flag${f.v.founded ? "" : " rising"}`} style={{ left: f.x, top: f.y, zIndex: 650, ["--flag" as string]: f.v.color, ["--raised" as string]: `${f.v.founded ? 100 : Math.max(8, Math.floor(f.v.locked / f.v.target * 100))}%` }}>
         <i className="pole" /><i className="cloth" /><b>{f.v.name} · {f.v.founded ? `${f.v.members.length} island${f.v.members.length === 1 ? "" : "s"}` : `${Math.floor(f.v.locked / f.v.target * 100)}% raised`}</b></span>)}
       {labels.map(l => <span key={l.plot.id} className={`docks-plot-label ${l.plot.mine ? "mine" : ""}`} style={{ left: l.x, top: l.y, zIndex: 700 }}>

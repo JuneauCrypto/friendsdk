@@ -128,3 +128,7 @@
 .docks-meter i{display:block;height:100%}
 .docks-village input{width:9em}
 .docks-village .docks-row.tight{flex-wrap:wrap}
+/* items built on island cells */
+.docks-item-mark{position:absolute;transform:translate(-50%,-85%);font-size:13px;line-height:1;pointer-events:none;filter:drop-shadow(0 1px 0 #000)}
+.docks-item-mark.building{opacity:.55}
+.docks-item-mark i{position:absolute;right:-7px;top:-6px;font-size:7px;font-style:normal;opacity:1}

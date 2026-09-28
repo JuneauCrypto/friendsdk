@@ -4,17 +4,24 @@ pragma solidity ^0.8.36;
 import { IERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import { ReentrancyGuard } from "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
-import { DocksIslands } from "./DocksIslands.sol";
+import { DocksIslands, IDocksPlacementGate } from "./DocksIslands.sol";
 import { DocksFounderMarks } from "./DocksFounderMarks.sol";
 
 /// @notice The village treasury as seen by DocksVillages (see DocksVillageTreasury).
 interface IDocksVillageTreasury {
     /// @dev A flag was founded: `treasuryRf + liquidityRf` RF was sent to the treasury.
     function found(uint256 villageId, uint256 treasuryRf, uint256 liquidityRf) external;
-    /// @dev An enrollment fee of `amount` RF was sent to the treasury.
-    function deposit(uint256 villageId, uint256 amount) external;
-    function spend(uint256 villageId, address to, uint256 amount) external;
+    /// @dev `wallet` paid an enrollment fee of `amount` RF, sent to the treasury.
+    function deposit(uint256 villageId, address wallet, uint256 amount) external;
+    /// @dev `wallet`'s island left: its unspent allowance goes to the village's liquidity.
+    function forfeit(uint256 villageId, address wallet) external;
     function setBurnBps(uint256 villageId, uint16 burnBps) external;
+}
+
+/// @notice Village items (DocksItems) as seen by DocksVillages.
+interface IDocksVillageItems {
+    /// @dev An island left the village: the village's items on it go to a raffle.
+    function onIslandLeft(uint256 villageId, uint256 islandId) external;
 }
 
 /// @notice Villages on The Docks: raised together, then grown by their people.
@@ -22,26 +29,34 @@ interface IDocksVillageTreasury {
 /// Flags. A holder plants a flag on a land cell of their docked island and locks the first RF.
 /// Anyone can lock more until it reaches `flagTarget` (e.g. 1,000,000 RF). Every locker gets a
 /// soulbound founder mark recording what they locked. Not full by the deadline: everyone can
-/// take their RF back. Full: `found` (anyone) sends it all to the village treasury, half as
-/// treasury RF and half as permanent liquidity. Nothing can be withdrawn after that.
+/// take their RF back. Full: `found` (anyone) sends it all to the village treasury: half
+/// becomes permanent liquidity, half the members' allowances. Nothing can be withdrawn after.
 ///
-/// People. Everyone in a village brings exactly one island (one per wallet): the planter's is
-/// the seat; founders bring theirs free; anyone else enrolls for the enrollment price, which
-/// goes into the village pool (half treasury, half liquidity). For the first ENROLL_WINDOW after
-/// founding enrollment is open at `enrollPrice`; after that the village decides by vote.
+/// People. Everyone brings one island (one per wallet; a wallet's other islands can be in
+/// other villages, one village per island): the planter's is the seat; founders bring theirs
+/// free; anyone else enrolls for the enrollment price (half liquidity, half their allowance).
+/// Enrollment is open for ENROLL_WINDOW after founding, then it's what the village votes.
+/// The population (Friends on the village's islands) can be capped by vote: while full, no
+/// island joins and no Friend is added to a village island.
+///
+/// Staying. A Friend placed on a village island is bound to that village. If it leaves (moved
+/// off, or its holder changes and its hole is burned), the village loses one population and
+/// the Friend stays bound until the next epoch boundary: it can't be placed in another
+/// village, and an island it's placed on can't join a village, until then. The same Friend
+/// can come back into its hole if the population allows. An island leaves a village only by
+/// `requestRemoval`, carried out at the next epoch boundary (every EPOCH, about three weeks),
+/// with no vote and no RF back; the village's items on it go to a raffle (DocksItems).
 ///
 /// Votes. Every Friend on a member's island is one vote, and founders multiply theirs by
 /// (1 + their share of the pool): power = Friends × (1 + locked / pool). Enrollment fees grow
 /// the pool, so every newcomer dilutes founder shares a little while adding their own Friends.
-/// The more Friends a village has, the more it can do.
-///  - Spend treasury RF (e.g. marketplace upgrades) or set the buyback burn share: yes/no,
-///    VOTE_PERIOD, yes > no with QUORUM_BPS of all power voting.
+///  - The buyback burn share: yes/no, VOTE_PERIOD, yes > no with QUORUM_BPS of all power voting.
 ///  - Enrollment (starts at founding and ends with the open window; any member can start one
-///    later): keep open at the current price · change the price · close now · close when the
-///    population (Friends in the village) reaches a threshold. Changing the price or setting a
-///    threshold closes enrollment until a FOLLOW_UP_PERIOD vote between three prices or three
-///    thresholds concludes. Most power wins; ties go to the earlier option.
-contract DocksVillages is ReentrancyGuard {
+///    later): keep open at the current price · change the price · close now · cap the
+///    population. Changing the price or setting a cap closes enrollment until a
+///    FOLLOW_UP_PERIOD vote between three prices or three caps concludes. Most power wins; ties
+///    go to the earlier option.
+contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     /// @dev A full flag the treasury can't found (e.g. no market yet) can be refunded after this.
@@ -50,10 +65,10 @@ contract DocksVillages is ReentrancyGuard {
     uint256 public constant VOTE_PERIOD = 3 days;
     uint256 public constant FOLLOW_UP_PERIOD = 1 days;
     uint256 public constant QUORUM_BPS = 2000;
+    uint256 public constant EPOCH = 21 days;
     uint256 private constant BPS = 10_000;
 
     enum Kind {
-        Spend,
         BurnShare,
         Enrollment,
         EnrollPrice,
@@ -79,8 +94,16 @@ contract DocksVillages is ReentrancyGuard {
         bool founded;
         bool enrollOpen; // after the open window, as decided by vote
         uint128 enrollPrice;
-        uint64 enrollCap; // population at which enrollment closes (0: none)
+        uint64 enrollCap; // population max (0: none)
         uint64 enrollVote; // active enrollment-family proposal + 1
+        uint64 population; // Friends on the village's islands
+    }
+
+    /// @dev A Friend's tie to the village of the island it was last placed on.
+    struct Bond {
+        uint64 village;
+        uint64 island;
+        uint64 releaseAt; // 0 while it's on that island; else the epoch boundary it's free at
     }
 
     struct Proposal {
@@ -88,10 +111,8 @@ contract DocksVillages is ReentrancyGuard {
         Kind kind;
         uint64 ends;
         bool settled;
-        address to;
-        uint256[3] options; // Spend: amount · BurnShare: bps · EnrollPrice / EnrollCap: the three choices
+        uint256[3] options; // BurnShare: bps · EnrollPrice / EnrollCap: the three choices
         uint256[4] tally; // yes/no: [no, yes]; enrollment: per choice
-        string memo;
     }
 
     error NotIslandOwner();
@@ -117,6 +138,12 @@ contract DocksVillages is ReentrancyGuard {
     error AlreadyVoted();
     error Settled();
     error AlreadyInitialized();
+    error NotIslands();
+    error BoundElsewhere();
+    error PopulationFull();
+    error CoolingDown();
+    error AlreadyRequested();
+    error NotYet();
 
     event FlagPlanted(
         uint256 indexed villageId, uint256 indexed islandId, string name, int32 x, int32 y, uint64 deadline
@@ -130,6 +157,7 @@ contract DocksVillages is ReentrancyGuard {
     event Voted(uint256 indexed proposalId, address indexed wallet, uint8 choice, uint256 power);
     event ProposalSettled(uint256 indexed proposalId, uint8 winner);
     event EnrollmentSet(uint256 indexed villageId, bool open, uint256 price, uint256 cap);
+    event RemovalRequested(uint256 indexed villageId, uint256 indexed islandId, uint64 leavesAt);
 
     IERC20 public immutable rf;
     DocksIslands public immutable islands;
@@ -138,8 +166,10 @@ contract DocksVillages is ReentrancyGuard {
     uint256 public immutable flagDuration;
     uint256 public immutable minLock;
     uint256 public immutable startEnrollPrice;
+    uint256 public immutable genesis;
     address private immutable _deployer;
     IDocksVillageTreasury public treasury;
+    IDocksVillageItems public items;
 
     uint256 public villageCount;
     mapping(uint256 villageId => Village) private _villages;
@@ -149,6 +179,9 @@ contract DocksVillages is ReentrancyGuard {
     mapping(uint256 villageId => mapping(address wallet => uint256 indexPlusOne)) private _memberIndex;
     Proposal[] private _proposals;
     mapping(uint256 proposalId => mapping(address wallet => bool)) public voted;
+    mapping(uint256 friendId => Bond) public bondOf;
+    mapping(uint256 islandId => uint64) public cooldownUntil;
+    mapping(uint256 islandId => uint64) public removalAt;
 
     constructor(
         IERC20 rf_,
@@ -165,13 +198,16 @@ contract DocksVillages is ReentrancyGuard {
         minLock = minLock_;
         startEnrollPrice = enrollPrice_;
         marks = new DocksFounderMarks();
+        genesis = block.timestamp;
         _deployer = msg.sender;
     }
 
-    /// @notice One-time wiring to the treasury (deployed after this contract). No other admin.
-    function init(IDocksVillageTreasury treasury_) external {
+    /// @notice One-time wiring to the treasury and items (deployed after this contract). No
+    /// other admin.
+    function init(IDocksVillageTreasury treasury_, IDocksVillageItems items_) external {
         if (msg.sender != _deployer || address(treasury) != address(0)) revert AlreadyInitialized();
         treasury = treasury_;
+        items = items_;
     }
 
     /* ── flags ── */
@@ -220,13 +256,14 @@ contract DocksVillages is ReentrancyGuard {
         v.pool = v.locked;
         address planter = islands.ownerOf(v.seatIsland);
         _addMember(villageId, planter, v.seatIsland);
+        v.population = uint64(islands.memberCount(v.seatIsland));
         uint256 treasuryRf = uint256(v.locked) / 2;
         uint256 liquidityRf = uint256(v.locked) - treasuryRf;
         rf.safeTransfer(address(treasury), v.locked);
         treasury.found(villageId, treasuryRf, liquidityRf);
         emit Founded(villageId, treasuryRf, liquidityRf);
         uint256[3] memory none;
-        v.enrollVote = uint64(_propose(villageId, Kind.Enrollment, address(0), none, "", ENROLL_WINDOW) + 1);
+        v.enrollVote = uint64(_propose(villageId, Kind.Enrollment, none, ENROLL_WINDOW) + 1);
     }
 
     /// @notice Take your RF back from a flag that didn't become a village in time.
@@ -259,44 +296,85 @@ contract DocksVillages is ReentrancyGuard {
         Village storage v = _villages[villageId];
         v.pool += uint128(paid);
         rf.safeTransferFrom(msg.sender, address(treasury), paid);
-        treasury.deposit(villageId, paid);
+        treasury.deposit(villageId, msg.sender, paid);
         emit Joined(villageId, islandId, msg.sender, paid);
     }
 
-    /// @notice Leave your village (free). The seat island, where the flag stands, stays.
-    function leaveVillage(uint256 islandId) external {
+    /// @notice Ask to take your island out of its village. It leaves at the next epoch
+    /// boundary (`processRemoval`); no vote, no RF back. The seat, where the flag stands, stays.
+    function requestRemoval(uint256 islandId) external returns (uint64 leavesAt) {
         _onlyOwner(islandId);
         uint256 villageId = villageOf(islandId);
         if (villageId == 0) revert NotInVillage();
         if (_villages[villageId].seatIsland == islandId) revert SeatStays();
+        if (removalAt[islandId] != 0) revert AlreadyRequested();
+        leavesAt = nextEpoch();
+        removalAt[islandId] = leavesAt;
+        emit RemovalRequested(villageId, islandId, leavesAt);
+    }
+
+    /// @notice Carry out a removal once its epoch boundary has passed. Anyone may call it.
+    /// The owner's unspent allowance goes to the village's liquidity; the village's items on
+    /// the island go to a raffle; the island's Friends are free to go.
+    function processRemoval(uint256 islandId) external nonReentrant {
+        uint64 leavesAt = removalAt[islandId];
+        if (leavesAt == 0 || block.timestamp < leavesAt) revert NotYet();
+        delete removalAt[islandId];
+        uint256 villageId = _villageOf[islandId];
+        address wallet = islands.ownerOf(islandId);
+        Village storage v = _villages[villageId];
+        v.population -= uint64(islands.memberCount(islandId));
         delete _villageOf[islandId];
-        delete islandOf[villageId][msg.sender];
-        uint256 i = _memberIndex[villageId][msg.sender] - 1;
+        delete islandOf[villageId][wallet];
+        uint256 i = _memberIndex[villageId][wallet] - 1;
         address[] storage m = _members[villageId];
         address last = m[m.length - 1];
         m[i] = last;
         _memberIndex[villageId][last] = i + 1;
         m.pop();
-        delete _memberIndex[villageId][msg.sender];
+        delete _memberIndex[villageId][wallet];
+        treasury.forfeit(villageId, wallet);
+        items.onIslandLeft(villageId, islandId);
         emit Left(villageId, islandId);
+    }
+
+    /* ── Friends placed on and taken off islands (from DocksIslands) ── */
+
+    /// @inheritdoc IDocksPlacementGate
+    function onPlace(uint256 friendId, uint256 islandId) external {
+        if (msg.sender != address(islands)) revert NotIslands();
+        uint256 villageId = villageOf(islandId);
+        Bond memory b = bondOf[friendId];
+        if (b.village != 0 && b.village != villageId && !_released(b)) {
+            if (villageId != 0) revert BoundElsewhere();
+            if (b.releaseAt > cooldownUntil[islandId]) cooldownUntil[islandId] = b.releaseAt;
+        }
+        if (villageId == 0) return;
+        Village storage v = _villages[villageId];
+        if (v.enrollCap != 0 && v.population >= v.enrollCap) revert PopulationFull();
+        ++v.population;
+        bondOf[friendId] = Bond(uint64(villageId), uint64(islandId), 0);
+    }
+
+    /// @inheritdoc IDocksPlacementGate
+    function onLeave(uint256 friendId, uint256 islandId) external {
+        if (msg.sender != address(islands)) revert NotIslands();
+        uint256 villageId = villageOf(islandId);
+        if (villageId == 0) return;
+        --_villages[villageId].population;
+        bondOf[friendId] = Bond(uint64(villageId), uint64(islandId), nextEpoch());
     }
 
     /* ── votes ── */
 
-    /// @notice Propose spending treasury RF (e.g. on a marketplace upgrade) or a new burn share.
-    function propose(uint256 villageId, Kind kind, address to, uint256 value, string calldata memo)
-        external
-        returns (uint256 proposalId)
-    {
+    /// @notice Propose a new share of each buyback to burn (the rest fills allowances).
+    function proposeBurnShare(uint256 villageId, uint16 burnBps) external returns (uint256 proposalId) {
         if (!_villages[villageId].founded) revert NotFounded();
         if (islandOf[villageId][msg.sender] == 0) revert NotInVillage();
-        if (kind == Kind.Spend ? (to == address(0) || value == 0) : kind != Kind.BurnShare || value > BPS) {
-            revert BadProposal();
-        }
-        if (bytes(memo).length > 140) revert BadProposal();
+        if (burnBps > BPS) revert BadProposal();
         uint256[3] memory opts;
-        opts[0] = value;
-        return _propose(villageId, kind, to, opts, memo, VOTE_PERIOD);
+        opts[0] = burnBps;
+        return _propose(villageId, Kind.BurnShare, opts, VOTE_PERIOD);
     }
 
     /// @notice Start an enrollment vote (keep open · change price · close now · close at a
@@ -307,7 +385,7 @@ contract DocksVillages is ReentrancyGuard {
         if (islandOf[villageId][msg.sender] == 0) revert NotInVillage();
         if (v.enrollVote != 0) revert VoteRunning();
         uint256[3] memory none;
-        proposalId = _propose(villageId, Kind.Enrollment, address(0), none, "", VOTE_PERIOD);
+        proposalId = _propose(villageId, Kind.Enrollment, none, VOTE_PERIOD);
         v.enrollVote = uint64(proposalId + 1);
     }
 
@@ -333,10 +411,9 @@ contract DocksVillages is ReentrancyGuard {
         p.settled = true;
         uint256 id = p.villageId;
         Village storage v = _villages[id];
-        if (p.kind == Kind.Spend || p.kind == Kind.BurnShare) {
+        if (p.kind == Kind.BurnShare) {
             winner = passed(proposalId) ? 1 : 0;
-            if (winner == 1 && p.kind == Kind.Spend) treasury.spend(id, p.to, p.options[0]);
-            if (winner == 1 && p.kind == Kind.BurnShare) treasury.setBurnBps(id, uint16(p.options[0]));
+            if (winner == 1) treasury.setBurnBps(id, uint16(p.options[0]));
         } else {
             winner = _plurality(p);
             v.enrollVote = 0;
@@ -345,7 +422,7 @@ contract DocksVillages is ReentrancyGuard {
                 if (winner == KEEP_OPEN || winner == CLOSE_NOW) v.enrollCap = 0;
                 if (winner == CHANGE_PRICE) v.enrollVote = uint64(_followUp(id, Kind.EnrollPrice, _priceOptions(v)) + 1);
                 if (winner == CLOSE_AT_POPULATION) {
-                    v.enrollVote = uint64(_followUp(id, Kind.EnrollCap, _capOptions(population(id))) + 1);
+                    v.enrollVote = uint64(_followUp(id, Kind.EnrollCap, _capOptions(v.population)) + 1);
                 }
             } else if (p.kind == Kind.EnrollPrice) {
                 v.enrollPrice = uint128(p.options[winner]);
@@ -379,9 +456,19 @@ contract DocksVillages is ReentrancyGuard {
     }
 
     /// @notice Friends on the village's islands.
-    function population(uint256 villageId) public view returns (uint256 total) {
-        address[] storage m = _members[villageId];
-        for (uint256 i; i < m.length; ++i) total += islands.memberCount(islandOf[villageId][m[i]]);
+    function population(uint256 villageId) public view returns (uint256) {
+        return _villages[villageId].population;
+    }
+
+    /// @notice When the current epoch ends (removals and released Friends take effect).
+    function nextEpoch() public view returns (uint64) {
+        return uint64(genesis + ((block.timestamp - genesis) / EPOCH + 1) * EPOCH);
+    }
+
+    /// @notice Whether a Friend is still bound to a village other than `villageId`.
+    function boundElsewhere(uint256 friendId, uint256 villageId) external view returns (bool) {
+        Bond memory b = bondOf[friendId];
+        return b.village != 0 && b.village != villageId && !_released(b);
     }
 
     /// @notice The price to enroll right now, or 0 when enrollment is closed.
@@ -390,7 +477,7 @@ contract DocksVillages is ReentrancyGuard {
         if (!v.founded) return 0;
         if (block.timestamp >= v.foundedAt + ENROLL_WINDOW) {
             if (!v.enrollOpen) return 0;
-            if (v.enrollCap != 0 && population(villageId) >= v.enrollCap) return 0;
+            if (v.enrollCap != 0 && v.population >= v.enrollCap) return 0;
         }
         return v.enrollPrice;
     }
@@ -465,6 +552,11 @@ contract DocksVillages is ReentrancyGuard {
         _onlyOwner(islandId);
         _docked(islandId);
         if (_taken(islandId)) revert AlreadyInVillage();
+        if (block.timestamp < cooldownUntil[islandId]) revert CoolingDown();
+        Village storage v = _villages[villageId];
+        uint256 friends = islands.memberCount(islandId);
+        if (v.enrollCap != 0 && v.population + friends > v.enrollCap) revert PopulationFull();
+        v.population += uint64(friends);
         _addMember(villageId, msg.sender, islandId);
     }
 
@@ -475,23 +567,19 @@ contract DocksVillages is ReentrancyGuard {
         _memberIndex[villageId][wallet] = _members[villageId].length;
     }
 
-    function _propose(
-        uint256 villageId,
-        Kind kind,
-        address to,
-        uint256[3] memory options,
-        string memory memo,
-        uint256 period
-    ) private returns (uint256 proposalId) {
+    function _propose(uint256 villageId, Kind kind, uint256[3] memory options, uint256 period)
+        private
+        returns (uint256 proposalId)
+    {
         proposalId = _proposals.length;
         uint256[4] memory tally;
         uint64 ends = uint64(block.timestamp + period);
-        _proposals.push(Proposal(villageId, kind, ends, false, to, options, tally, memo));
+        _proposals.push(Proposal(villageId, kind, ends, false, options, tally));
         emit Proposed(proposalId, villageId, kind, ends);
     }
 
     function _followUp(uint256 villageId, Kind kind, uint256[3] memory options) private returns (uint256) {
-        return _propose(villageId, kind, address(0), options, "", FOLLOW_UP_PERIOD);
+        return _propose(villageId, kind, options, FOLLOW_UP_PERIOD);
     }
 
     function _choices(Kind kind) private pure returns (uint8) {
@@ -517,6 +605,10 @@ contract DocksVillages is ReentrancyGuard {
 
     function _max(uint256 a, uint256 b) private pure returns (uint256) {
         return a > b ? a : b;
+    }
+
+    function _released(Bond memory b) private view returns (bool) {
+        return (b.releaseAt != 0 && block.timestamp >= b.releaseAt) || villageOf(b.island) != b.village;
     }
 
     /// @dev Seat of a flag that is still rising or full, or a member of a founded village.

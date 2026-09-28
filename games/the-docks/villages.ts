@@ -1,17 +1,17 @@
 /* Villages — SIMULATED in this preview. Mirrors contracts/src/docks/DocksVillages.sol,
- * DocksVillageTreasury.sol and DocksUniV3Liquidity.sol:
+ * DocksVillageTreasury.sol, DocksItems.sol and DocksUniV3Liquidity.sol:
  *  - plant a flag and lock the first RF; anyone locks more until FLAG_TARGET (a setting); every
- *    locker holds a soulbound founder mark with what they locked; not full by the deadline →
- *    everyone takes their RF back;
- *  - full → founded: half to the village treasury (RF only), half permanent one-sided RF/ETH
- *    liquidity; nothing can be withdrawn after that, so it can't be rugged;
- *  - everyone brings one island: founders free, anyone else enrolls (10,000 RF into the pool,
- *    half treasury / half liquidity). Open for the first week; after that, what the village votes;
- *  - votes: every Friend on a member's island is a vote; founders multiply theirs by
- *    (1 + their share of the pool). Enrollment fees grow the pool, so newcomers dilute founders;
- *  - harvest: fees are collected, the ETH part buys back RF, the burn share (half) is burned and
- *    the rest fills the treasury. */
-import { addMember, flagProblem, newVillage, walletOf, type Plot, type Proposal, type ProposalKind, type Village, type World } from "./world.js";
+ *    locker holds a soulbound founder mark; not full by the deadline → everyone gets RF back;
+ *  - every RF that comes in: half permanent RF/ETH liquidity, half the payer's allowance (spent
+ *    only on items for their village island; that RF goes to the liquidity too);
+ *  - everyone brings one island: founders free, anyone else enrolls (10,000 RF). Open for the
+ *    first week; after that, what the village votes; a population cap stops new Friends too;
+ *  - a Friend that leaves a village island stays bound to that village until the next epoch
+ *    (~21 days); an island leaves only by a removal request, carried out at the next epoch; its
+ *    village items are raffled to the members who stayed (RF tickets → liquidity);
+ *  - votes: every Friend on a member's island is a vote; founders ×(1 + their share of the pool);
+ *  - harvest: fees buy back RF, the burn share (half) is burned, the rest shared by Friends. */
+import { addMember, CELL, flagProblem, newVillage, villageOf, walletOf, type Item, type Plot, type Proposal, type ProposalKind, type Raffle, type Village, type World } from "./world.js";
 import type { Economy } from "./launch.js";
 
 export const FLAG_TARGET = 1_000_000;                 // RF to fill a flag (a contract setting)
@@ -27,6 +27,17 @@ export const RF_PER_ETH = 100_000;                    // simulated price for the
 export const YOU = "you";
 export const MARKETPLACE = "Rare Friends marketplace";
 export const DAY = 86_400_000;
+export const EPOCH_DAYS = 21;                         // removals and released Friends happen at epoch boundaries
+export const RAFFLE_DAYS = 3;
+export const TICKET_PRICE = 100;
+export const BOOST_SECONDS_PER_RF = 36;               // each RF cuts 36 s off a build
+export const HOUR = 3_600_000;
+export const CATALOG = [
+  { name: "Lantern", icon: "🏮", price: 1_000, build: HOUR },
+  { name: "Market stall", icon: "🏪", price: 10_000, build: DAY },
+  { name: "Fountain", icon: "⛲", price: 25_000, build: 3 * DAY },
+  { name: "Watchtower", icon: "🗼", price: 50_000, build: 7 * DAY },
+];
 
 export const ENROLL_CHOICES = ["Keep open at the current price", "Open at a different price", "Close now", "Close at a population"];
 
@@ -41,6 +52,9 @@ export const multiplier = (v: Village, who: string) => 1 + (v.pool ? weightOf(v,
 /** Voting power: Friends on your village island × your founder multiplier. */
 export const powerOf = (v: Village, who: string) => { const p = islandOf(v, who); return p ? p.friends.length * multiplier(v, who) : 0; };
 export const totalPower = (v: Village) => v.members.reduce((n, p) => n + powerOf(v, walletOf(p)), 0);
+/** RF left to spend on items for your village island: half your lock + your credits − spent. */
+export const allowanceOf = (v: Village, who: string) => Math.max(0, weightOf(v, who) / 2 + (v.credited.get(who) ?? 0) - (v.spent.get(who) ?? 0));
+export const nextEpoch = (w: World, now = Date.now()) => w.genesis + (Math.floor((now - w.genesis) / (EPOCH_DAYS * DAY)) + 1) * EPOCH_DAYS * DAY;
 export const inWindow = (v: Village, now = Date.now()) => v.founded && now < v.foundedAt + ENROLL_WINDOW_DAYS * DAY;
 /** RF to enroll now, or 0 when enrollment is closed. */
 export function enrollPrice(v: Village, now = Date.now()) {
@@ -80,7 +94,7 @@ export function found(w: World, v: Village) {
   if (v.founded || v.failed) throw new Error(`${v.name} can't be founded.`);
   if (v.locked < v.target) throw new Error(`${v.name}'s flag is ${pct(v)}% full.`);
   v.founded = true; v.foundedAt = Date.now(); v.pool = v.locked; v.enrollPrice = ENROLL_PRICE;
-  v.treasury = v.locked / 2; v.liquidity = v.locked - v.treasury;
+  v.liquidity = v.locked / 2;                                     // the other half: founders' allowances
   v.members = [v.seat];
   v.enrollVote = newProposal(v, "enrollment", [], "", ENROLL_WINDOW_DAYS);
   w.version++;
@@ -101,15 +115,21 @@ export function refund(w: World, e: Economy | null, v: Village, who = YOU) {
 /** Founders bring one island of theirs, free. */
 export function bring(w: World, v: Village, p: Plot) {
   if (!weightOf(v, walletOf(p))) throw new Error(`Only ${v.name}'s founders bring an island free; everyone else enrolls.`);
-  addMember(w, v, p);
+  joinChecks(w, v, p); addMember(w, v, p);
+}
+function joinChecks(w: World, v: Village, p: Plot) {
+  const until = w.cooldown.get(p) ?? 0;
+  if (Date.now() < until) throw new Error(`${p.name} holds a Friend still bound to another village until ${new Date(until).toLocaleDateString()}.`);
+  if (v.enrollCap && population(v) + p.friends.length > v.enrollCap) throw new Error(`${v.name} is capped at ${v.enrollCap.toLocaleString()} Friends.`);
 }
 /** Enroll one island for the enrollment price, paid into the pool (half treasury, half liquidity). */
 export function enroll(w: World, e: Economy | null, v: Village, p: Plot) {
   const price = enrollPrice(v); if (!price) throw new Error(`${v.name}'s enrollment is closed.`);
-  addMember(w, v, p);
-  if (e && e.rf < price) { v.members = v.members.filter(x => x !== p); throw new Error(`Enrolling costs ${price.toLocaleString()} RF; you have ${e.rf.toLocaleString()}.`); }
+  if (e && e.rf < price) throw new Error(`Enrolling costs ${price.toLocaleString()} RF; you have ${e.rf.toLocaleString()}.`);
+  joinChecks(w, v, p); addMember(w, v, p);
   if (e) e.rf -= price;
-  v.pool += price; v.treasury += price / 2; v.pendingLiquidity += price / 2;
+  const who = walletOf(p);
+  v.pool += price; v.credited.set(who, (v.credited.get(who) ?? 0) + price / 2); v.pendingLiquidity += price / 2;
   return price;
 }
 export function provideLiquidity(v: Village) { v.liquidity += v.pendingLiquidity; v.pendingLiquidity = 0; }
@@ -128,25 +148,27 @@ export function harvest(v: Village, e: Economy, who = YOU) {
   const bought = Math.round(v.fees.eth * RF_PER_ETH), total = v.fees.rf + bought;
   const burned = Math.round(total * v.burnBps / 10_000), kept = total - burned;
   const out = { rf: v.fees.rf, eth: v.fees.eth, bought, burned, kept };
-  v.fees = { rf: 0, eth: 0 }; v.burned += burned; v.treasury += kept; e.burned += burned;
+  v.fees = { rf: 0, eth: 0 }; v.burned += burned; e.burned += burned;
+  const pop = population(v);
+  for (const m of v.members) { const who = walletOf(m); v.credited.set(who, (v.credited.get(who) ?? 0) + (pop ? kept * m.friends.length / pop : 0)); }
+  if (!pop) v.pendingLiquidity += kept;
   return out;
 }
 
 /* ── votes: Friends × founder multiplier ── */
 
-const CHOICES: Record<ProposalKind, number> = { spend: 2, burnShare: 2, enrollment: 4, enrollPrice: 3, enrollCap: 3 };
+const CHOICES: Record<ProposalKind, number> = { burnShare: 2, enrollment: 4, enrollPrice: 3, enrollCap: 3 };
 function newProposal(v: Village, kind: ProposalKind, options: number[], memo: string, days: number): Proposal {
   const p: Proposal = { id: v.proposals.length, kind, options, memo: memo.trim().slice(0, 140), tally: Array(CHOICES[kind]).fill(0),
     voters: new Map(), ends: Date.now() + days * DAY, settled: false, winner: -1 };
   v.proposals.push(p); return p;
 }
-/** Spend treasury RF (e.g. a marketplace upgrade) or set the burn share. Members propose. */
-export function propose(v: Village, who: string, kind: "spend" | "burnShare", value: number, memo: string) {
+/** Propose a new share of each buyback to burn (the rest is shared as allowances). Members propose. */
+export function proposeBurnShare(v: Village, who: string, burnBps: number) {
   if (!v.founded) throw new Error(`${v.name} isn't founded yet.`);
   if (!islandOf(v, who)) throw new Error(`Only ${v.name}'s members make proposals.`);
-  if (kind === "spend" && !(value > 0)) throw new Error("How much RF?");
-  if (kind === "burnShare" && !(value >= 0 && value <= 10_000)) throw new Error("Burn share is 0–100%.");
-  return newProposal(v, kind, [value], memo, VOTE_DAYS);
+  if (!(burnBps >= 0 && burnBps <= 10_000)) throw new Error("Burn share is 0–100%.");
+  return newProposal(v, "burnShare", [burnBps], "", VOTE_DAYS);
 }
 /** Start an enrollment vote (one at a time). */
 export function proposeEnrollment(v: Village, who: string) {
@@ -156,7 +178,7 @@ export function proposeEnrollment(v: Village, who: string) {
   v.enrollVote = newProposal(v, "enrollment", [], "", VOTE_DAYS);
   return v.enrollVote;
 }
-/** Spend / burn share: choice 1 = yes, 0 = no. Enrollment votes: the option's index. */
+/** Burn share: choice 1 = yes, 0 = no. Enrollment votes: the option's index. */
 export function vote(v: Village, p: Proposal, who: string, choice: number) {
   if (Date.now() >= p.ends) throw new Error("Voting closed.");
   if (p.voters.has(who)) throw new Error("Already voted.");
@@ -174,13 +196,9 @@ export function settle(v: Village, p: Proposal): string {
   if (p.settled) throw new Error("Already settled.");
   if (Date.now() < p.ends) throw new Error("Voting is still open.");
   p.settled = true;
-  if (p.kind === "spend" || p.kind === "burnShare") {
+  if (p.kind === "burnShare") {
     p.winner = passed(v, p) ? 1 : 0;
     if (!p.winner) return `${v.name}'s vote didn't pass.`;
-    if (p.kind === "spend") {
-      if (v.treasury < p.options[0]) return `${v.name}'s treasury is short: nothing spent.`;
-      v.treasury -= p.options[0]; return `${v.name} spent ${p.options[0].toLocaleString()} RF on the marketplace (simulated): ${p.memo}.`;
-    }
     v.burnBps = p.options[0]; return `${v.name} now burns ${p.options[0] / 100}% of each buyback.`;
   }
   p.winner = plurality(p); v.enrollVote = null;
@@ -194,4 +212,130 @@ export function settle(v: Village, p: Proposal): string {
   if (p.kind === "enrollPrice") { v.enrollPrice = p.options[p.winner]; v.enrollCap = 0; v.enrollOpen = true; return `${v.name}'s enrollment is open at ${v.enrollPrice.toLocaleString()} RF.`; }
   v.enrollCap = p.options[p.winner]; v.enrollOpen = true;
   return `${v.name}'s enrollment is open until it has ${v.enrollCap.toLocaleString()} Friends.`;
+}
+
+/* ── staying and leaving ── */
+
+/** Can Friend `id` be placed on `p` now? Null if yes. */
+export function placeProblem(w: World, id: bigint, p: Plot): string | null {
+  const v = villageOf(w, p), b = w.bonds.get(id);
+  if (b && b.village !== v && Date.now() < b.until && v) return `#${id} is still bound to ${b.village.name} until ${new Date(b.until).toLocaleDateString()}.`;
+  if (v && v.enrollCap && population(v) >= v.enrollCap) return `${v.name} is at its population cap (${v.enrollCap.toLocaleString()} Friends).`;
+  return null;
+}
+/** Friend `id` is placed on `p`: bind it (or cool the island down if it's bound elsewhere). */
+export function onPlace(w: World, id: bigint, p: Plot) {
+  const v = villageOf(w, p), b = w.bonds.get(id);
+  if (b && b.village !== v && Date.now() < b.until) w.cooldown.set(p, Math.max(w.cooldown.get(p) ?? 0, b.until));
+  if (v) w.bonds.delete(id);
+}
+/** Friend `id` left village island `p` (moved off, or its hole burned): bound until the next epoch. */
+export function onLeave(w: World, id: bigint, p: Plot) {
+  const v = villageOf(w, p); if (v) w.bonds.set(id, { village: v, until: nextEpoch(w) });
+}
+/** Preview only: jump the clock to the next epoch boundary. */
+export function skipEpoch(w: World) {
+  const shift = nextEpoch(w) - Date.now() + 1;
+  w.genesis -= shift;
+  for (const v of w.villages) for (const [p, at] of v.removals) v.removals.set(p, at - shift);
+  for (const b of w.bonds.values()) b.until -= shift;
+  for (const [p, t] of w.cooldown) w.cooldown.set(p, t - shift);
+}
+/** Ask to take an island out of its village at the next epoch boundary. */
+export function requestRemoval(w: World, v: Village, p: Plot) {
+  if (!v.members.includes(p)) throw new Error(`${p.name} isn't in ${v.name}.`);
+  if (v.seat === p) throw new Error(`${p.name} is ${v.name}'s seat: the flag stays.`);
+  if (v.removals.has(p)) throw new Error(`${p.name} already asked to leave.`);
+  const at = nextEpoch(w); v.removals.set(p, at); return at;
+}
+/** Carry out removals whose epoch has passed: allowance → liquidity, village items → raffles. */
+export function processRemovals(w: World, now = Date.now()): string[] {
+  const out: string[] = [];
+  for (const v of w.villages) for (const [p, at] of [...v.removals]) {
+    if (now < at) continue;
+    v.removals.delete(p); v.members = v.members.filter(x => x !== p);
+    const who = walletOf(p), left = allowanceOf(v, who);
+    v.spent.set(who, (v.spent.get(who) ?? 0) + left); v.pendingLiquidity += left;
+    let n = 0;
+    for (const it of w.items) if (it.village === v && it.plot === p) { it.plot = null; v.raffles.push({ item: it, ends: now + RAFFLE_DAYS * DAY, tickets: new Map() }); n++; }
+    for (const pl of p.friends) { const b = w.bonds.get(pl.m.id); if (b?.village === v) w.bonds.delete(pl.m.id); }
+    out.push(`${p.name} left ${v.name}${n ? `: ${n} village item${n === 1 ? "" : "s"} went to a raffle` : ""}.`);
+    w.version++;
+  }
+  return out;
+}
+
+/* ── items ── */
+
+export const itemsOn = (w: World, p: Plot) => w.items.filter(it => it.plot === p);
+export const isReady = (it: Item, now = Date.now()) => now >= it.readyAt;
+/** Cell for a tile position on `p` (island-local tiles), if it's land with no item. */
+export function cellProblem(w: World, p: Plot, cx: number, cy: number): string | null {
+  if (!p.friends.some(pl => cx >= pl.x && cx < pl.x + pl.m.cw && cy >= pl.y && cy < pl.y + pl.m.ch)) return "Stand on land to build there.";
+  if (w.items.some(it => it.plot === p && it.cx === cx && it.cy === cy)) return "Something is already built on that spot.";
+  if (itemsOn(w, p).length >= 64) return "This island has 64 items.";
+  return null;
+}
+export const cellAt = (at: { x: number; y: number }) => ({ cx: Math.floor(at.x / CELL), cy: Math.floor(at.y / CELL) });
+function newItem(w: World, kind: number, village: Village | null, owner: string | null, p: Plot, cx: number, cy: number): Item {
+  const it: Item = { id: w.items.length, kind, village, owner, plot: p, cx, cy, readyAt: Date.now() + CATALOG[kind].build };
+  w.items.push(it); w.version++; return it;
+}
+/** A village item on your village island, paid from your allowance (its RF → liquidity). */
+export function buyForVillage(w: World, v: Village, who: string, kind: number, cx: number, cy: number) {
+  const p = islandOf(v, who); if (!p) throw new Error(`Bring or enroll an island in ${v.name} first.`);
+  const why = cellProblem(w, p, cx, cy); if (why) throw new Error(why);
+  const price = CATALOG[kind].price;
+  if (allowanceOf(v, who) < price) throw new Error(`Your ${v.name} allowance is ${Math.floor(allowanceOf(v, who)).toLocaleString()} RF.`);
+  v.spent.set(who, (v.spent.get(who) ?? 0) + price); v.pendingLiquidity += price;
+  return newItem(w, kind, v, null, p, cx, cy);
+}
+/** RF paid for own items, boosts and tickets: the island's village liquidity, or burned. */
+function payRf(w: World, e: Economy, p: Plot | null, amount: number) {
+  if (e.rf < amount) throw new Error(`You have ${Math.floor(e.rf).toLocaleString()} RF.`);
+  e.rf -= amount; const v = p ? villageOf(w, p) : null;
+  if (v) v.pendingLiquidity += amount; else e.burned += amount;
+}
+/** An item of your own, paid with your RF: always yours. */
+export function buyOwn(w: World, e: Economy, who: string, kind: number, p: Plot, cx: number, cy: number) {
+  const why = cellProblem(w, p, cx, cy); if (why) throw new Error(why);
+  payRf(w, e, p, CATALOG[kind].price);
+  return newItem(w, kind, null, who, p, cx, cy);
+}
+/** Speed up a build: each RF cuts BOOST_SECONDS_PER_RF seconds. */
+export function boost(w: World, e: Economy, it: Item, rf: number) {
+  if (!it.plot || isReady(it)) throw new Error("It's already built.");
+  payRf(w, e, it.plot, rf);
+  it.readyAt = Math.max(Date.now(), it.readyAt - rf * BOOST_SECONDS_PER_RF * 1000); w.version++;
+}
+export function takeOff(w: World, it: Item, who: string) {
+  if (it.owner !== who) throw new Error("Village items stay on their island.");
+  it.plot = null; w.version++;
+}
+export function placeOwn(w: World, it: Item, who: string, p: Plot, cx: number, cy: number) {
+  if (it.owner !== who) throw new Error("Not yours.");
+  const why = cellProblem(w, p, cx, cy); if (why) throw new Error(why);
+  it.plot = p; it.cx = cx; it.cy = cy; w.version++;
+}
+
+/* ── raffles ── */
+
+export function buyTickets(w: World, e: Economy | null, v: Village, r: Raffle, who: string, n: number) {
+  if (Date.now() >= r.ends) throw new Error("This raffle has ended.");
+  if (!islandOf(v, who)) throw new Error(`Only ${v.name}'s members who stayed can enter.`);
+  const cost = n * TICKET_PRICE;
+  if (e) { if (e.rf < cost) throw new Error(`Tickets cost ${cost.toLocaleString()} RF.`); e.rf -= cost; }
+  v.pendingLiquidity += cost; r.tickets.set(who, (r.tickets.get(who) ?? 0) + n);
+}
+/** After a raffle ends: draw a winner (a raffle nobody entered runs again). */
+export function draw(w: World, v: Village, r: Raffle, rand = Math.random): string {
+  if (Date.now() < r.ends) throw new Error("The raffle is still open.");
+  const total = [...r.tickets.values()].reduce((a, b) => a + b, 0);
+  const name = CATALOG[r.item.kind].name;
+  if (!total) { r.ends = Date.now() + RAFFLE_DAYS * DAY; return `Nobody entered the ${name} raffle: it runs again.`; }
+  let t = Math.floor(rand() * total), winner = "";
+  for (const [who, n] of r.tickets) { if (t < n) { winner = who; break; } t -= n; }
+  v.raffles = v.raffles.filter(x => x !== r);
+  r.item.village = null; r.item.owner = winner; r.item.plot = null; w.version++;
+  return winner === YOU ? `You won the ${name} (simulated)! It's yours: place it on one of your islands.` : `${winner} won the ${name} raffle.`;
 }

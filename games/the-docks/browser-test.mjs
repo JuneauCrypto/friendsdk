@@ -258,7 +258,7 @@ try {
     await game.getByText(/You locked .* RF into Dock Town's flag \(simulated\) · 100% full/).waitFor();
     await game.getByText(/your mark: .* RF \(\d+% of the flag, soulbound\)/).first().waitFor();
     await game.getByRole("button", { name: "🏛 Found Dock Town" }).click();
-    await game.getByText(/🏛 Dock Town is a village! 500k RF to its treasury, 500k RF into permanent RF\/ETH liquidity/).waitFor();
+    await game.getByText(/🏛 Dock Town is a village! 500k RF into permanent RF\/ETH liquidity, 500k RF as founders' allowances/).waitFor();
     assert.equal(await game.locator(".docks-flag.rising").count(), 1, "only Crystal Hollow still rising");
     await game.locator(".docks-nav").getByRole("button", { name: /Village/ }).click();
     const town = game.locator(".docks-village", { hasText: "Dock Town" });
@@ -267,7 +267,7 @@ try {
     await town.getByText(/enrollment open · 10k RF \(first week: 7 days left\)/).waitFor();
     await page.waitForTimeout(4500);                               // trading fees accrue
     await town.getByRole("button", { name: "🌾 Harvest fees" }).click();
-    await game.getByText(/Harvested Dock Town \(simulated\): .* burned .* to the treasury/).waitFor();
+    await game.getByText(/Harvested Dock Town \(simulated\): .* burned .* shared by Friends as allowances/).waitFor();
     // enrollment after the first week: vote for a new price, then pick it in the 24h vote
     await town.getByRole("button", { name: "Open at a different price" }).click();
     await town.getByRole("button", { name: "⏩ Skip the first week" }).click();
@@ -278,12 +278,16 @@ try {
     await town.getByRole("button", { name: "⏩ End vote" }).click();
     await town.getByRole("button", { name: "Settle" }).click();
     await game.getByText(/Dock Town's enrollment is open at 20,000 RF/).waitFor();
-    // spend the treasury on a marketplace upgrade
-    await town.getByRole("button", { name: "Put it to a vote" }).click();
-    await town.getByRole("button", { name: "Yes", exact: true }).click();
-    await town.getByRole("button", { name: "⏩ End vote" }).click();
-    await town.getByRole("button", { name: "Settle" }).click();
-    await game.getByText(/Dock Town spent 25,000 RF on the marketplace \(simulated\)/).waitFor();
+    // build a village item where the lead stands (allowance), finish it with RF, and one of your own
+    await town.getByText(/Your allowance 500(\.\d)?k RF/).waitFor();
+    await town.getByLabel("Item to build").selectOption({ index: 1 });
+    await town.getByRole("button", { name: /Build where #\d+ stands · allowance/ }).click();
+    await game.getByText(/🏪 Market stall is being built on Your island \(simulated\): ready in 24 h\. Paid from your Dock Town allowance/).waitFor();
+    assert.equal(await game.locator(".docks-item-mark.building", { hasText: "🏪" }).count(), 1, "the stall is going up on the map");
+    await game.locator(".docks-nav").getByRole("button", { name: /Village/ }).click();
+    await town.getByRole("button", { name: /^Finish · / }).click();
+    await game.getByText(/🏪 Market stall is built\./).waitFor();
+    await town.getByText(/village item: stays with the village · built ✓/).waitFor();
     await shot("village-menu");
     await game.getByRole("button", { name: "Close Villages" }).click();
     await page.waitForTimeout(300); await shot("village");

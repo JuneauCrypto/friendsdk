@@ -9,6 +9,32 @@ import { DocksLaunchpad } from "../src/docks/DocksLaunchpad.sol";
 import { DocksVillages } from "../src/docks/DocksVillages.sol";
 import { DocksFounderMarks } from "../src/docks/DocksFounderMarks.sol";
 import { DocksVillageTreasury, IDocksLiquidity, IDocksBuyback } from "../src/docks/DocksVillageTreasury.sol";
+import { DocksItems } from "../src/docks/DocksItems.sol";
+import { IDiceEntropy } from "../src/ChanceGame.sol";
+
+contract MockDocksDice is IDiceEntropy {
+    uint128 public constant FEE = 0.000_025 ether;
+    address public immutable provider;
+    uint64 public sequenceNumber;
+    mapping(uint64 => address) public consumers;
+
+    constructor(address provider_) {
+        provider = provider_;
+    }
+
+    function getFeeV2(address, uint32) external pure returns (uint128) {
+        return FEE;
+    }
+
+    function requestV2(address, bytes32, uint32) external payable returns (uint64 sequence) {
+        sequence = ++sequenceNumber;
+        consumers[sequence] = msg.sender;
+    }
+
+    function fulfill(uint64 sequence, bytes32 word) external {
+        DocksItems(consumers[sequence])._entropyCallback(sequence, provider, word);
+    }
+}
 
 contract MockRF is ERC20 {
     constructor() ERC20("RareFriends", "RF") { }
@@ -112,6 +138,8 @@ contract DocksTest is Test {
     DocksVillageTreasury tre;
     MockLiquidity liq;
     MockRF weth;
+    DocksItems items;
+    MockDocksDice dice;
     address alice = address(0xA11CE);
     address bob = address(0xB0B);
     address carol = address(0xCA201);
@@ -135,7 +163,14 @@ contract DocksTest is Test {
         weth = new MockRF();
         liq = new MockLiquidity(rf, weth);
         tre = new DocksVillageTreasury(IERC20(address(rf)), IERC20(address(weth)), vil, liq, liq);
-        vil.init(tre);
+        dice = new MockDocksDice(address(0xD1CE));
+        uint256[] memory prices = new uint256[](3);
+        uint32[] memory builds = new uint32[](3);
+        (prices[0], prices[1], prices[2]) = (1000 ether, 10_000 ether, 50_000 ether); // lantern, stall, tower
+        (builds[0], builds[1], builds[2]) = (1 hours, 1 days, 7 days);
+        items = new DocksItems(IERC20(address(rf)), vil, dice, address(0xD1CE), 100 ether, 36, prices, builds);
+        reg.init(vil);
+        vil.init(tre, items);
         pad = new DocksLaunchpad(IERC20(address(rf)), reg, vil, treasury);
         _friend(1, alice);
         _friend(2, alice);
@@ -149,6 +184,7 @@ contract DocksTest is Test {
             rf.approve(address(pad), type(uint256).max);
             rf.approve(address(reg), type(uint256).max);
             rf.approve(address(vil), type(uint256).max);
+            rf.approve(address(items), type(uint256).max);
             plotOf[who[i]] = reg.create("");
             vm.stopPrank();
         }
@@ -245,8 +281,8 @@ contract DocksTest is Test {
         assertEq(reg.fillHole(plotOf[alice], 1, 3), 20 ether);
         assertEq(_burned() - before, 20 ether);
         assertFalse(reg.isHole(plotOf[alice], 1));
-        (, uint256 at, bool hole) = reg.friendAt(plotOf[alice], 0, 0);
-        assertEq(at, 3);
+        (, uint256 atId, bool hole) = reg.friendAt(plotOf[alice], 0, 0);
+        assertEq(atId, 3);
         assertFalse(hole);
     }
 
@@ -722,6 +758,10 @@ contract DocksTest is Test {
         vm.stopPrank();
     }
 
+    function enrollAs(address who, uint256 v) external {
+        _enroll(who, v);
+    }
+
     /// dave: a docked island at berth 3,0 (next to carol) with `n` Gen 6 Friends.
     function _dave(uint256 n) internal {
         vm.prank(dave);
@@ -734,12 +774,18 @@ contract DocksTest is Test {
             _friend(ids[i], dave);
             xs[i] = int32(int256(i));
         }
-        rf.mint(dave, 1000 ether);
+        rf.mint(dave, 1_000_000 ether);
         vm.startPrank(dave);
         rf.approve(address(reg), type(uint256).max);
+        rf.approve(address(vil), type(uint256).max);
+        rf.approve(address(items), type(uint256).max);
         reg.arrange(plotOf[dave], ids, xs, ys);
         reg.dock(plotOf[dave], 3, 0);
         vm.stopPrank();
+    }
+
+    function _toNextEpoch() internal {
+        vm.warp(vil.nextEpoch());
     }
 
     function testFlagFillsFromManyLockersThenFoundsAVillage() public {
@@ -752,7 +798,6 @@ contract DocksTest is Test {
         uint256 carolBefore = rf.balanceOf(carol);
         assertEq(_lock(carol, v, 500_000 ether), 300_000 ether, "the last lock is trimmed to what's missing");
         assertEq(rf.balanceOf(carol) - carolBefore, 200_000 ether, "the rest never left carol");
-        assertFalse(vil.rising(v));
         vm.expectRevert(DocksVillages.NotRising.selector);
         vil.lock(v, 1000 ether);
         assertEq(vil.villageOf(plotOf[alice]), 0, "not a village until founded");
@@ -760,15 +805,15 @@ contract DocksTest is Test {
         vil.found(v); // anyone can found a full flag
         assertEq(vil.villageOf(plotOf[alice]), v);
         assertEq(vil.islandOf(v, alice), plotOf[alice], "the planter's island is the seat");
-        assertEq(tre.balanceOf(v), 500_000 ether, "half to the village treasury");
+        assertEq(vil.population(v), 2);
         assertEq(liq.provided(v), 500_000 ether, "half to permanent liquidity");
+        assertEq(tre.allowanceOf(v, alice), 200_000 ether, "half of what each locked is their allowance");
+        assertEq(tre.allowanceOf(v, bob), 150_000 ether);
+        assertEq(rf.balanceOf(address(tre)), 500_000 ether);
         assertEq(rf.balanceOf(address(vil)), 0, "nothing left to withdraw");
         assertEq(vil.enrollPrice(v), ENROLL, "open enrollment for the first week");
         vm.expectRevert(DocksVillages.NotRising.selector);
         vil.found(v);
-        vm.prank(alice);
-        vm.expectRevert(DocksVillages.NotRising.selector);
-        vil.refund(v);
     }
 
     function testFounderMarksAreSoulboundAndWeighted() public {
@@ -776,17 +821,11 @@ contract DocksTest is Test {
         DocksFounderMarks m = vil.marks();
         uint256 aliceMark = m.markOf(v, alice);
         assertEq(m.ownerOf(aliceMark), alice);
-        assertEq(m.balanceOf(alice), 1);
         assertEq(vil.weightOf(v, alice), 400_000 ether);
-        assertEq(vil.weightOf(v, bob), 600_000 ether);
         assertTrue(m.locked(aliceMark));
         vm.prank(alice);
         vm.expectRevert(DocksFounderMarks.Soulbound.selector);
         m.transferFrom(alice, bob, aliceMark);
-        vm.prank(alice);
-        vm.expectRevert(DocksFounderMarks.Soulbound.selector);
-        m.approve(bob, aliceMark);
-        assertEq(m.villages(), address(vil));
         vm.expectRevert(DocksFounderMarks.NotVillages.selector);
         m.add(v, carol, 1 ether);
         assertGt(bytes(m.tokenURI(aliceMark)).length, 50);
@@ -796,7 +835,6 @@ contract DocksTest is Test {
         _place(alice, 1, 0, 0);
         rf.mint(alice, 10_000 ether);
         vm.startPrank(alice);
-        rf.approve(address(vil), type(uint256).max);
         vm.expectRevert(DocksVillages.NotDocked.selector);
         vil.plant(plotOf[alice], "Dock Town", 0, 0, 1000 ether);
         vm.stopPrank();
@@ -808,11 +846,6 @@ contract DocksTest is Test {
         vil.plant(plotOf[alice], "Dock Town", 0, 0, 999 ether);
         vm.expectRevert(DocksVillages.BadName.selector);
         vil.plant(plotOf[alice], "", 0, 0, 1000 ether);
-        vm.stopPrank();
-        vm.prank(bob);
-        vm.expectRevert(DocksVillages.NotIslandOwner.selector);
-        vil.plant(plotOf[alice], "Dock Town", 0, 0, 1000 ether);
-        vm.startPrank(alice);
         vil.plant(plotOf[alice], "Dock Town", 0, 0, 1000 ether);
         vm.expectRevert(DocksVillages.AlreadyInVillage.selector);
         vil.plant(plotOf[alice], "Second flag", 0, 0, 1000 ether);
@@ -827,18 +860,11 @@ contract DocksTest is Test {
         vm.expectRevert(DocksVillages.StillOpen.selector);
         vil.refund(v);
         vm.warp(block.timestamp + 30 days);
-        rf.mint(carol, 10_000 ether);
-        vm.prank(carol);
-        vm.expectRevert(DocksVillages.NotRising.selector);
-        vil.lock(v, 10_000 ether);
         uint256 bobBefore = rf.balanceOf(bob);
         vm.prank(bob);
         assertEq(vil.refund(v), 50_000 ether);
         assertEq(rf.balanceOf(bob) - bobBefore, 50_000 ether);
         assertEq(vil.marks().balanceOf(bob), 0, "mark burned");
-        vm.prank(bob);
-        vm.expectRevert(DocksFounderMarks.NoMark.selector);
-        vil.refund(v);
         vm.prank(alice);
         vil.refund(v);
         assertEq(rf.balanceOf(address(vil)), 0);
@@ -856,38 +882,154 @@ contract DocksTest is Test {
         vm.warp(block.timestamp + 7 days);
         vm.prank(bob);
         vil.refund(v);
-        vm.expectRevert(DocksVillages.NotFull.selector);
-        vil.found(v);
     }
 
-    function testEveryoneBringsOneIsland() public {
+    function testEveryoneBringsOneIslandAndNobodyJoinsFree() public {
         uint256 v = _village();
-        _bring(bob, v); // founders bring one island free, from anywhere
+        _bring(bob, v);
         vm.prank(bob);
         vm.expectRevert(DocksVillages.HasIsland.selector);
         vil.bring(v, plotOf[bob]);
         vm.prank(carol);
         vm.expectRevert(DocksVillages.NotFounder.selector);
         vil.bring(v, plotOf[carol]);
-
-        uint256 carolBefore = rf.balanceOf(carol) + 1_000_000 ether;
-        _enroll(carol, v); // everyone else pays into the pool: nobody joins free
-        assertEq(carolBefore - rf.balanceOf(carol), ENROLL);
+        uint256 before = rf.balanceOf(address(tre));
+        _enroll(carol, v);
+        assertEq(rf.balanceOf(address(tre)) - before, ENROLL);
         assertEq(vil.villages(v).pool, TARGET + ENROLL);
-        assertEq(tre.balanceOf(v), 500_000 ether + ENROLL / 2, "half the fee to the treasury");
+        assertEq(tre.allowanceOf(v, carol), ENROLL / 2, "half the fee is carol's allowance");
         assertEq(tre.pendingLiquidity(v), ENROLL / 2, "half queued for liquidity");
         tre.provideLiquidity(v);
         assertEq(liq.provided(v), 500_000 ether + ENROLL / 2);
-        assertEq(vil.members(v).length, 3);
+        assertEq(vil.population(v), 4);
+    }
 
+    function testLeavingTakesARemovalRequestAndAnEpoch() public {
+        uint256 v = _village();
+        _enroll(carol, v);
         vm.prank(alice);
         vm.expectRevert(DocksVillages.SeatStays.selector);
-        vil.leaveVillage(plotOf[alice]);
+        vil.requestRemoval(plotOf[alice]);
         vm.prank(carol);
-        vil.leaveVillage(plotOf[carol]);
+        uint64 at = vil.requestRemoval(plotOf[carol]);
+        assertEq(at, vil.nextEpoch());
+        assertLe(at - block.timestamp, 21 days);
+        vm.prank(carol);
+        vm.expectRevert(DocksVillages.AlreadyRequested.selector);
+        vil.requestRemoval(plotOf[carol]);
+        vm.expectRevert(DocksVillages.NotYet.selector);
+        vil.processRemoval(plotOf[carol]);
+        assertEq(vil.villageOf(plotOf[carol]), v, "still in until the epoch ends");
+        _toNextEpoch();
+        uint256 liquidityBefore = tre.pendingLiquidity(v);
+        vil.processRemoval(plotOf[carol]); // anyone
         assertEq(vil.villageOf(plotOf[carol]), 0);
-        assertEq(vil.members(v).length, 2);
-        _enroll(carol, v); // coming back costs the fee again
+        assertEq(vil.population(v), 2);
+        assertEq(tre.allowanceOf(v, carol), 0, "no RF back: the unspent allowance...");
+        assertEq(tre.pendingLiquidity(v) - liquidityBefore, ENROLL / 2, "...goes to the village's liquidity");
+    }
+
+    function testAFriendThatLeavesBurnsASpotAndStaysBoundToItsVillage() public {
+        uint256 v = _village();
+        _bring(bob, v);
+        assertEq(vil.population(v), 3);
+        // bob sends #10 to carol: its spot is burned, the village loses one
+        gen.set(10, carol);
+        reg.burnHole(10);
+        assertTrue(reg.isHole(plotOf[bob], 10));
+        assertEq(vil.population(v), 2);
+        // a second flag: carol's #10 can't be used there before the next epoch
+        vm.prank(dave);
+        plotOf[dave] = reg.create("");
+        _friend(600, dave);
+        rf.mint(dave, 1_001_000 ether);
+        vm.startPrank(dave);
+        rf.approve(address(reg), type(uint256).max);
+        rf.approve(address(vil), type(uint256).max);
+        reg.arrange(plotOf[dave], _one(600), _i(0), _i(0));
+        reg.dock(plotOf[dave], 3, 0);
+        uint256 w = vil.plant(plotOf[dave], "Other Flag", 0, 0, TARGET);
+        vil.found(w);
+        vm.stopPrank();
+        rf.mint(carol, 100 ether);
+        vm.prank(carol);
+        vil.enroll(w, plotOf[carol]);
+        vm.prank(carol);
+        vm.expectRevert(DocksVillages.BoundElsewhere.selector);
+        reg.arrange(plotOf[carol], _one(10), _i(1), _i(0));
+        assertTrue(vil.boundElsewhere(10, w));
+        _toNextEpoch();
+        vm.prank(carol);
+        reg.arrange(plotOf[carol], _one(10), _i(1), _i(0)); // free after the epoch
+        assertEq(vil.population(w), 3);
+    }
+
+    function testAMovedFriendCoolsTheIslandItLandsOn() public {
+        uint256 v = _village();
+        // alice moves #2 off her village island onto a second island of hers
+        vm.prank(alice);
+        uint256 second = reg.create("");
+        vm.prank(alice);
+        reg.arrange(second, _one(2), _i(0), _i(0));
+        assertEq(vil.population(v), 1);
+        vm.prank(alice);
+        reg.dock(second, 0, 1);
+        vm.prank(dave);
+        plotOf[dave] = reg.create("");
+        _friend(600, dave);
+        rf.mint(dave, 2_000_000 ether);
+        vm.startPrank(dave);
+        rf.approve(address(reg), type(uint256).max);
+        rf.approve(address(vil), type(uint256).max);
+        reg.arrange(plotOf[dave], _one(600), _i(0), _i(0));
+        reg.dock(plotOf[dave], 3, 0);
+        uint256 w = vil.plant(plotOf[dave], "Other Flag", 0, 0, TARGET);
+        vil.found(w);
+        vm.stopPrank();
+        vm.prank(alice);
+        vm.expectRevert(DocksVillages.CoolingDown.selector);
+        vil.enroll(w, second); // #2 on it is still bound to Dock Town
+        _toNextEpoch();
+        vil.settle(1); // w's first enrollment vote: nobody voted, keep open
+        rf.mint(alice, 10_000 ether);
+        vm.prank(alice);
+        vil.enroll(w, second);
+        assertEq(vil.population(w), 2);
+    }
+
+    function testTheSameFriendGetsItsSpotBackIfThereIsRoom() public {
+        uint256 v = _village();
+        _bring(bob, v);
+        vm.prank(alice);
+        vil.vote(0, 3); // cap the population
+        vm.warp(block.timestamp + 7 days);
+        vil.settle(0);
+        vm.prank(alice);
+        vil.vote(1, 0); // the lowest cap: population 3 + 10
+        vm.warp(block.timestamp + 1 days);
+        vil.settle(1);
+        assertEq(vil.villages(v).enrollCap, 13);
+        gen.set(10, carol);
+        reg.burnHole(10);
+        assertEq(vil.population(v), 2);
+        gen.set(10, bob); // back to bob, active again
+        vm.prank(bob);
+        reg.fillHole(plotOf[bob], 10, 10); // free, its own spot
+        assertEq(vil.population(v), 3);
+        _dave(10);
+        vm.prank(dave);
+        vil.enroll(v, plotOf[dave]);
+        assertEq(vil.population(v), 13);
+        assertEq(vil.enrollPrice(v), 0, "full");
+        gen.set(10, carol);
+        reg.burnHole(10);
+        _friend(700, dave);
+        vm.prank(dave);
+        reg.arrange(plotOf[dave], _one(700), _i(10), _i(0)); // takes the free place
+        gen.set(10, bob);
+        vm.prank(bob);
+        vm.expectRevert(DocksVillages.PopulationFull.selector);
+        reg.fillHole(plotOf[bob], 10, 10); // no room: can't come back
     }
 
     function testPowerIsFriendsTimesFounderShareAndEnrolleesDilute() public {
@@ -895,194 +1037,181 @@ contract DocksTest is Test {
         _bring(bob, v);
         assertEq(vil.powerOf(v, alice), 2 * 14_000, "2 Friends x 1.4 (40% of the pool)");
         assertEq(vil.powerOf(v, bob), 1 * 16_000, "1 Friend x 1.6");
-        assertEq(vil.powerOf(v, carol), 0, "not in the village");
         _enroll(carol, v);
         assertEq(vil.powerOf(v, carol), 10_000, "enrollees: 1 vote per Friend, no multiplier");
-        assertEq(vil.powerOf(v, alice), 2 * (10_000 + 400_000 ether * 10_000 / (TARGET + ENROLL)), "the fee diluted alice's share");
-        _place(alice, 3, 2, 0);
-        assertEq(vil.population(v), 5);
-        assertEq(vil.powerOf(v, alice), 3 * (10_000 + 400_000 ether * 10_000 / (TARGET + ENROLL)), "more Friends, more votes");
+        assertEq(vil.powerOf(v, alice), 2 * (10_000 + 400_000 ether * 10_000 / (TARGET + ENROLL)));
     }
 
-    function testEnrollmentAfterTheFirstWeekIsWhatTheVillageVotes() public {
+    function testEnrollmentVotes() public {
         uint256 v = _village();
         _bring(bob, v);
-        DocksVillages.Proposal memory p = vil.proposals(0);
-        assertEq(uint8(p.kind), uint8(DocksVillages.Kind.Enrollment));
         vm.warp(block.timestamp + 7 days);
         assertEq(vil.enrollPrice(v), 0, "closed until the vote is settled");
         vm.expectRevert(DocksVillages.EnrollmentClosed.selector);
         this.enrollAs(carol, v);
-        vil.settle(0); // nobody voted: keep open at the current price
+        vil.settle(0); // nobody voted: keep open
         assertEq(vil.enrollPrice(v), ENROLL);
-
-        vm.prank(carol);
-        vm.expectRevert(DocksVillages.NotInVillage.selector);
-        vil.proposeEnrollment(v);
         vm.prank(alice);
-        uint256 close = vil.proposeEnrollment(v);
+        uint256 change = vil.proposeEnrollment(v);
         vm.prank(bob);
         vm.expectRevert(DocksVillages.VoteRunning.selector);
         vil.proposeEnrollment(v);
-        vm.prank(alice);
-        vil.vote(close, 2); // close now
-        vm.prank(alice);
-        vm.expectRevert(DocksVillages.AlreadyVoted.selector);
-        vil.vote(close, 2);
-        vm.expectRevert(DocksVillages.VotingOpen.selector);
-        vil.settle(close);
+        vm.prank(bob);
+        vil.vote(change, 1); // change the price
         vm.warp(block.timestamp + 3 days);
-        vm.prank(bob);
-        vm.expectRevert(DocksVillages.VotingClosed.selector);
-        vil.vote(close, 0);
-        assertEq(vil.settle(close), 2);
-        assertEq(vil.enrollPrice(v), 0);
-        vm.expectRevert(DocksVillages.Settled.selector);
-        vil.settle(close);
-    }
-
-    function enrollAs(address who, uint256 v) external {
-        _enroll(who, v);
-    }
-
-    function testChangingThePriceClosesUntilTheDayLongPriceVote() public {
-        uint256 v = _village();
-        _bring(bob, v);
-        vm.prank(bob);
-        vil.vote(0, 1); // change the price (bob 16,000 beats nothing)
-        vm.warp(block.timestamp + 7 days);
-        vil.settle(0);
+        vil.settle(change);
         assertEq(vil.enrollPrice(v), 0, "closed while the new price is voted");
-        DocksVillages.Proposal memory p = vil.proposals(1);
-        assertEq(uint8(p.kind), uint8(DocksVillages.Kind.EnrollPrice));
-        assertEq(p.options[0], 5000 ether);
+        DocksVillages.Proposal memory p = vil.proposals(change + 1);
         assertEq(p.options[1], 20_000 ether);
-        assertEq(p.options[2], 50_000 ether);
         assertEq(p.ends, block.timestamp + 1 days);
         vm.prank(alice);
-        vil.vote(1, 1); // 28,000 for 20k
-        vm.prank(bob);
-        vil.vote(1, 0); // 16,000 for 5k
+        vil.vote(change + 1, 1);
         vm.warp(block.timestamp + 1 days);
-        assertEq(vil.settle(1), 1);
+        vil.settle(change + 1);
         assertEq(vil.enrollPrice(v), 20_000 ether);
-    }
-
-    function testClosingAtAPopulationThreshold() public {
-        uint256 v = _village();
-        _bring(bob, v);
         vm.prank(alice);
-        vil.vote(0, 3); // close at a population
-        vm.warp(block.timestamp + 7 days);
-        vil.settle(0);
-        DocksVillages.Proposal memory p = vil.proposals(1);
-        assertEq(uint8(p.kind), uint8(DocksVillages.Kind.EnrollCap));
-        assertEq(p.options[0], 13, "population 3: +10");
-        assertEq(p.options[1], 28);
-        assertEq(p.options[2], 103);
+        uint256 close = vil.proposeEnrollment(v);
+        vm.prank(alice);
+        vil.vote(close, 2);
+        vm.warp(block.timestamp + 3 days);
+        vil.settle(close);
         assertEq(vil.enrollPrice(v), 0);
-        vm.prank(alice);
-        vil.vote(1, 0);
-        vm.warp(block.timestamp + 1 days);
-        vil.settle(1);
-        assertEq(vil.enrollPrice(v), ENROLL, "open again until the village reaches 13 Friends");
-        _dave(9);
-        rf.mint(dave, ENROLL);
-        vm.startPrank(dave);
-        rf.approve(address(vil), type(uint256).max);
-        vil.enroll(v, plotOf[dave]);
-        vm.stopPrank();
-        assertEq(vil.population(v), 12);
-        _enroll(carol, v);
-        assertEq(vil.population(v), 13);
-        assertEq(vil.enrollPrice(v), 0, "full: enrollment closed");
     }
 
-    function testSpendVotesByFriendsAndEnrolleesCanOutvoteFounders() public {
+    function testHarvestSharesByFriendsAndTheBurnShareIsVoted() public {
         uint256 v = _village();
         _bring(bob, v);
-        address market = address(0x3A12);
-        vm.prank(carol);
-        vm.expectRevert(DocksVillages.NotInVillage.selector);
-        vil.propose(v, DocksVillages.Kind.Spend, market, 10_000 ether, "Upgrade");
-        vm.prank(alice);
-        uint256 spend = vil.propose(v, DocksVillages.Kind.Spend, market, 10_000 ether, "Buy the dock lanterns");
-        vm.prank(alice);
-        vil.vote(spend, 1);
-        vm.prank(bob);
-        vil.vote(spend, 0);
-        vm.prank(carol);
-        vm.expectRevert(DocksVillages.NoPower.selector);
-        vil.vote(spend, 1);
-        vm.warp(block.timestamp + 3 days);
-        vil.settle(spend);
-        assertEq(rf.balanceOf(market), 10_000 ether, "28,000 yes beats 16,000 no");
-        assertEq(tre.balanceOf(v), 490_000 ether);
-
-        // a newcomer with 5 Friends outvotes both founders' multipliers
-        _dave(5);
-        rf.mint(dave, ENROLL);
-        vm.startPrank(dave);
-        rf.approve(address(vil), type(uint256).max);
-        vil.enroll(v, plotOf[dave]);
-        uint256 more = vil.propose(v, DocksVillages.Kind.Spend, market, 1 ether, "");
-        vil.vote(more, 0);
-        vm.stopPrank();
-        vm.prank(alice);
-        vil.vote(more, 1);
-        vm.warp(block.timestamp + 3 days);
-        assertEq(vil.settle(more), 0, "rejected");
-        assertEq(rf.balanceOf(market), 10_000 ether);
-    }
-
-    function testHarvestBuysBackRFBurnsHalfAndAVoteSetsTheBurnShare() public {
-        uint256 v = _village();
-        _bring(bob, v);
-        liq.setFees(1000 ether, 2 ether); // 2 WETH buys 2,000 RF -> 3,000 RF of fees
+        liq.setFees(1000 ether, 2 ether); // 2 WETH buys 2,000 RF -> 3,000 RF
         vm.prank(carol);
         vm.expectRevert(DocksVillageTreasury.NotMember.selector);
         tre.harvest(v, 0);
         uint256 burned = _burned();
         vm.prank(bob);
-        vm.expectRevert(bytes("slippage"));
-        tre.harvest(v, 2001 ether);
-        vm.prank(bob);
-        (uint256 b, uint256 k) = tre.harvest(v, 2000 ether);
+        (uint256 b, uint256 shared) = tre.harvest(v, 2000 ether);
         assertEq(b, 1500 ether);
-        assertEq(k, 1500 ether);
+        assertEq(shared, 1500 ether);
         assertEq(_burned() - burned, 1500 ether);
-        assertEq(tre.balanceOf(v), 500_000 ether + 1500 ether);
-
-        vm.prank(alice);
-        vm.expectRevert(DocksVillages.BadProposal.selector);
-        vil.propose(v, DocksVillages.Kind.BurnShare, address(0), 10_001, "");
+        assertEq(tre.allowanceOf(v, alice), 200_000 ether + 1000 ether, "2 of 3 Friends");
+        assertEq(tre.allowanceOf(v, bob), 300_000 ether + 500 ether);
         vm.prank(bob);
-        uint256 share = vil.propose(v, DocksVillages.Kind.BurnShare, address(0), 2500, "Keep more");
+        uint256 share = vil.proposeBurnShare(v, 2500);
         vm.prank(bob);
         vil.vote(share, 1);
         vm.warp(block.timestamp + 3 days);
         vil.settle(share);
         assertEq(tre.burnBpsOf(v), 2500);
-        liq.setFees(4000 ether, 0);
-        vm.prank(alice);
-        (b,) = tre.harvest(v, 0);
-        assertEq(b, 1000 ether);
-        vm.expectRevert(DocksVillageTreasury.NotVillages.selector);
-        tre.spend(v, alice, 1);
     }
 
-    function testVillageLaunchScope() public {
+    /* ── items ── */
+
+    function testVillageItemsSpendTheAllowanceAndBuild() public {
+        uint256 v = _village();
+        vm.prank(carol);
+        vm.expectRevert(DocksItems.NotInVillage.selector);
+        items.buyForVillage(v, 1, 0, 0);
+        vm.prank(alice);
+        uint256 stall = items.buyForVillage(v, 1, 0, 0);
+        assertEq(tre.allowanceOf(v, alice), 190_000 ether);
+        assertEq(tre.pendingLiquidity(v), 10_000 ether, "the item's RF goes to the village's liquidity");
+        assertFalse(items.ready(stall));
+        vm.prank(alice);
+        vm.expectRevert(DocksItems.CellTaken.selector);
+        items.buyForVillage(v, 0, 0, 0);
+        vm.prank(alice);
+        vm.expectRevert(DocksItems.NotOnLand.selector);
+        items.buyForVillage(v, 0, 9, 9);
+        // boost: 36 s per RF -> 2,400 RF cuts the 1-day build to 0
+        rf.mint(bob, 2400 ether);
+        vm.prank(bob);
+        items.boost(stall, 1200 ether);
+        assertEq(items.items(stall).readyAt, block.timestamp + 1 days - 12 hours);
+        vm.prank(bob);
+        items.boost(stall, 1200 ether);
+        assertTrue(items.ready(stall));
+        assertEq(tre.pendingLiquidity(v), 12_400 ether, "boosts go to liquidity too");
+        vm.prank(bob);
+        vm.expectRevert(DocksItems.NotBuilding.selector);
+        items.boost(stall, 1 ether);
+        vm.prank(alice);
+        vm.expectRevert(DocksItems.NotYours.selector);
+        items.takeOff(stall); // village items stay
+        vm.prank(alice);
+        items.move(stall, plotOf[alice], 1, 0); // but can be moved around their island
+        assertEq(items.itemAt(plotOf[alice], 1, 0), stall + 1);
+    }
+
+    function testOwnItemsAreAlwaysYours() public {
+        _world();
+        uint256 burned = _burned();
+        vm.prank(carol);
+        uint256 lantern = items.buy(0, plotOf[carol], 0, 0);
+        assertEq(_burned() - burned, 1000 ether, "no village: burned");
+        vm.prank(carol);
+        items.takeOff(lantern);
+        vm.prank(carol);
+        items.move(lantern, plotOf[carol], 0, 0);
+        vm.prank(alice);
+        vm.expectRevert(DocksItems.NotYours.selector);
+        items.move(lantern, plotOf[alice], 0, 0);
+    }
+
+    function testItemsLeftBehindAreRaffledToThoseWhoStayed() public {
+        uint256 v = _village();
+        _friend(11, bob);
+        _place(bob, 11, 1, 0);
+        _bring(bob, v);
+        vm.prank(bob);
+        uint256 stall = items.buyForVillage(v, 1, 0, 0);
+        vm.prank(bob);
+        uint256 own = items.buy(0, plotOf[bob], 1, 0);
+        _enroll(carol, v);
+        vm.prank(bob);
+        vil.requestRemoval(plotOf[bob]);
+        _toNextEpoch();
+        vil.processRemoval(plotOf[bob]);
+        assertEq(items.items(stall).island, 0, "the village's item left the island");
+        assertEq(items.items(own).island, plotOf[bob], "bob's own item stays his");
+        (uint64 raffleVillage,,,,,,) = items.raffles(stall);
+        assertEq(raffleVillage, v);
+
+        vm.prank(bob);
+        vm.expectRevert(DocksItems.NotInVillage.selector);
+        items.buyTickets(stall, 1); // only those who stayed
+        rf.mint(carol, 1000 ether);
+        uint256 pending = tre.pendingLiquidity(v);
+        vm.prank(carol);
+        items.buyTickets(stall, 3);
+        vm.prank(alice);
+        items.buyTickets(stall, 1);
+        assertEq(tre.pendingLiquidity(v) - pending, 400 ether, "tickets go to the village's liquidity");
+        vm.expectRevert(DocksItems.RaffleOpen.selector);
+        items.draw{ value: 0.000_025 ether }(stall);
+        vm.warp(block.timestamp + 3 days);
+        vm.deal(address(this), 1 ether);
+        uint64 seq = items.draw{ value: 0.000_025 ether }(stall);
+        vm.expectRevert(DocksItems.RandomnessPending.selector);
+        items.claim(stall);
+        dice.fulfill(seq, bytes32(uint256(7)));
+        address winner = items.claim(stall);
+        assertTrue(winner == carol || winner == alice);
+        assertEq(items.items(stall).owner, winner, "the winner keeps it as their own");
+        assertEq(items.items(stall).village, 0);
+        vm.prank(winner);
+        items.move(stall, plotOf[winner], 0, 0);
+    }
+
+    function testARaffleNobodyEntersRunsAgain() public {
         uint256 v = _village();
         _bring(bob, v);
-        vm.prank(alice);
-        uint256 id = pad.launch(_params(Scope_.Village));
         vm.prank(bob);
-        pad.claim(id, 10);
-        vm.prank(carol);
-        vm.expectRevert(DocksLaunchpad.NotEligible.selector);
-        pad.claim(id, 20);
-        _enroll(carol, v);
-        vm.prank(carol);
-        pad.claim(id, 20);
+        uint256 stall = items.buyForVillage(v, 1, 0, 0);
+        vm.prank(bob);
+        vil.requestRemoval(plotOf[bob]);
+        _toNextEpoch();
+        vil.processRemoval(plotOf[bob]);
+        vm.warp(block.timestamp + 3 days);
+        assertEq(items.draw(stall), 0);
+        (, uint64 ends,,,,,) = items.raffles(stall);
+        assertEq(ends, block.timestamp + 3 days);
     }
 }

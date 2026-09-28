@@ -20,6 +20,13 @@ interface IDocksActivation {
         returns (uint8 tier, uint256 amount);
 }
 
+/// @dev Told about every Friend placed on or taken off an island (DocksVillages); may revert
+/// a placement (a Friend still bound to another village, or a village at its population).
+interface IDocksPlacementGate {
+    function onPlace(uint256 friendId, uint256 islandId) external;
+    function onLeave(uint256 friendId, uint256 islandId) external;
+}
+
 /// @notice The Docks: floating islands made of activated Rare Friends.
 ///
 /// The only NFTs are the activated Rare Friends. An island is not a token and can't be sold
@@ -40,6 +47,8 @@ interface IDocksActivation {
 /// - Bridges: link your island to one you can't dock next to, for RF burned per berth of
 ///   distance. A bridge lasts until either island moves.
 /// - Access: each island is open or invite-only with approved visitors.
+/// - Gone Friends: anyone can burn the hole of a placed Friend that is no longer valid
+///   (`burnHole`), so the island's (and its village's) population drops right away.
 contract DocksIslands {
     using SafeERC20 for IERC20;
 
@@ -89,6 +98,8 @@ contract DocksIslands {
     error AlreadyConnected();
     error NotAHole();
     error WrongSize();
+    error StillValid();
+    error AlreadyInitialized();
 
     event IslandCreated(uint256 indexed islandId, address indexed owner, string name);
     event Arranged(uint256 indexed islandId, uint256 moved, uint256 rfBurned);
@@ -124,9 +135,19 @@ contract DocksIslands {
     mapping(bytes32 berth => uint256 islandIdPlusOne) private _berth;
     mapping(bytes32 pair => uint128 epochs) private _bridge;
 
+    IDocksPlacementGate public gate;
+    address private immutable _deployer;
+
     constructor(IDocksGenerations generations_, IERC20 rf_) {
         generations = generations_;
         rf = rf_;
+        _deployer = msg.sender;
+    }
+
+    /// @notice One-time wiring to DocksVillages (deployed after this contract). No other admin.
+    function init(IDocksPlacementGate gate_) external {
+        if (msg.sender != _deployer || address(gate) != address(0)) revert AlreadyInitialized();
+        gate = gate_;
     }
 
     /* ── islands (not tokens: they belong to the wallet that made them) ── */
@@ -204,7 +225,7 @@ contract DocksIslands {
             changed[i] = true;
             burned += feeOf(id);
             ++moved;
-            _leave(id);
+            _leave(id, false);
         }
         for (uint256 i; i < friendIds.length; ++i) {
             if (changed[i]) _place(islandId, friendIds[i], xs[i], ys[i]);
@@ -220,8 +241,17 @@ contract DocksIslands {
             uint256 id = friendIds[i];
             if (generations.ownerOf(id) != msg.sender) revert NotHolder();
             if (!spotOf[id].placed) revert NotPlaced();
-            _leave(id);
+            _leave(id, false);
         }
+    }
+
+    /// @notice Burn the hole of a placed Friend that left its island owner's wallet or was
+    /// deactivated. Anyone may call it. The Friend can come back into its own hole for free.
+    function burnHole(uint256 friendId) external {
+        Spot storage s = spotOf[friendId];
+        if (!s.placed) revert NotPlaced();
+        if (isValid(friendId)) revert StillValid();
+        _leave(friendId, true);
     }
 
     /// @notice Fill a hole on your island with an activated Friend of the same size. The
@@ -237,7 +267,7 @@ contract DocksIslands {
         (int32 x, int32 y, uint8 gen) = _takeHole(islandId, oldFriendId);
         if (generations.generation(newFriendId) != gen) revert WrongSize();
         if (newFriendId != oldFriendId) burned = _fee(gen);
-        _leave(newFriendId);
+        _leave(newFriendId, false);
         _place(islandId, newFriendId, x, y);
         if (burned > 0) rf.safeTransferFrom(msg.sender, BURN, burned);
         emit HoleFilled(islandId, oldFriendId, newFriendId);
@@ -413,11 +443,11 @@ contract DocksIslands {
 
     /// @dev Takes a Friend off wherever it is. Off an island it doesn't count on (it left
     /// that island's owner), its spot is burned into that island as a hole.
-    function _leave(uint256 friendId) private {
+    function _leave(uint256 friendId, bool gone) private {
         Spot storage s = spotOf[friendId];
         if (!s.placed) return;
         uint256 islandId = s.islandId;
-        bool burnHole = ownerOf[islandId] != msg.sender;
+        bool burnHole = gone || ownerOf[islandId] != msg.sender;
         (int32 w, int32 h) = footprint(friendId);
         for (int32 j; j < h; ++j) {
             for (int32 i; i < w; ++i) {
@@ -478,6 +508,7 @@ contract DocksIslands {
         spotOf[friendId] = Spot(islandId, x, y, true);
         _members[islandId].push(friendId);
         _memberIndex[friendId] = _members[islandId].length;
+        if (address(gate) != address(0)) gate.onPlace(friendId, islandId);
         emit Placed(friendId, islandId, x, y);
     }
 
@@ -490,6 +521,7 @@ contract DocksIslands {
         _memberIndex[last] = index;
         list.pop();
         delete _memberIndex[friendId];
+        if (address(gate) != address(0)) gate.onLeave(friendId, islandId);
     }
 
     function _fee(uint8 g) private pure returns (uint256) {

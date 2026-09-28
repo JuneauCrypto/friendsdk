@@ -5,7 +5,7 @@ import { Test } from "forge-std/Test.sol";
 import { IERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import { DocksIslands, IDocksGenerations } from "../src/docks/DocksIslands.sol";
 import { DocksLaunchpad } from "../src/docks/DocksLaunchpad.sol";
-import { DocksVillages } from "../src/docks/DocksVillages.sol";
+import { DocksVillages, IDocksVillageItems } from "../src/docks/DocksVillages.sol";
 import { DocksVillageTreasury, IDocksLiquidity, IDocksBuyback } from "../src/docks/DocksVillageTreasury.sol";
 import {
     DocksUniV3Liquidity, IUniV3Factory, IUniV3Pool, IUniV3PositionManager, ISwapRouter02
@@ -112,7 +112,8 @@ contract DocksForkTest is Test {
             IERC20(RF), IERC20(WETH), IUniV3Factory(V3_FACTORY), IUniV3PositionManager(V3_POSITIONS), ISwapRouter02(SWAP_ROUTER02), 3000
         );
         DocksVillageTreasury tre = new DocksVillageTreasury(IERC20(RF), IERC20(WETH), vil, liq, liq);
-        vil.init(tre);
+        vil.init(tre, IDocksVillageItems(address(0)));
+        reg.init(vil);
         liq.init(address(tre));
 
         address pool = _seedPool();
@@ -132,7 +133,7 @@ contract DocksForkTest is Test {
         vm.stopPrank();
         (, int24 tickBefore,,,,,) = IUniV3Pool(pool).slot0();
         vil.found(v);
-        assertApproxEqAbs(tre.balanceOf(v), 500_000 ether, 1e6, "half to the treasury (plus rounding dust)");
+        assertEq(tre.allowanceOf(v, a) + tre.allowanceOf(v, b), 500_000 ether, "half to allowances");
         uint256[] memory pos = liq.positionsOf(v);
         assertEq(pos.length, 1);
         (,,,,, int24 lower,, uint128 liquidity,,,,) = IPositionsRead(V3_POSITIONS).positions(pos[0]);
@@ -144,7 +145,7 @@ contract DocksForkTest is Test {
         assertTrue(vil.sameVillage(plotA, plotB));
 
         _tradeThrough(pool, lower);
-        _harvest(tre, v, a);
+        _harvest(tre, v, a, b);
     }
 
     function _tradeThrough(address pool, int24 lower) private {
@@ -160,15 +161,15 @@ contract DocksForkTest is Test {
         assertGt(tickAfter, lower, "the price moved into the village's range");
     }
 
-    function _harvest(DocksVillageTreasury tre, uint256 v, address founder) private {
+    function _harvest(DocksVillageTreasury tre, uint256 v, address a, address b) private {
         uint256 burnBefore = IERC20(RF).balanceOf(tre.BURN());
-        uint256 treasuryBefore = tre.balanceOf(v);
-        vm.prank(founder);
-        (uint256 burned, uint256 kept) = tre.harvest(v, 1);
+        uint256 before = tre.allowanceOf(v, a) + tre.allowanceOf(v, b);
+        vm.prank(a);
+        (uint256 burned, uint256 shared) = tre.harvest(v, 1);
         assertGt(burned, 0, "fees bought back RF and burned half");
-        assertApproxEqAbs(burned, kept, 1);
+        assertApproxEqAbs(burned, shared, 2);
         assertEq(IERC20(RF).balanceOf(tre.BURN()) - burnBefore, burned);
-        assertEq(tre.balanceOf(v), treasuryBefore + kept);
+        assertEq(tre.allowanceOf(v, a) + tre.allowanceOf(v, b), before + shared, "the rest shared by Friends");
     }
 
     /// No RF/WETH v3 pool exists on chain yet: create one at 1 RF = 0.000001 ETH with some

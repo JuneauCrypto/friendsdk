@@ -61,7 +61,14 @@ export type World = {
   cols: { b: number; x0: number; x1: number }[]; rows: { b: number; y0: number; y1: number }[];
   walk: Map<number, "gangway" | "bridge">;                         // walkway tiles over the water
   villages: Village[];
+  items: Item[];
+  bonds: Map<bigint, { village: Village; until: number }>;       // a Friend that left a village island
+  cooldown: Map<Plot, number>;                                   // islands holding a Friend bound elsewhere
+  genesis: number;                                               // epoch clock start
 };
+/** An item built on an island cell. Village items belong to the village; own items to their owner. */
+export type Item = { id: number; kind: number; village: Village | null; owner: string | null; plot: Plot | null; cx: number; cy: number; readyAt: number };
+export type Raffle = { item: Item; ends: number; tickets: Map<string, number> };
 /** A flag planted on an island rises as people lock RF into it; full, it's founded as a village
  *  and other islands choose to join while connected to it. Mirrors contracts/src/docks/DocksVillages.sol. */
 export type Village = {
@@ -71,10 +78,13 @@ export type Village = {
   founded: boolean; failed: boolean; foundedAt: number;
   pool: number;                                                   // locked + enrollment fees: founder shares are of this
   enrollOpen: boolean; enrollPrice: number; enrollCap: number; enrollVote: Proposal | null;
-  treasury: number; liquidity: number; pendingLiquidity: number; fees: { rf: number; eth: number }; burnBps: number; burned: number;
+  liquidity: number; pendingLiquidity: number; fees: { rf: number; eth: number }; burnBps: number; burned: number;
+  credited: Map<string, number>; spent: Map<string, number>;      // allowances: founders' half of their lock + these
+  removals: Map<Plot, number>;                                    // island → epoch boundary it leaves at
+  raffles: Raffle[];
   proposals: Proposal[];
 };
-export type ProposalKind = "spend" | "burnShare" | "enrollment" | "enrollPrice" | "enrollCap";
+export type ProposalKind = "burnShare" | "enrollment" | "enrollPrice" | "enrollCap";
 export type Proposal = {
   id: number; kind: ProposalKind; options: number[]; memo: string;
   tally: number[]; voters: Map<string, number>; ends: number; settled: boolean; winner: number;
@@ -92,7 +102,7 @@ export const plotOf = (w: World, id: bigint) => w.plots.find(p => p.friends.some
 /* ── building the world ── */
 
 export function emptyWorld(): World {
-  return { plots: [], visits: new Map(), version: 0, bridges: [], occ: new Map(), holeOcc: new Map(), berths: new Map(), origin: new Map(), box: new Map(), cols: [], rows: [], walk: new Map(), villages: [] };
+  return { plots: [], visits: new Map(), version: 0, bridges: [], occ: new Map(), holeOcc: new Map(), berths: new Map(), origin: new Map(), box: new Map(), cols: [], rows: [], walk: new Map(), villages: [], items: [], bonds: new Map(), cooldown: new Map(), genesis: Date.now() };
 }
 
 export function rebuild(w: World) {
@@ -336,7 +346,8 @@ export function newVillage(w: World, seat: Plot, name: string, at: { x: number; 
   const v: Village = { id: `v${w.villages.length + 1}-${seat.id}`, name: clean, seat, flag: { ...at }, members: [],
     color: FLAG_COLORS[w.villages.length % FLAG_COLORS.length], target, deadline, locked: 0, lockers: new Map(), founded: false, failed: false, foundedAt: 0,
     pool: 0, enrollOpen: false, enrollPrice: 0, enrollCap: 0, enrollVote: null,
-    treasury: 0, liquidity: 0, pendingLiquidity: 0, fees: { rf: 0, eth: 0 }, burnBps: 5000, burned: 0, proposals: [] };
+    liquidity: 0, pendingLiquidity: 0, fees: { rf: 0, eth: 0 }, burnBps: 5000, burned: 0,
+    credited: new Map(), spent: new Map(), removals: new Map(), raffles: [], proposals: [] };
   w.villages.push(v); w.version++; return v;
 }
 /** Everyone in a village brings exactly one island (one per wallet). Why `p` can't (null: it can). */
@@ -350,12 +361,6 @@ export function joinProblem(w: World, v: Village, p: Plot): string | null {
 export function addMember(w: World, v: Village, p: Plot) {
   const why = joinProblem(w, v, p); if (why) throw new Error(why);
   v.members.push(p); w.version++;
-}
-/** Leaving is free. The seat island, where the flag stands, stays. */
-export function leaveVillage(w: World, p: Plot) {
-  const v = villageOf(w, p); if (!v) return null;
-  if (v.seat === p) throw new Error(`${p.name} is ${v.name}'s seat: the flag stays.`);
-  v.members = v.members.filter(x => x !== p); w.version++; return v;
 }
 export function flagTile(w: World, v: Village) {
   const o = w.origin.get(v.seat); return o ? { x: o.x + v.flag.x, y: o.y + v.flag.y } : null;
