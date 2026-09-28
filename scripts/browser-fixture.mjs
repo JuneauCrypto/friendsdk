@@ -14,6 +14,8 @@ const ABI = parseAbi([
   "function ownerOf(uint256 tokenId) view returns (address)",
   "function generation(uint256 tokenId) view returns (uint8)",
   "function tokenBoundAccount(uint256 tokenId) view returns (address)",
+  "function activationManager() view returns (address)",
+  "function tokenURI(uint256 tokenId) view returns (string)",
 ]);
 const ownerId = owner => owner.toLowerCase() === OWNER.toLowerCase() ? 7730n : 3412n;
 const tokenOwner = id => id === 7730n ? OWNER : SECOND_OWNER;
@@ -76,6 +78,7 @@ export async function installFixture(page, origin, { artworkCall, initialChain =
         const { functionName, args } = decodeFunctionData({ abi: ABI, data: request.params[0].data });
         let value;
         if (functionName === "balanceOf") value = state.mode === "unowned" ? 0n : 1n;
+        else if (functionName === "activationManager") value = zeroAddress; // picker ranking: no activation data
         else {
           assert([7730n, 3412n].includes(args[0]), "Do not enumerate token IDs or scan the collection");
           if (functionName === "ownerOf") {
@@ -83,6 +86,7 @@ export async function installFixture(page, origin, { artworkCall, initialChain =
             value = state.mode === "owner-changed" && state.ownerReads > 1 ? SECOND_OWNER : tokenOwner(args[0]);
           } else if (functionName === "generation") value = state.mode === "unhardwired" ? 0 : 1;
           else if (functionName === "tokenBoundAccount") value = FRIEND_WALLET;
+          else if (functionName === "tokenURI") value = `data:application/json;base64,${Buffer.from(JSON.stringify({ image: `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" fill="#246"/></svg>').toString("base64")}` })).toString("base64")}`;
           else throw new Error(`Unsupported collection read ${functionName}`);
         }
         result = encodeFunctionResult({ abi: ABI, functionName, result: value });

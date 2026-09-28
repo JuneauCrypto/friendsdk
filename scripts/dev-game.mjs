@@ -143,11 +143,11 @@ import '@rarefriends/friendsdk/runtime.css';
 const definition = parseChanceGame(gameJson);`;
   const host = await context({ ...common, outfile: path.join(outdir, 'runtime.js'), stdin: {
     resolveDir: directory, sourcefile: 'runtime.tsx', loader: 'tsx', contents: `${shared}
-import {GameHost} from '@rarefriends/friendsdk/runtime';
+import {GameHost, parseFriendSelection} from '@rarefriends/friendsdk/runtime';
 ${hostStyleImport}
 const deployment = ${JSON.stringify(liveDeployment) ?? 'undefined'};
 if (deployment) deployment.deploymentBlock = BigInt(deployment.deploymentBlock);
-createRoot(document.getElementById('root')).render(<GameHost definition={definition} frameUrl="./game.html" deployment={deployment}/>);`,
+createRoot(document.getElementById('root')).render(<GameHost definition={definition} frameUrl="./game.html" deployment={deployment} selection={parseFriendSelection(gameJson.selection)}/>);`,
   } });
   let child;
   try {

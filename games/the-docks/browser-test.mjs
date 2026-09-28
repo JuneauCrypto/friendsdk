@@ -111,13 +111,17 @@ try {
   const game = page.frameLocator("iframe");
   await page.goto(origin);
   await page.getByRole("button", { name: /^Connect (wallet|Browser wallet)$/ }).click();
+  // the SDK picker: "Choose your captain", one column, highest reward rate first
+  await page.getByRole("heading", { name: "Choose your captain" }).waitFor();
+  await page.getByRole("button", { name: /^Friend #7730\b/ }).locator("img").waitFor().catch(() => {});
+  await shot("picker");
   await page.getByRole("button", { name: /^Friend #7730\b/ }).click();
   if (failImport) { await game.getByText(/Couldn't read your Friend from chain/).waitFor(); await shot("fail-state"); console.log("ok", tag, "(import failure shows retry)"); process.exit(0); }
   await game.locator("img.docks-land").first().waitFor();
   await game.getByText(many ? /All [\d,]+ of your activated Friends joined into one floating island/ : /All 2 of your activated Friends joined into one floating island/).waitFor();
-  // boarding the first time: pick the island's default leader once (saved on chain, simulated)
-  await game.getByRole("button", { name: "Make default leader" }).first().click();
-  await game.getByText(/#7730 is Your island's default leader \(simulated on chain, gas only\)/).waitFor();
+  // boarding the first time: the Friend chosen in the picker becomes the captain, no second prompt
+  await game.getByText(/#7730, the Friend you chose, is Your island's captain/).waitFor();
+  if (await game.getByRole("dialog").count()) throw new Error("no captain prompt expected after the picker");
   await page.waitForTimeout(1200);
   await shot("start");
   const btn = name => game.getByRole("button", { name, exact: false }).first();
@@ -328,6 +332,15 @@ try {
     await btn("More").click();
     await game.getByRole("button", { name: "Bring #7573 back" }).click();
     await game.getByText(/#7573 came back and healed its hole on Island 2/).waitFor();
+  }
+  if (!many && !failImport) {
+    // coming back: the picker remembers the captain and the game boards as it, without asking
+    await page.reload();
+    const connect = page.getByRole("button", { name: /^Connect (wallet|Browser wallet)$/ });
+    await Promise.race([connect.waitFor().then(() => connect.click()), game.locator("img.docks-land").first().waitFor()]).catch(() => {});
+    await game.locator("img.docks-land").first().waitFor();
+    if (await page.getByRole("heading", { name: "Choose your captain" }).count()) throw new Error("picker should not ask again");
+    await game.getByText(/Welcome back, Captain #7730|All 2 of your activated Friends/).first().waitFor();
   }
   const alerts = await game.locator("[role=alert]").allTextContents();
   assert.deepEqual(alerts, [], "No in-game alerts");

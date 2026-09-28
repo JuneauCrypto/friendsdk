@@ -21,9 +21,13 @@
 .rf-frame-menu-body p { margin: 0 0 14px; }
 .rf-frame-menu-body h3 { margin: 0 0 10px; }
 .rf-frame-menu-footer { flex-shrink: 0; display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid #111; }
-.rf-frame-friends { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-block: 16px; }
-.rf-frame-friends button { display: flex; flex-direction: column; align-items: flex-start; text-align: left; gap: 6px; min-height: 76px; }
+.rf-frame-friends { display: flex; flex-direction: column; gap: 8px; margin-block: 16px; }
+.rf-frame-friends button { display: flex; flex-direction: row; align-items: center; text-align: left; gap: 12px; min-height: 76px; width: 100%; }
 .rf-frame-friends button[aria-pressed="true"] { background: #ddd; }
+.rf-frame-friend-art { position: relative; flex: none; width: 96px; height: 64px; overflow: hidden; background: #000; color: #eee; display: grid; place-items: center; font: 12px ui-monospace, monospace; }
+.rf-frame-friend-art img { position: absolute; left: 50%; top: 50%; width: 200px; height: 200px; transform: translate(-50%, -56%); }
+.rf-frame-friend-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.rf-frame-friend-rate { font-weight: bold; }
 .rf-frame-friends small, .rf-frame-note { font-size: 12px; }
 .rf-frame-address { overflow-wrap: anywhere; font: 12px ui-monospace, monospace; }
 .rf-frame-wallet-balance { font: bold 28px ui-monospace, monospace; }

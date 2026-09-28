@@ -1080,26 +1080,26 @@ contract DocksTest is Test {
         assertEq(vil.enrollPrice(v), 0);
     }
 
-    function testDefaultLeaderIsSetOnceOnChain() public {
+    function testCaptainIsSetOnceOnChain() public {
         _place(alice, 1, 0, 0);
         _place(alice, 2, 1, 0);
-        assertEq(reg.defaultLeaderOf(plotOf[alice]), 0);
+        assertEq(reg.captainOf(plotOf[alice]), 0);
         vm.prank(bob);
         vm.expectRevert(DocksIslands.NotIslandOwner.selector);
-        reg.setDefaultLeader(plotOf[alice], 1);
+        reg.setCaptain(plotOf[alice], 1);
         vm.prank(alice);
         vm.expectRevert(DocksIslands.NotPlaced.selector);
-        reg.setDefaultLeader(plotOf[alice], 3); // not on this island
+        reg.setCaptain(plotOf[alice], 3); // not on this island
         vm.prank(alice);
-        reg.setDefaultLeader(plotOf[alice], 2);
-        assertEq(reg.defaultLeaderOf(plotOf[alice]), 2);
+        reg.setCaptain(plotOf[alice], 2);
+        assertEq(reg.captainOf(plotOf[alice]), 2);
         act.set(2, 0); // deactivated: can't be picked again
         vm.prank(alice);
         vm.expectRevert(DocksIslands.NotActive.selector);
-        reg.setDefaultLeader(plotOf[alice], 2);
+        reg.setCaptain(plotOf[alice], 2);
         vm.prank(alice);
-        reg.setDefaultLeader(plotOf[alice], 1);
-        assertEq(reg.defaultLeaderOf(plotOf[alice]), 1);
+        reg.setCaptain(plotOf[alice], 1);
+        assertEq(reg.captainOf(plotOf[alice]), 1);
     }
 
     function testPlatformFeeStartsAtZeroAndIsCappedAtFivePercent() public {

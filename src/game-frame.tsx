@@ -5,7 +5,12 @@ import { formatGameAmount } from "./experience-ui.js";
 
 /** Reference viewport dimensions; hosts may choose another layout through frame.css. */
 export const GAME_VIEWPORT = Object.freeze({ width: 960, height: 640 });
-export type GameFriend = Readonly<{ id: bigint; label: string; walletAddress?: string; kind: "owned" | "sample" }>;
+export type GameFriend = Readonly<{
+  id: bigint; label: string; walletAddress?: string; kind: "owned" | "sample";
+  /** Display only: generation, activation tier (null: not activated), reward rate and artwork. */
+  generation?: number; tier?: number | null; rate?: number; image?: string;
+}>;
+const formatRate = (rate: number) => rate.toLocaleString("en-US", { maximumFractionDigits: rate < 10 ? 2 : 0 });
 export type GameWalletState = Readonly<{ balance?: bigint; status?: "ready" | "loading" | "error"; error?: string }>;
 export type GameConfirmation = Readonly<{
   title: string; description: string; notice?: string; amount?: bigint; busy?: boolean; error?: string;
@@ -17,6 +22,8 @@ export type GameFrameProps = {
   /** Only show the empty result after successful discovery; null suppresses it. */
   friendsEmptyMessage?: string | null;
   friendsHiddenCount?: number;
+  /** Optional picker heading and explanation (for example, what the chosen Friend becomes in the game). */
+  selectionTitle?: string; selectionNote?: string;
   /** Use host when the surrounding interface already owns selection and connection. */
   selectionMode?: "picker" | "host";
   onConnect?: () => void; wallet?: GameWalletState; confirmation?: GameConfirmation | null;
@@ -49,7 +56,7 @@ export function GameMenu({ title, onClose, children, footer }: { title: string; 
   </div></div>;
 }
 
-export function GameFrame({ children, friends, selectedFriendId, onSelectFriend, friendsLoading, friendsError, friendsEmptyMessage = "No playable Friends found.", friendsHiddenCount = 0, onConnect, wallet, confirmation, connection, walletActions, selectionMode = "picker", mode, onMenuChange }: GameFrameProps) {
+export function GameFrame({ children, friends, selectedFriendId, onSelectFriend, friendsLoading, friendsError, friendsEmptyMessage = "No playable Friends found.", friendsHiddenCount = 0, selectionTitle, selectionNote, onConnect, wallet, confirmation, connection, walletActions, selectionMode = "picker", mode, onMenuChange }: GameFrameProps) {
   const [menu, setMenu] = useState<"friends" | "wallet" | null>(null);
   const friend = friends.find(value => value.id === selectedFriendId);
   const selecting = selectionMode === "picker" && (!friend || menu === "friends");
@@ -71,12 +78,19 @@ export function GameFrame({ children, friends, selectedFriendId, onSelectFriend,
       {confirmation.notice && <p>{confirmation.notice}</p>}
       <p>{friend?.label}</p><p className="rf-frame-note">{mode === "preview" ? "Simulated RF. No transaction will be sent." : "This action uses the selected Friend’s canonical wallet. A result is confirmed only after its receipt."}</p>
       {confirmation.error && <p role="alert">{confirmation.error}</p>}
-    </GameMenu> : selecting ? <GameMenu title="Choose your Friend" onClose={friend ? () => setMenu(null) : undefined}>
+    </GameMenu> : selecting ? <GameMenu title={selectionTitle ?? "Choose your Friend"} onClose={friend ? () => setMenu(null) : undefined}>
       <p>{mode === "preview" ? !friends.some(value => value.kind === "sample") ? "Choose your Friend for this local preview. Balances, items and outcomes are simulated." : "Choose a sample Friend. Each has separate simulated balances and items." : "Choose an owned, hardwired Generations NFT. Its inventory and RF stay with its wallet."}</p>
+      {selectionNote && <p>{selectionNote}</p>}
       {connection}
       {friendsLoading && <p role="status">Loading your Friends…</p>}
       {friendsError && <p role="alert">{friendsError}</p>}
-      <div className="rf-frame-friends">{friends.map(value => <button type="button" key={value.id.toString()} aria-pressed={value.id === selectedFriendId} onClick={() => { onSelectFriend?.(value.id); setMenu(null); }}><strong>{value.label}</strong><small>{value.kind === "sample" ? "Sample · no ownership claim" : "Hardwired Generations"}</small></button>)}</div>
+      <div className="rf-frame-friends">{friends.map((value, index) => <button type="button" key={value.id.toString()} aria-pressed={value.id === selectedFriendId} onClick={() => { onSelectFriend?.(value.id); setMenu(null); }}>
+        {value.kind === "owned" && <span className="rf-frame-friend-art" aria-hidden="true">{value.image ? <img src={value.image} alt="" loading="lazy" /> : <span>#{value.id.toString()}</span>}</span>}
+        <span className="rf-frame-friend-text"><strong>{value.label}</strong>
+          <small>{value.kind === "sample" ? "Sample · no ownership claim" : [value.generation !== undefined ? `Gen ${value.generation}` : "Hardwired Generations",
+            value.tier === undefined ? null : value.tier === null ? "not activated" : `Tier ${value.tier}`].filter(Boolean).join(" · ")}</small>
+          {value.rate !== undefined && <small className="rf-frame-friend-rate">{value.rate > 0 ? `Rate ${formatRate(value.rate)}${index === 0 && friends.length > 1 ? " · highest" : ""}` : "Rate 0"}</small>}
+        </span></button>)}</div>
       {!friendsLoading && !friendsError && friendsHiddenCount > 0 && <p>{friendsHiddenCount} {friendsHiddenCount === 1 ? "Friend" : "Friends"} hidden: not hardwired (generation 0). Playing requires generation 1 or higher.</p>}
       {!friendsLoading && !friendsError && !friends.length && friendsEmptyMessage && <p>{friendsEmptyMessage}</p>}
       {onConnect && <button type="button" className="rf-frame-primary" onClick={onConnect}>Connect wallet</button>}
