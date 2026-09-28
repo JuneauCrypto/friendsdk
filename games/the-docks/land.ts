@@ -18,6 +18,8 @@ export type Friend = {
   traits: Record<string, string | number>;
   /** Screen offset of the footprint's (0,0) tile corner inside the 512 × 512 artwork. */
   anchor: { x: number; y: number };
+  /** Where the standing Friend is drawn inside the artwork (centre of its figure), to tap it. */
+  figure: { x: number; y: number };
   art: string;                                   // data:image/svg+xml URL of the on-chain artwork (background removed)
   artWithoutPortrait: string;                    // same, with the standing Friend removed (used when it walks)
   signature: string;                             // changes whenever the on-chain art or traits change
@@ -104,7 +106,9 @@ export function parseFriendSvg(tokenId: bigint, svg: string, traits: Record<stri
   const anchor = { x: A * UNIT * (minX - minY) + offX, y: B * UNIT * (minX + minY) + offY };
   const sig = hash(`${traits.Generation}|${traits["Activation tier"]}|${traits.State}|${svg.length}|${hash(svg)}`);
   let noPortrait = "";                            // built only for the Friend you walk as
-  return { tokenId, w, h, tiles, blocked, props, traits, anchor,
+  const still = /class="rf-still"><g transform="translate\(([-\d.]+)[ ,]([-\d.]+)\)/.exec(svg);
+  const figure = still ? { x: Number(still[1]) + 16, y: Number(still[2]) + 14 } : { x: 256, y: 240 };
+  return { tokenId, w, h, tiles, blocked, props, traits, anchor, figure,
     art: toDataUrl(displaySvg(svg, false)),
     get artWithoutPortrait() { return noPortrait ||= toDataUrl(displaySvg(svg, true)); },
     signature: sig, active: traits.State === "Active" };

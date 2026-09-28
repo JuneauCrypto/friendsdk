@@ -8,7 +8,8 @@ import { CATALOG } from "./villages.js";
 import { CELL, canEnter, ck, neighboursOf, plotOf, rankOf, tileAt, villageOf, flagTile, type Placed, type Plot, type World } from "./world.js";
 
 /** A Friend walking around off its land: following the lead, or left standing somewhere. */
-export type CrewMember = { id: bigint; sprites: GenerationSprites | null; mode: "follow" | "park" };
+/** A Friend walking around: following `leader` (in line behind it) or standing where it was left. */
+export type CrewMember = { id: bigint; sprites: GenerationSprites | null; mode: "follow" | "park"; leader?: bigint };
 export type ViewApi = {
   focusOn: (x: number, y: number) => void; position: () => { x: number; y: number }; teleport: (x: number, y: number) => void;
   fitAll: () => void;                            // zoom out to show every island
@@ -24,7 +25,8 @@ type Props = {
   arranging: boolean; selected: Placed[];
   crew: CrewMember[];                            // Friends walking behind you or left somewhere (capped by the caller)
   crewSel: Set<bigint>;                          // crew picked on the map
-  onWalkerTap: (id: bigint) => void;
+  onWalkerTap: (id: bigint, at: { x: number; y: number }) => void;   // tapped a walking Friend (client px)
+  onFriendTap: (id: bigint, at: { x: number; y: number }) => void;   // tapped one of your Friends at home
   onBlocked: (plot: Plot) => void; onEnterPlot: (plot: Plot | null) => void;
   onPick: (pl: Placed) => void;                  // arrange mode: tap one of your Friends
   onVisible: (pls: Placed[]) => void;            // Friends near the camera (for lazy art loading)
@@ -77,6 +79,7 @@ export function DocksView(props: Props) {
   const crewCanvases = useRef(new Map<string, HTMLCanvasElement>());
   const followers = useRef(new Map<string, Follower>());
   const trail = useRef<{ x: number; y: number }[]>([]);
+  const visRef = useRef<{ plot: Plot; pl: Placed; x: number; y: number }[]>([]);
   const player = useRef({ x: 0, y: 0, facing: "down" as SpriteFacing, walking: false, target: null as null | { x: number; y: number } });
   const focus = useRef<{ x: number; y: number } | null>(null);
   const keys = useRef(new Set<string>());
@@ -192,7 +195,15 @@ export function DocksView(props: Props) {
       const s = toScreen(f.x, f.y), d = Math.hypot(s.x - sx, s.y - 10 - sy);
       if (d < best) { best = d; hit = c.id; }
     }
-    if (hit !== null) { st.onWalkerTap(hit); return; }
+    if (hit !== null) { st.onWalkerTap(hit, { x: e.clientX, y: e.clientY }); return; }
+    // tapping one of your Friends standing on its own land opens its options (control it, call it…)
+    let home: bigint | null = null, hb = 20;
+    for (const v of visRef.current) {
+      const f = v.pl.m.friend; if (!v.plot.mine || !f || st.offLand.has(v.pl.m.id) || v.pl.m.id === st.walkerId) continue;
+      const o = toScreen(v.x, v.y), fx = o.x - f.anchor.x + f.figure.x, fy = o.y - f.anchor.y + f.figure.y;
+      const d = Math.hypot(fx - sx, fy - sy); if (d < hb) { hb = d; home = v.pl.m.id; }
+    }
+    if (home !== null) { st.onFriendTap(home, { x: e.clientX, y: e.clientY }); return; }
     player.current.target = at; focus.current = null;
   };
 
@@ -224,7 +235,7 @@ export function DocksView(props: Props) {
     const stepCrew = (dt: number) => {
       const p = player.current, tr = trail.current, lastPt = tr[tr.length - 1];
       if (!lastPt || Math.hypot(lastPt.x - p.x, lastPt.y - p.y) > 0.3) { tr.push({ x: p.x, y: p.y }); if (tr.length > 400) tr.shift(); }
-      let n = 0;
+      let n = 0; const queue = new Map<string, number>();
       state.current.crew.forEach(m => {
         const key = String(m.id);
         let f = followers.current.get(key);
@@ -234,8 +245,13 @@ export function DocksView(props: Props) {
           f = { x: s.x, y: s.y, facing: "down", walking: false }; followers.current.set(key, f);
         }
         if (m.mode === "park") { f.walking = false; return; }
-        n++;
-        const goal = tr[Math.max(0, tr.length - 1 - n * 4)] ?? p;
+        let goal: { x: number; y: number };
+        if (m.leader === undefined || m.leader === state.current.walkerId) { n++; goal = tr[Math.max(0, tr.length - 1 - n * 4)] ?? p; }
+        else {                                        // in line behind a leader you're not steering: queue up behind it
+          const L = followers.current.get(String(m.leader)); if (!L) { f.walking = false; return; }
+          const k = (queue.get(String(m.leader)) ?? 0) + 1; queue.set(String(m.leader), k);
+          goal = { x: L.x - 0.6 * k, y: L.y - 0.6 * k };
+        }
         const dx = goal.x - f.x, dy = goal.y - f.y, d = Math.hypot(dx, dy);
         f.walking = d > 0.15;
         if (f.walking) {
@@ -325,6 +341,7 @@ export function DocksView(props: Props) {
   }, [world, version, vis]); // eslint-disable-line react-hooks/exhaustive-deps
   // Zoomed far out: draw the islands' outlines only and don't fetch art for thousands of lands.
   const simple = visible.length > 600 || props.zoom < 0.2;
+  visRef.current = simple ? [] : visible;
   useEffect(() => { if (!simple) props.onVisible(visible.map(v => v.pl)); }, [visible, simple]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const boards = useMemo(() => visible.map(v => diamond(v.x, v.y, v.x + T(v.pl.m.cw), v.y + T(v.pl.m.ch))).join(""), [visible]);
@@ -400,7 +417,7 @@ export function DocksView(props: Props) {
       {flags.map(f => <span key={f.v.id} className={`docks-flag${f.v.founded ? "" : " rising"}`} style={{ left: f.x, top: f.y, zIndex: 650, ["--flag" as string]: f.v.color, ["--raised" as string]: `${f.v.founded ? 100 : Math.max(8, Math.floor(f.v.locked / f.v.target * 100))}%` }}>
         <i className="pole" /><i className="cloth" /><b>{f.v.name} · {f.v.founded ? `${f.v.members.length} island${f.v.members.length === 1 ? "" : "s"}` : `${Math.floor(f.v.locked / f.v.target * 100)}% raised`}</b></span>)}
       {labels.map(l => <span key={l.plot.id} className={`docks-plot-label ${l.plot.mine ? "mine" : ""}`} style={{ left: l.x, top: l.y, zIndex: 700 }}>
-        {l.village && <i className="docks-pennant" style={{ background: l.village.color }} title={l.village.name} />}{l.plot.name} · {l.rank}{l.plot.mine ? ` · ${l.plot.friends.length}` : l.plot.access === "open" ? " · open" : " · invite"}{l.plot.berth ? "" : " · floating"}</span>)}
+        {l.village && <i className="docks-pennant" style={{ background: l.village.color }} title={l.village.name} />}{l.plot.name} · {l.rank}{l.plot.mine ? ` · ${l.plot.friends.length}` : l.village ? "" : " · no flag"}{l.plot.berth ? "" : " · floating"}</span>)}
       {myVisible.length <= 150 && myVisible.map(({ pl, x, y }) => { const c = toScreen(x + T(pl.m.cw) / 2, y + T(pl.m.ch) / 2);
         return <span key={String(pl.m.id)} className={`docks-friend-tag ${selSet.has(pl) ? "sel" : ""}`} style={{ left: c.x, top: c.y, zIndex: 800 }}>#{String(pl.m.id)}</span>; })}
       {crew.map(m => <canvas key={String(m.id)} ref={el => { if (el) crewCanvases.current.set(String(m.id), el); else crewCanvases.current.delete(String(m.id)); }}

@@ -62,14 +62,14 @@ export type World = {
   walk: Map<number, "gangway" | "bridge">;                         // walkway tiles over the water
   villages: Village[];
   items: Item[];
-  bonds: Map<bigint, { village: Village; until: number }>;       // a Friend that left a village island
+  bonds: Map<bigint, { village: Village; until: number }>;       // a Friend that left a flagged island
   cooldown: Map<Plot, number>;                                   // islands holding a Friend bound elsewhere
   genesis: number;                                               // epoch clock start
 };
-/** An item built on an island cell. Village items belong to the village; own items to their owner. */
+/** An item built on an island cell. Flag items belong to the flag; own items to their owner. */
 export type Item = { id: number; kind: number; village: Village | null; owner: string | null; plot: Plot | null; cx: number; cy: number; readyAt: number };
 export type Raffle = { item: Item; ends: number; tickets: Map<string, number> };
-/** A flag planted on an island rises as people lock RF into it; full, it's founded as a village
+/** A flag planted on an island rises as people lock RF into it; full, it's founded as a flag
  *  and other islands choose to join while connected to it. Mirrors contracts/src/docks/DocksVillages.sol. */
 export type Village = {
   id: string; name: string; seat: Plot; flag: { x: number; y: number }; color: string;
@@ -329,7 +329,7 @@ export function addBridge(w: World, a: Plot, b: Plot) {
 /* ── villages (membership; the flag's RF economy is in villages.ts) ── */
 
 const FLAG_COLORS = ["#ff4d6d", "#4dabf7", "#ffd43b", "#69db7c", "#b197fc", "#ff922b"];
-/** The founded village an island is in (a rising flag isn't a village yet). */
+/** The founded village an island is in (a rising flag isn't a flag yet). */
 export const villageOf = (w: World, p: Plot) => w.villages.find(v => v.founded && v.members.includes(p)) ?? null;
 /** A flag still rising on this island (it's the seat). */
 export const risingFlagOf = (w: World, p: Plot) => w.villages.find(v => !v.founded && !v.failed && v.seat === p) ?? null;
@@ -342,7 +342,7 @@ export function flagProblem(w: World, p: Plot, at: { x: number; y: number }): st
   return null;
 }
 export function newVillage(w: World, seat: Plot, name: string, at: { x: number; y: number }, target: number, deadline: number): Village {
-  const clean = name.trim().slice(0, 32); if (!clean) throw new Error("Name your village.");
+  const clean = name.trim().slice(0, 32); if (!clean) throw new Error("Name your flag.");
   const v: Village = { id: `v${w.villages.length + 1}-${seat.id}`, name: clean, seat, flag: { ...at }, members: [],
     color: FLAG_COLORS[w.villages.length % FLAG_COLORS.length], target, deadline, locked: 0, lockers: new Map(), founded: false, failed: false, foundedAt: 0,
     pool: 0, enrollOpen: false, enrollPrice: 0, enrollCap: 0, enrollVote: null,
@@ -350,7 +350,7 @@ export function newVillage(w: World, seat: Plot, name: string, at: { x: number; 
     credited: new Map(), spent: new Map(), removals: new Map(), raffles: [], proposals: [] };
   w.villages.push(v); w.version++; return v;
 }
-/** Everyone in a village brings exactly one island (one per wallet). Why `p` can't (null: it can). */
+/** Everyone in a flag brings exactly one island (one per wallet). Why `p` can't (null: it can). */
 export function joinProblem(w: World, v: Village, p: Plot): string | null {
   if (!v.founded) return `${v.name}'s flag is still rising: islands join once it's founded.`;
   if (!p.berth) return `Dock ${p.name} first.`;
@@ -391,7 +391,23 @@ export function tileAt(w: World, x: number, y: number): TileInfo | undefined {
   const k = w.walk.get(ck(tx, ty));
   return k ? { plot: null, placed: null, blocked: false, walkway: k } : undefined;
 }
-export function canEnter(w: World, p: Plot) { return p.mine || p.access === "open" || w.visits.get(p.id) === "approved"; }
+/** Walking onto an island (for now, only islands under a flag): your own; every island of a flag
+ *  you're in; or, as a visitor just exploring, a flag's islands once your island is docked next to
+ *  or bridged to one of them. */
+export function canEnter(w: World, p: Plot) {
+  if (p.mine) return true;
+  const f = villageOf(w, p); if (!f) return false;
+  const mine = w.plots.filter(q => q.mine);
+  return mine.some(q => villageOf(w, q) === f) || mine.some(q => f.members.some(m => connected(w, q, m)));
+}
+/** The same rule seen from any island `from` (used for launch "visitors" scopes). */
+export function canEnterFrom(w: World, from: Plot, p: Plot) {
+  if (from === p) return true;
+  const f = villageOf(w, p); if (!f) return false;
+  return villageOf(w, from) === f || f.members.some(m => connected(w, from, m));
+}
+/** On a flag island as a visitor (exploring only). */
+export const exploring = (w: World, p: Plot) => !p.mine && canEnter(w, p) && !w.plots.some(q => q.mine && villageOf(w, q) === villageOf(w, p));
 
 /* ── saving on chain: RF burned per Friend moved on its island ── */
 

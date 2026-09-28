@@ -115,6 +115,9 @@ try {
   if (failImport) { await game.getByText(/Couldn't read your Friend from chain/).waitFor(); await shot("fail-state"); console.log("ok", tag, "(import failure shows retry)"); process.exit(0); }
   await game.locator("img.docks-land").first().waitFor();
   await game.getByText(many ? /All [\d,]+ of your activated Friends joined into one floating island/ : /All 2 of your activated Friends joined into one floating island/).waitFor();
+  // boarding the first time: pick the island's default leader once (saved on chain, simulated)
+  await game.getByRole("button", { name: "Make default leader" }).first().click();
+  await game.getByText(/#7730 is Your island's default leader \(simulated on chain, gas only\)/).waitFor();
   await page.waitForTimeout(1200);
   await shot("start");
   const btn = name => game.getByRole("button", { name, exact: false }).first();
@@ -200,18 +203,23 @@ try {
   // pick #7573 on the map and leave it here, walk on, then take it over as the lead
   const box = await game.locator("canvas.docks-avatar.crew").first().boundingBox();
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-  await game.getByText(/tap Friends to pick \(1\)/).waitFor();
+  await game.getByRole("menu", { name: /options/ }).getByText(/in #7730's line/).waitFor();
+  await shot("quick");
+  await game.getByRole("menuitem", { name: "☑ Pick" }).click();
+  await game.getByText(/1 picked/).waitFor();
   await game.getByRole("button", { name: "Leave picked here" }).click();
   await game.getByText(/1 Friend left here\./).waitFor();
   await btn("Done").click();
   for (const k of ["d", "s"]) { await page.keyboard.down(k); await page.waitForTimeout(700); await page.keyboard.up(k); }
   await shot("crew");
   await btn("Islands").click();
-  await game.locator(".docks-friend", { hasText: many ? "#900000" : "#7573" }).getByRole("button", { name: "Lead" }).click();
-  await game.getByText(new RegExp(`You're leading #${many ? 900000 : 7573} now`)).waitFor();
+  await game.locator(".docks-friend", { hasText: many ? "#900000" : "#7573" }).getByRole("button", { name: "Control" }).click();
+  await game.getByText(new RegExp(`You control #${many ? 900000 : 7573} now`)).waitFor();
   await game.locator(".docks-hud").getByText(new RegExp(`#${many ? 900000 : 7573}`)).first().waitFor();
   await btn("Crew").click();
-  await game.getByText(new RegExp(`Leading #${many ? 900000 : 7573}`)).waitFor();
+  await game.getByText(new RegExp(`Controlling #${many ? 900000 : 7573}`)).waitFor();
+  await game.getByRole("button", { name: new RegExp(`Make #${many ? 900000 : 7573} primary leader`) }).click();
+  await game.getByText(new RegExp(`#${many ? 900000 : 7573} is the primary leader now`)).waitFor();
   await game.getByRole("button", { name: "All go home" }).click();
   await game.getByText("Everyone went back to their own land.").waitFor();
   await btn("Done").click();
@@ -251,22 +259,22 @@ try {
     await game.getByRole("button", { name: "Center on lead" }).click();
     // villages: plant a flag, lock RF until it's full, found it, harvest, vote
     assert.equal(await game.locator(".docks-flag").count(), 2, "Market Town and Crystal Hollow's rising flag");
-    await game.locator(".docks-nav").getByRole("button", { name: /Village/ }).click();
-    await game.getByText(/village · 2 islands/).first().waitFor();
+    await game.locator(".docks-nav").getByRole("button", { name: /Flags/ }).click();
+    await game.getByText(/founded · 2 islands/).first().waitFor();
     for (let i = 0; i < 4; i++) await game.getByRole("button", { name: /250k preview RF/ }).click();
-    await game.getByLabel("Village name").fill("Dock Town");
+    await game.getByLabel("Flag name").fill("Dock Town");
     await game.getByRole("button", { name: /Plant flag where #\d+ stands/ }).click();
     await game.getByText(/🚩 Dock Town's flag is up on Your island \(simulated\): 100k of 1M RF locked/).waitFor();
     assert.equal(await game.locator(".docks-flag.rising").count(), 2, "your flag rises next to Crystal Hollow's");
-    await game.locator(".docks-nav").getByRole("button", { name: /Village/ }).click();
+    await game.locator(".docks-nav").getByRole("button", { name: /Flags/ }).click();
     await game.getByLabel("Lock RF into Dock Town").fill("900000");
     await game.locator(".docks-village", { hasText: "Dock Town" }).getByRole("button", { name: "Lock RF", exact: true }).click();
     await game.getByText(/You locked .* RF into Dock Town's flag \(simulated\) · 100% full/).waitFor();
     await game.getByText(/your mark: .* RF \(\d+% of the flag, soulbound\)/).first().waitFor();
     await game.getByRole("button", { name: "🏛 Found Dock Town" }).click();
-    await game.getByText(/🏛 Dock Town is a village! 500k RF into permanent RF\/ETH liquidity, 500k RF as founders' allowances/).waitFor();
+    await game.getByText(/🏛 Dock Town is founded! 500k RF into permanent RF\/ETH liquidity, 500k RF as founders' allowances/).waitFor();
     assert.equal(await game.locator(".docks-flag.rising").count(), 1, "only Crystal Hollow still rising");
-    await game.locator(".docks-nav").getByRole("button", { name: /Village/ }).click();
+    await game.locator(".docks-nav").getByRole("button", { name: /Flags/ }).click();
     const town = game.locator(".docks-village", { hasText: "Dock Town" });
     // the planter's island is the seat: already in, voting with its Friends × the founder multiplier
     await town.getByText(/Your island: 2 Friends × 2\.00 = 4\.0 votes/).waitFor();
@@ -290,12 +298,12 @@ try {
     await town.getByRole("button", { name: /Build where #\d+ stands · allowance/ }).click();
     await game.getByText(/🏪 Market stall is being built on Your island \(simulated\): ready in 24 h\. Paid from your Dock Town allowance/).waitFor();
     assert.equal(await game.locator(".docks-item-mark.building", { hasText: "🏪" }).count(), 1, "the stall is going up on the map");
-    await game.locator(".docks-nav").getByRole("button", { name: /Village/ }).click();
+    await game.locator(".docks-nav").getByRole("button", { name: /Flags/ }).click();
     await town.getByRole("button", { name: /^Finish · / }).click();
     await game.getByText(/🏪 Market stall is built\./).waitFor();
-    await town.getByText(/village item: stays with the village · built ✓/).waitFor();
+    await town.getByText(/flag item: stays with the flag · built ✓/).waitFor();
     await shot("village-menu");
-    await game.getByRole("button", { name: "Close Villages" }).click();
+    await game.getByRole("button", { name: "Close Flags" }).click();
     await page.waitForTimeout(300); await shot("village");
     // deploy #7573 to a second island: joining a new island counts as a move (Gen 3: 20 RF)
     await btn("Islands").click();

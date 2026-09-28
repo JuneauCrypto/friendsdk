@@ -55,6 +55,7 @@ interface IDocksFeeSink {
 /// - Bridges: link your island to one you can't dock next to, for RF paid per berth of
 ///   distance. A bridge lasts until either island moves.
 /// - Access: each island is open or invite-only with approved visitors.
+/// - Default leader: the Friend its owner controls whenever they board the island.
 /// - Gone Friends: anyone can burn the hole of a placed Friend that is no longer valid
 ///   (`burnHole`), so the island's (and its village's) population drops right away.
 contract DocksIslands {
@@ -118,6 +119,7 @@ contract DocksIslands {
     event Docked(uint256 indexed islandId, int32 x, int32 y);
     event Undocked(uint256 indexed islandId);
     event BridgeBuilt(uint256 indexed from, uint256 indexed to, uint256 rfPaid);
+    event DefaultLeaderSet(uint256 indexed islandId, uint256 indexed friendId);
     event IslandUpdated(uint256 indexed islandId, string name, bool inviteOnly);
     event VisitorSet(uint256 indexed islandId, address indexed visitor, bool approved);
     event VisitRequested(uint256 indexed islandId, address indexed visitor);
@@ -130,6 +132,7 @@ contract DocksIslands {
     mapping(uint256 islandId => address) public ownerOf;
     mapping(uint256 islandId => string) public islandName;
     mapping(uint256 islandId => bool) public inviteOnly;
+    mapping(uint256 islandId => uint256) public defaultLeaderOf;
     mapping(uint256 islandId => mapping(address visitor => bool)) public approved;
 
     mapping(uint256 friendId => Spot) public spotOf;
@@ -174,6 +177,17 @@ contract DocksIslands {
         islandName[islandId] = name;
         inviteOnly[islandId] = inviteOnly_;
         emit IslandUpdated(islandId, name, inviteOnly_);
+    }
+
+    /// @notice Set the Friend you control whenever you board this island: one of its own,
+    /// activated and held by you. Set once; change it any time.
+    function setDefaultLeader(uint256 islandId, uint256 friendId) external {
+        _onlyOwner(islandId);
+        Spot storage s = spotOf[friendId];
+        if (!s.placed || s.islandId != islandId) revert NotPlaced();
+        if (!isValid(friendId)) revert NotActive();
+        defaultLeaderOf[islandId] = friendId;
+        emit DefaultLeaderSet(islandId, friendId);
     }
 
     function setVisitor(uint256 islandId, address visitor, bool approved_) external {

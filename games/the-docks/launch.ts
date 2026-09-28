@@ -1,7 +1,7 @@
 /* Token launches — SIMULATED in this preview. Mirrors contracts/src/docks/DocksLaunchpad.sol:
  * 1,000 RF per launch; fixed supply, no owner; airdrops and claims land in the Friend's own
  * wallet; every claim costs the launch's RF price. Like every fee in The Docks, launch fees and
- * claim prices go to a permanent RF/ETH pool (the island's village's, or the shared Docks pool):
+ * claim prices go to a permanent RF/ETH pool (the island's flag's, or the shared Docks pool):
  * nothing is burned; the pools' trading fees buy RF to build with. */
 import { connected, villageOf, type Plot, type World } from "./world.js";
 
@@ -11,7 +11,7 @@ export type Scope = "anyDocked" | "holderPlot" | "plotAndNeighbours" | "visitors
 export const SCOPES: { id: Scope; label: string; hint: string }[] = [
   { id: "holderPlot", label: "My island", hint: "only Friends on the launching island" },
   { id: "plotAndNeighbours", label: "My island + neighbours", hint: "plus every island docked next to it or bridged to it" },
-  { id: "village", label: "My village", hint: "every island under your village's flag" },
+  { id: "village", label: "My flag", hint: "every island under your flag's flag" },
   { id: "visitors", label: "Visitors", hint: "islands allowed onto the launching island (open, or approved)" },
   { id: "anyDocked", label: "Everyone docked", hint: "any Friend on a docked island" },
 ];
