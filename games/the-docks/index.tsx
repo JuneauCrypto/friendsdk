@@ -5,7 +5,7 @@ import type { GameComponentProps } from "@rarefriends/friendsdk/runtime";
 import { GameMenu } from "@rarefriends/friendsdk/frame";
 import { createFriendReader, type GenerationSprites } from "@rarefriends/friendsdk/sprites";
 import { readFriend, readOwner, type Friend } from "./land.js";
-import { readOwnedLands } from "./roster.js";
+import { readOwnedLands, withRetry } from "./roster.js";
 import {
   ARRANGE_FEE, RANKS, addBridge, addToPlot, autoArrange, canEnter, connected, DOCKING_FEE, createWorld, deploy, disconnected, zonesNextTo,
   dockAt, loadingZones, member, memberOf, moveGroup, myPlots, neighboursOf, pendingChanges, plotOf, rankOf, rebuild,
@@ -112,7 +112,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const plotSeq = useRef(1);
   const art = useRef({ queue: [] as Member[], inflight: new Set<bigint>(), loaded: new Map<bigint, Member>(), seen: new Map<bigint, number>(), tick: 0 });
   const bump = () => setTick(x => x + 1);
-  const say = (s: string) => setToast(s);
+  const lastSay = useRef(0);
+  const say = (s: string) => { lastSay.current = Date.now(); setToast(s); };
+  /** News from the rest of the docks (samples): never covers something you just did. */
+  const sayAmbient = (s: string) => { if (Date.now() - lastSay.current > 8_000) setToast(s); };
 
   /* ── session start: my Friend, sample islands, then all my Friends automatically ── */
   useEffect(() => {
@@ -128,7 +131,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         const [me, own] = await Promise.all([readFriend(friendId), readOwner(friendId)]);
         owner.current = own;
         const samples = await Promise.all(SAMPLE_PLOTS.map(async s => {
-          const got = await Promise.allSettled(s.tokens.map(readFriend));
+          const got = await Promise.allSettled(s.tokens.map(id => withRetry(() => readFriend(id), [500, 1_500])));
           const friends = autoArrange(got.flatMap(r => r.status === "fulfilled" ? [memberOf(r.value)] : []));
           return { id: s.id, name: s.name, mine: false, access: s.access, policy: s.policy, friends, berth: s.berth } as Plot;
         }));
@@ -138,7 +141,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         const home: Plot = { id: "me-1", name: "Your island", mine: true, access: "invite", friends: [{ m: walker, x: 0, y: 0 }], berth: null };
         plotSeq.current = 1;
         world.current = createWorld(samples.filter(s => s.friends.length), [home]);
-        econ.current = createEconomy(); book.current = WR.newWarBook(); market.current = PC.newMarket(); flagFriends.current = new Map(); setLastBattle(null); setTourShip(null); setLead(friendId); setPrimary(friendId); setCrewLeader(new Map()); setQuick(null); setCrewModes(new Map()); setCrewSel(new Set()); setCrewBar(false); setApprovedVisitors([]); setRequests([]); onChain.current = new Map(); savedRef.current = new Map(); simGone.current = new Set(); setIslandId("me-1");
+        econ.current = createEconomy(); rosterRetried.current = false; book.current = WR.newWarBook(); market.current = PC.newMarket(); flagFriends.current = new Map(); setLastBattle(null); setTourShip(null); setLead(friendId); setPrimary(friendId); setCrewLeader(new Map()); setQuick(null); setCrewModes(new Map()); setCrewSel(new Set()); setCrewBar(false); setApprovedVisitors([]); setRequests([]); onChain.current = new Map(); savedRef.current = new Map(); simGone.current = new Set(); setIslandId("me-1");
         const mkt = world.current.plots.find(p => p.id === "s4" && p.friends.length);
         if (mkt) seedLaunch(econ.current, { name: "Market Coin", symbol: "MKT", supply: 1_000_000, creator: mkt, creatorFriend: mkt.friends[0].m.id,
           scope: "anyDocked", claimEach: 500, claimPrice: 5, claimRemaining: 50_000 });
@@ -181,6 +184,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const island = () => world.current!.plots.find(p => p.id === islandId && p.mine) ?? home();
 
   /** Every activated Friend in the same wallet joins your island, arranged as one connected block. */
+  const rosterRetried = useRef(false);
   async function loadRoster(v: number, first: boolean): Promise<string[]> {
     const w = world.current; if (!w) return [];
     setRoster(r => ({ ...r, state: "loading", done: 0, total: 0 }));
@@ -214,7 +218,12 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     } catch (e) {
       if (v !== epoch.current) return [];
       setRoster({ state: "error", done: 0, total: 0, error: errText(e) });
-      if (first) say(`Couldn't list your other Friends automatically (${errText(e)}). Add them by number in My islands.`);
+      if (first && !rosterRetried.current) {
+        // one more try a little later: public RPCs sometimes refuse a burst at login
+        rosterRetried.current = true;
+        say("Couldn't list your other Friends yet; trying again in a few seconds…");
+        window.setTimeout(() => { if (v === epoch.current) void loadRoster(v, true); }, 6_000);
+      } else if (first) say(`Couldn't list your other Friends automatically (${errText(e)}). Tap 🔄 Check to try again, or add them by number in My islands.`);
       return [];
     }
   }
@@ -788,7 +797,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           msg = `🧺 ${buyer.name} (sample) bought ${l.good !== null ? PC.GOODS[l.good].name : VX.CATALOG[l.item!.kind].name} from you for ${fmt(r.total)} RF${r.tax ? ` (${fmt(r.tax)} RF tax to ${r.flag})` : ""}.`; }
       }
       if (Math.random() < 0.2) PC.sampleListings(w, market.current);
-      if (msg) say(msg);
+      if (msg) sayAmbient(msg);
       bump();
     }, 4000);
     return () => window.clearInterval(t);

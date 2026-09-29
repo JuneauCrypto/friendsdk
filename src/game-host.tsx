@@ -40,7 +40,7 @@ export function parseFriendSelection(input: unknown): FriendSelectionOptions | u
   const text = (x: unknown, max: number) => typeof x === "string" && x.trim() ? x.trim().slice(0, max) : undefined;
   return Object.freeze({ title: text(v.title, 60), note: text(v.note, 300), remember: v.remember === true, requireActivated: v.requireActivated === true });
 }
-const ART_LIMIT = 48;
+const ART_LIMIT = 24;
 const rememberKey = (chainId: number | null, account: string) => `friendsdk:chosen-friend:${chainId ?? 0}:${account.toLowerCase()}`;
 function recall(key: string): bigint | null {
   try { const v = localStorage.getItem(key); return v && /^[0-9]{1,78}$/.test(v) ? BigInt(v) : null; } catch { return null; }
@@ -89,6 +89,7 @@ function WalletViewport({ session, publicClient, selection, ...props }: Omit<Gam
   const friends = valid?.friends ?? [];
   const found = friends.find(value => value.id === selected) ?? null;
   // Display-only ranking (reward rate) and artwork, so Friends are recognizable in the picker.
+  const selectedRef = useRef<bigint | null>(null); selectedRef.current = selected;
   const [ranks, setRanks] = useState<{ source: readonly OwnedFriend[]; byId: ReadonlyMap<bigint, FriendRank> } | null>(null);
   const [art, setArt] = useState<{ source: readonly OwnedFriend[]; byId: ReadonlyMap<bigint, string> } | null>(null);
   const rankById = ranks?.source === friends ? ranks.byId : null;
@@ -112,8 +113,13 @@ function WalletViewport({ session, publicClient, selection, ...props }: Omit<Gam
       if (list) setRanks({ source, byId });
       const top = [...source].map(f => ({ ...f, rate: byId.get(f.id)?.rate ?? 0 })).sort(compareFriendRank).slice(0, ART_LIMIT);
       const images = new Map<bigint, string>();
-      for (let i = 0; i < top.length; i += 4) {
-        const got = await Promise.all(top.slice(i, i + 4).map(f => readFriendArt(publicClient, f.id)));
+      // Artwork is only for the picker: go gently (two at a time), and when a remembered Friend
+      // is already playing, wait so the game's own reads go first.
+      await new Promise(r => setTimeout(r, 400));   // let a remembered Friend get selected first
+      if (selectedRef.current !== null) await new Promise(r => setTimeout(r, 20_000));
+      for (let i = 0; i < top.length; i += 2) {
+        if (controller.signal.aborted) return;
+        const got = await Promise.all(top.slice(i, i + 2).map(f => readFriendArt(publicClient, f.id)));
         if (controller.signal.aborted) return;
         got.forEach((image, k) => { if (image) images.set(top[i + k].id, image); });
         setArt({ source, byId: new Map(images) });

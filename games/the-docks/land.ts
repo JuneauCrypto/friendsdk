@@ -116,7 +116,7 @@ export function parseFriendSvg(tokenId: bigint, svg: string, traits: Record<stri
 
 const ABI = parseAbi(["function tokenURI(uint256 tokenId) view returns (string)", "function ownerOf(uint256 tokenId) view returns (address)"]);
 let client: Pick<PublicClient, "readContract"> | null = null;
-const rpc = () => client ??= createPublicClient({ transport: http(GENERATION_SPRITE_MANIFEST.rpcUrl, { retryCount: 1, timeout: 15_000 }) });
+const rpc = () => client ??= createPublicClient({ transport: http(GENERATION_SPRITE_MANIFEST.rpcUrl, { retryCount: 3, retryDelay: 600, timeout: 20_000 }) });
 const b64 = (s: string) => new TextDecoder().decode(Uint8Array.from(atob(s), c => c.charCodeAt(0)));
 
 /** Read one Friend's metadata and artwork from the Generations contract (public, read-only). */
