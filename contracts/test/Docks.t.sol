@@ -432,13 +432,15 @@ contract DocksTest is Test {
 
     /* ── docking islands: one berth each, gas only ── */
 
-    function testDockingIsGasOnlyAndNeedsALoadingZone() public {
+    function testDockingPaysTheDockingFeeAndNeedsALoadingZone() public {
         _place(alice, 1, 0, 0);
         _place(bob, 10, 0, 0);
         _place(carol, 20, 0, 0);
         uint256 before = rf.balanceOf(alice);
+        uint256 fund = tre.docksRewardsRf();
         _dock(alice, 0, 0); // first island docks anywhere
-        assertEq(rf.balanceOf(alice), before);
+        assertEq(before - rf.balanceOf(alice), 2 ether, "a 2 RF docking fee");
+        assertEq(tre.docksRewardsRf() - fund, 2 ether, "into The Docks fund");
         vm.prank(bob);
         vm.expectRevert(DocksIslands.NotLoadingZone.selector);
         reg.dock(plotOf[bob], 5, 5);
@@ -474,7 +476,7 @@ contract DocksTest is Test {
 
     /* ── bridges: free, like docking ── */
 
-    function testBridgeIsFreeAndBreaksWhenAnIslandMoves() public {
+    function testBridgePaysTheDockingFeeAndBreaksWhenAnIslandMoves() public {
         _place(alice, 1, 0, 0);
         _place(bob, 10, 0, 0);
         _place(carol, 20, 0, 0);
@@ -484,10 +486,10 @@ contract DocksTest is Test {
         vm.prank(alice);
         vm.expectRevert(DocksIslands.AlreadyConnected.selector);
         reg.buildBridge(plotOf[alice], plotOf[bob]);
-        uint256 before = _burned();
+        uint256 before = tre.docksRewardsRf();
         vm.prank(alice);
         reg.buildBridge(plotOf[alice], plotOf[carol]);
-        assertEq(_burned() - before, 0, "island to island costs no RF");
+        assertEq(tre.docksRewardsRf() - before, 2 ether, "a 2 RF docking fee into The Docks fund");
         assertTrue(reg.connected(plotOf[alice], plotOf[carol]));
         _dock(carol, 1, 1); // carol moves (under bob): the bridge is gone
         assertFalse(reg.hasBridge(plotOf[alice], plotOf[carol]));
@@ -810,7 +812,7 @@ contract DocksTest is Test {
         assertEq(liq.provided(v), 500_000 ether, "half to permanent liquidity");
         assertEq(tre.allowanceOf(v, alice), 200_000 ether, "half of what each locked is their allowance");
         assertEq(tre.allowanceOf(v, bob), 150_000 ether);
-        assertEq(rf.balanceOf(address(tre)), 500_000 ether + tre.pendingLiquidity(0), "allowances + the Docks pool's arrange fees");
+        assertEq(rf.balanceOf(address(tre)), 500_000 ether + tre.pendingLiquidity(0) + tre.docksRewardsRf(), "allowances + the Docks pool's arrange fees + docking fees");
         assertEq(rf.balanceOf(address(vil)), 0, "nothing left to withdraw");
         assertEq(vil.enrollPrice(v), ENROLL, "open enrollment for the first week");
         vm.expectRevert(DocksVillages.NotRising.selector);
@@ -1184,11 +1186,12 @@ contract DocksTest is Test {
         uint256 pool = tre.pendingLiquidity(v);
         vm.prank(bob);
         (uint256 toPool, uint256 shared) = tre.harvest(v, 2000 ether);
-        assertEq(toPool, 1500 ether, "half back into the pool");
-        assertEq(shared, 1500 ether);
-        assertEq(tre.pendingLiquidity(v) - pool, 1500 ether);
-        assertEq(tre.allowanceOf(v, alice), 200_000 ether + 1000 ether, "2 of 3 Friends");
-        assertEq(tre.allowanceOf(v, bob), 300_000 ether + 500 ether);
+        assertEq(tre.lootOf(v), 300 ether, "10% of the harvest into the flag's loot vault");
+        assertEq(toPool, 1350 ether, "half of the rest back into the pool");
+        assertEq(shared, 1350 ether);
+        assertEq(tre.pendingLiquidity(v) - pool, 1350 ether);
+        assertEq(tre.allowanceOf(v, alice), 200_000 ether + 900 ether, "2 of 3 Friends");
+        assertEq(tre.allowanceOf(v, bob), 300_000 ether + 450 ether);
         vm.prank(bob);
         uint256 share = vil.proposePoolShare(v, 2500);
         vm.prank(bob);

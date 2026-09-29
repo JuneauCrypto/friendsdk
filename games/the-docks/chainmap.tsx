@@ -1,7 +1,7 @@
 /* The berth map: one square per island, whatever its size. Glowing squares are loading
  * zones where the chosen island can dock. Tap an island to build a bridge to it. */
 import { useState } from "react";
-import { connected, type Berth, type Plot, type World } from "./world.js";
+import { connected, DOCKING_FEE, type Berth, type Plot, type World } from "./world.js";
 
 export function ChainMap({ world, island, zones, onDock, onBridge }: {
   world: World; island: Plot; zones: Berth[];
@@ -33,6 +33,6 @@ export function ChainMap({ world, island, zones, onDock, onBridge }: {
           Zone {i + 1}<small>next to {next.map(p => p.name).join(", ") || "open water"}</small></button>; })}
     </div>}
     {island.berth && <div className="docks-slots">{docked.filter(bridgeable).map(p => <button type="button" key={p.id} onClick={() => onBridge(p)}>
-      Bridge to {p.name}<small>free</small></button>)}</div>}
+      Bridge to {p.name}<small>{DOCKING_FEE} RF</small></button>)}</div>}
   </div>;
 }

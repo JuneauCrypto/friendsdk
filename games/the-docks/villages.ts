@@ -160,7 +160,7 @@ export function harvest(v: Village, e: Economy, who = YOU, lootBps = 0) {
   if (!v.founded) throw new Error(`${v.name} isn't founded yet.`);
   if (!islandOf(v, who)) throw new Error(`Only ${v.name}'s members harvest (they set the buyback's minimum).`);
   const bought = Math.round(v.fees.eth * RF_PER_ETH), total = v.fees.rf + bought;
-  const toPoolRf = Math.round(total * v.poolBps / 10_000), loot = Math.round((total - toPoolRf) * lootBps / 10_000), kept = total - toPoolRf - loot;
+  const loot = Math.round(total * lootBps / 10_000), toPoolRf = Math.round((total - loot) * v.poolBps / 10_000), kept = total - loot - toPoolRf;
   const out = { rf: v.fees.rf, eth: v.fees.eth, bought, toPool: toPoolRf, kept, loot };
   v.fees = { rf: 0, eth: 0 }; v.pendingLiquidity += toPoolRf; v.compounded += toPoolRf; void e;
   const pop = population(v);

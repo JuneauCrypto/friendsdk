@@ -23,8 +23,9 @@ export const FOOTPRINT: Readonly<Record<number, readonly [number, number]>> = { 
 /** RF paid per Friend moved on its island when saved on chain (DocksIslands.FEE_GEN1…6), into a pool. */
 export const ARRANGE_FEE: Readonly<Record<number, number>> = { 1: 100, 2: 50, 3: 20, 4: 10, 5: 5, 6: 1 };
 export const feeOf = (m: { gen: number }) => ARRANGE_FEE[m.gen] ?? 1;
-/** Island to island is free: docking and bridges cost no RF (gas only on chain). */
-export const BRIDGE_FEE_PER_BERTH = 0;
+/** Docking fee: RF paid each time an island docks next to another or builds a bridge, into The
+ *  Docks fund (the Docks rewards reserve). Flat, cheap to start (DocksIslands.DOCKING_FEE). */
+export const DOCKING_FEE = 2;
 
 export type Member = {
   id: bigint; gen: number; tier: number; cw: number; ch: number;
@@ -325,7 +326,6 @@ export function connected(w: World, a: Plot, b: Plot) {
   return dist(a.berth, b.berth) === 1 || hasBridge(w, a, b);
 }
 export function neighboursOf(w: World, p: Plot) { return w.plots.filter(q => q.friends.length && connected(w, p, q)); }
-export function bridgeCost(a: Plot, b: Plot) { return a.berth && b.berth ? dist(a.berth, b.berth) * BRIDGE_FEE_PER_BERTH : 0; }
 export function addBridge(w: World, a: Plot, b: Plot) {
   if (!a.berth || !b.berth || connected(w, a, b)) return false;
   w.bridges.push({ a, b, at: [{ ...a.berth }, { ...b.berth }] }); rebuild(w); return true;
@@ -396,18 +396,19 @@ export function tileAt(w: World, x: number, y: number): TileInfo | undefined {
   const k = w.walk.get(ck(tx, ty));
   return k ? { plot: null, placed: null, blocked: false, walkway: k } : undefined;
 }
-/** Walking onto an island (for now, only islands under a flag): your own; every island of a flag
- *  you're in; or, as a visitor just exploring, a flag's islands once your island is docked next to
- *  or bridged to one of them. */
+/** Walking onto an island: your own; any island docked next to or bridged to one of yours (for
+ *  now free; a toll to its owner and the Docks may come later); every island of a flag you're in;
+ *  or, as a visitor just exploring, a flag's islands once you're connected to one of them. */
 export function canEnter(w: World, p: Plot) {
   if (p.mine) return true;
-  const f = villageOf(w, p); if (!f) return false;
   const mine = w.plots.filter(q => q.mine);
+  if (mine.some(q => connected(w, q, p))) return true;
+  const f = villageOf(w, p); if (!f) return false;
   return mine.some(q => villageOf(w, q) === f) || mine.some(q => f.members.some(m => connected(w, q, m)));
 }
 /** The same rule seen from any island `from` (used for launch "visitors" scopes). */
 export function canEnterFrom(w: World, from: Plot, p: Plot) {
-  if (from === p) return true;
+  if (from === p || connected(w, from, p)) return true;
   const f = villageOf(w, p); if (!f) return false;
   return villageOf(w, from) === f || f.members.some(m => connected(w, from, m));
 }

@@ -7,7 +7,7 @@ import { createFriendReader, type GenerationSprites } from "@rarefriends/friends
 import { readFriend, readOwner, type Friend } from "./land.js";
 import { readOwnedLands } from "./roster.js";
 import {
-  ARRANGE_FEE, RANKS, addBridge, addToPlot, autoArrange, canEnter, connected, createWorld, deploy, disconnected, zonesNextTo,
+  ARRANGE_FEE, RANKS, addBridge, addToPlot, autoArrange, canEnter, connected, DOCKING_FEE, createWorld, deploy, disconnected, zonesNextTo,
   dockAt, loadingZones, member, memberOf, moveGroup, myPlots, neighboursOf, pendingChanges, plotOf, rankOf, rebuild,
   refreshMember, removeFromPlot, swapInto, undock, weightOf, burnHole, fillHole, holesOf, feeOf,
   CELL, exploring, canEnterFrom, flagProblem, joinProblem, newVillage, risingFlagOf, tileAt, villageOf, flagTile, walletOf, type Village,
@@ -98,7 +98,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const world = useRef<World | null>(null);
   const econ = useRef<Economy>(createEconomy());
   const book = useRef<WR.WarBook>(WR.newWarBook());                               // war: loot vaults, ships, battles (simulated)
-  const [warShips, setWarShips] = useState<number[]>([]);                         // ships picked for a raid
+  const [tourShip, setTourShip] = useState<number | null>(null), [autoSail, setAutoSail] = useState(true);   // deploying a ship on a tour
   const [shipKind, setShipKind] = useState(1), [vaultAdd, setVaultAdd] = useState("10000");
   const [lastBattle, setLastBattle] = useState<WR.Battle | null>(null);
   const owner = useRef("");
@@ -133,7 +133,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         const home: Plot = { id: "me-1", name: "Your island", mine: true, access: "invite", friends: [{ m: walker, x: 0, y: 0 }], berth: null };
         plotSeq.current = 1;
         world.current = createWorld(samples.filter(s => s.friends.length), [home]);
-        econ.current = createEconomy(); book.current = WR.newWarBook(); setLastBattle(null); setWarShips([]); setLead(friendId); setPrimary(friendId); setCrewLeader(new Map()); setQuick(null); setCrewModes(new Map()); setCrewSel(new Set()); setCrewBar(false); setApprovedVisitors([]); setRequests([]); onChain.current = new Map(); savedRef.current = new Map(); simGone.current = new Set(); setIslandId("me-1");
+        econ.current = createEconomy(); book.current = WR.newWarBook(); setLastBattle(null); setTourShip(null); setLead(friendId); setPrimary(friendId); setCrewLeader(new Map()); setQuick(null); setCrewModes(new Map()); setCrewSel(new Set()); setCrewBar(false); setApprovedVisitors([]); setRequests([]); onChain.current = new Map(); savedRef.current = new Map(); simGone.current = new Set(); setIslandId("me-1");
         const market = world.current.plots.find(p => p.id === "s4" && p.friends.length);
         if (market) seedLaunch(econ.current, { name: "Market Coin", symbol: "MKT", supply: 1_000_000, creator: market, creatorFriend: market.friends[0].m.id,
           scope: "anyDocked", claimEach: 500, claimPrice: 5, claimRemaining: 50_000 });
@@ -550,24 +550,28 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   function dockIsland(b: Berth) {
     const w = world.current!, p = island();
     if (!p.friends.length) { say("Deploy at least one Friend to this island before docking it."); return; }
+    if (econ.current.rf < DOCKING_FEE) { say(`Docking costs a ${DOCKING_FEE} RF docking fee; you have ${fmt(econ.current.rf)}.`); return; }
     if (!dockAt(w, p, b)) { say("That loading zone was just taken."); return; }
+    econ.current.rf -= DOCKING_FEE; econ.current.docksFund += DOCKING_FEE;
     setMenu(null); setIslandPop(null); goTo(p); bump();
     const n = neighboursOf(w, p).filter(q => !q.mine);
-    say(`${p.name} docked${neighboursOf(w, p).length ? ` next to ${neighboursOf(w, p).map(q => q.name).join(", ")}` : ""}: free, no RF (gas only on chain, simulated). A gangway joins you.${n.length ? " 💬 Chat is open with your new neighbours." : ""}`);
+    say(`${p.name} docked${neighboursOf(w, p).length ? ` next to ${neighboursOf(w, p).map(q => q.name).join(", ")}` : ""}: ${DOCKING_FEE} RF docking fee into The Docks fund (simulated). A gangway joins you: your Friends can walk across.${n.length ? " 💬 Chat is open with your new neighbours." : ""}`);
   }
   /** Tap another island → Dock: the first free loading zone right next to it. */
   function dockNextTo(target: Plot) {
     const w = world.current!, p = island();
     if (connected(w, p, target)) { say(`${p.name} is already next to ${target.name}.`); return; }
     const z = zonesNextTo(w, p, target);
-    if (!z.length) { say(`No free loading zone next to ${target.name}. Build a bridge to it instead (free).`); return; }
+    if (!z.length) { say(`No free loading zone next to ${target.name}. Build a bridge to it instead (${DOCKING_FEE} RF docking fee).`); return; }
     dockIsland(z[0]);
   }
   function buildBridge(to: Plot) {
     const w = world.current!, p = island();
+    if (econ.current.rf < DOCKING_FEE) { say(`A bridge costs a ${DOCKING_FEE} RF docking fee; you have ${fmt(econ.current.rf)}.`); return; }
     if (!addBridge(w, p, to)) { say(p.berth ? "You're already connected to that island." : `Dock ${p.name} first, then bridge.`); return; }
+    econ.current.rf -= DOCKING_FEE; econ.current.docksFund += DOCKING_FEE;
     setMenu(null); setIslandPop(null); bump();
-    say(`Bridge built from ${p.name} to ${to.name}: free, no RF (gas only on chain, simulated). It lasts until either island moves.`);
+    say(`Bridge built from ${p.name} to ${to.name}: ${DOCKING_FEE} RF docking fee into The Docks fund (simulated). Your Friends can walk across; it lasts until either island moves.`);
   }
   /* ── chat with docked neighbours (simulated: sample islands answer on their own) ── */
   const chatNeighbours = () => { const w = world.current!, mineP = myPlots(w);
@@ -644,7 +648,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   }
   function doRefund(v: Village) { act(() => { const n = VX.refund(world.current!, econ.current, v); say(`${fmt(n)} RF came back from ${v.name}'s flag.`); }); }
   function doHarvest(v: Village) {
-    act(() => { const r = VX.harvest(v, econ.current, VX.YOU, WR.WAR.LOOT_FROM_HARVEST_BPS); book.current.loot.set(v, WR.lootOf(book.current, v) + r.loot);
+    act(() => { const r = VX.harvest(v, econ.current, VX.YOU, WR.WAR.LOOT_FROM_FEES_BPS); book.current.loot.set(v, WR.lootOf(book.current, v) + r.loot);
       say(`Harvested ${v.name} (simulated): ${fmt(r.rf)} RF + ${r.eth.toFixed(3)} ETH in fees → bought ${fmt(r.bought)} RF · ${fmt(r.toPool)} back into the pool · ${fmt(r.kept)} shared by Friends as allowances · ${fmt(r.loot)} into the loot vault.`); });
   }
   function doPropose(v: Village) {
@@ -664,15 +668,23 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   }
   /* ── war (simulated): raids between founded flags of a similar tier ── */
   const myFlag = () => myPlots(world.current!).map(p => villageOf(world.current!, p)).find((v): v is Village => Boolean(v)) ?? null;
-  function doRaid(a: Village, d: Village) {
+  function reportBattle(b: WR.Battle) {
+    setLastBattle(b);
+    const you = b.shares.get(VX.YOU) ?? 0, a = b.attacker, d = b.defender;
+    const res = b.attackerWon === null ? "drew" : b.attackerWon ? "won" : "lost";
+    say(`${b.attackerWon === null ? "🤝" : b.attackerWon ? "🏆" : "💥"} ${a.name} ${res} the raid on ${d.name} (duels ${b.duels.map(x => x.won === null ? "–" : x.won ? "✓" : "✗").join(" ")}, simulated)${b.attackerWon === null ? ": no loot moved" : `: ${fmt(b.loot + b.bounty)} RF of loot to ${b.attackerWon ? a.name : d.name}`}${you ? `, ${fmt(Math.floor(you))} RF earned by your island (claim it in ⚔️ War)` : ""}.${b.attackerWon === false ? ` The ${WR.SHIPS[b.ships[0].kind].name} sank; it comes back in ${WR.WAR.SHIP_REGEN_HOURS} h.` : ""}`);
+  }
+  function doDeploy(a: Village, d: Village) {
     act(() => {
-      const mineIsl = a.members.filter(p => p.mine), others = a.members.filter(p => !p.mine);
-      const b = WR.raid(world.current!, book.current, econ.current, a, d, warShips, [...mineIsl, ...others], WR.autoDefenders(d));
-      setWarShips([]); setLastBattle(b);
-      const won = b.attackerWon, you = b.shares.get(VX.YOU) ?? 0;
-      say(`${won ? "🏆" : "💥"} ${a.name} ${won ? "won" : "lost"} the raid on ${d.name} (${b.rounds.map(r => r ? "✓" : "✗").join(" ")}, simulated): ${fmt(b.loot + b.bounty)} RF of loot to ${won ? a.name : d.name}${you ? `, ${fmt(Math.floor(you))} RF earned by your island (claim it in ⚔️ War)` : ""}.${won ? "" : ` ${a.name}'s ships that sailed sank.`}`);
+      const w = world.current!, me = a.members.find(p => p.mine); if (!me) throw new Error(`Bring an island into ${a.name} first.`);
+      if (tourShip === null) throw new Error("Pick a ship to send.");
+      const t = WR.deployTour(w, book.current, a, d, tourShip, me, autoSail); setTourShip(null);
+      const s = WR.SHIPS[t.ship.kind];
+      if (t.autoSail && WR.full(t)) { reportBattle(WR.sail(w, book.current, econ.current, t, WR.autoDefenders(d))); return; }
+      say(`${s.icon} ${s.name} on tour to ${d.name} (simulated): ${t.crew.length}/${s.seats} aboard. ${t.autoSail ? "It sails when full." : "Sail when you're ready."}`);
     });
   }
+  function doSail(t: WR.Tour) { act(() => reportBattle(WR.sail(world.current!, book.current, econ.current, t, WR.autoDefenders(t.target)))); }
   function doRequestRemoval(v: Village, p: Plot) {
     act(() => { const at = VX.requestRemoval(world.current!, v, p); say(`${p.name} leaves ${v.name} at the next epoch, ${new Date(at).toLocaleDateString()} (simulated). No RF back; your unspent allowance stays with the flag and its items there go to a raffle.`); });
   }
@@ -910,8 +922,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       return <div className="docks-quick" role="menu" aria-label={`${p.name} options`} style={{ left, top }}>
         <strong>{p.name}</strong>
         <small>{p.friends.length.toLocaleString()} Friend{p.friends.length === 1 ? "" : "s"} · {r.rank} · {fl ? `🚩 ${fl.name}${fl.founded ? "" : " (rising)"}` : "no flag"}{conn ? ` · docked with ${me.name}` : ""}</small>
-        {!conn && next.length > 0 && <button type="button" role="menuitem" className="rf-frame-primary" onClick={() => dockNextTo(p)}>⚓ Dock {me.name} here · free</button>}
-        {!conn && !next.length && <button type="button" role="menuitem" onClick={() => buildBridge(p)} disabled={!me.berth || !p.berth}>🌉 Bridge from {me.name} · free</button>}
+        {!conn && next.length > 0 && <button type="button" role="menuitem" className="rf-frame-primary" onClick={() => dockNextTo(p)}>⚓ Dock {me.name} here · {DOCKING_FEE} RF</button>}
+        {!conn && !next.length && <button type="button" role="menuitem" onClick={() => buildBridge(p)} disabled={!me.berth || !p.berth}>🌉 Bridge from {me.name} · {DOCKING_FEE} RF</button>}
         {canChat(p) && <button type="button" role="menuitem" onClick={() => openChat(p)}>💬 Chat with {p.name}</button>}
         <button type="button" role="menuitem" onClick={() => setIslandPop(null)}>Close</button>
       </div>; })()}
@@ -1004,10 +1016,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         </div>
       </> : menu === "docks" ? <>
         {islandTabs}
-        <p>{isl.berth ? `${isl.name} is docked${neighboursOf(w, isl).length ? ` next to ${neighboursOf(w, isl).map(p => p.name).join(", ")}` : ""}. Pick another loading zone to move it, or build a bridge.` : `${isl.name} is floating free. Pick a loading zone next to another island to dock.`} Every island takes one berth, whatever its size, so the docks grow with the number of islands. Island to island is free: docking, moving and bridges cost no RF. Tip: tap any island on the map and hit ⚓ Dock.</p>
+        <p>{isl.berth ? `${isl.name} is docked${neighboursOf(w, isl).length ? ` next to ${neighboursOf(w, isl).map(p => p.name).join(", ")}` : ""}. Pick another loading zone to move it, or build a bridge.` : `${isl.name} is floating free. Pick a loading zone next to another island to dock.`} Every island takes one berth, whatever its size, so the docks grow with the number of islands. Docking next to an island or bridging to it costs a {DOCKING_FEE} RF docking fee, into The Docks fund; once connected, your Friends can walk onto that island (free for now). Tip: tap any island on the map and hit ⚓ Dock.</p>
         <ChainMap world={w} island={isl} zones={zones} onDock={dockIsland} onBridge={buildBridge} />
         {isl.berth && <div className="docks-row"><button type="button" onClick={() => { undock(w, isl); setMenu(null); goTo(isl); bump(); say(`${isl.name} is floating free.`); }}>Undock</button>
-          <span className="docks-note">Bridges are free and last until either island moves.</span></div>}
+          <span className="docks-note">Bridges cost a {DOCKING_FEE} RF docking fee (to The Docks fund) and last until either island moves.</span></div>}
         <h3>🏝 Islands</h3>
         <div className="docks-isles">{[...w.plots].filter(p => p.friends.length && p !== isl).sort((a, b) => rankOf(b).weight - rankOf(a).weight).map(p => { const r = rankOf(p), fl = villageOf(w, p) ?? risingFlagOf(w, p), art = p.friends.find(x => x.m.friend)?.m.friend?.art;
           const conn = connected(w, isl, p), next = !p.mine && !conn ? zonesNextTo(w, isl, p) : [];
@@ -1131,13 +1143,13 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       </> : menu === "war" ? (() => { const bk = book.current, v = myFlag(), e = econ.current;
         const earned = Math.floor(bk.earned.get(VX.YOU) ?? 0);
         return <div className="docks-war">
-        <p>Only founded flags go to war. Raid a flag of your tier (or one up) with ships; islands board first come, first served, and the defender gets as many seats. Best of 3 rounds: ⛵ Broadside (ships + attack items), 🤺 Boarding (raw strength), 🏰 Siege (defense items). Win and you take part of the loser's <b>loot vault</b> plus a bounty from the Docks rewards reserve: half to the islands that fought (by level, claimable to your Friend's wallet), half into your vault. Lose and your ships sink and your vault pays. Only a flag's loot vault is ever at risk: never your wallet or allowance.</p>
+        <p>Only founded flags go to war. Send a ship on tour to another flag: islands board first come, first served (or auto-join), and it sails when full or when you say. Each island aboard duels a defending island of its own tier, one above or one below, never more; a dinghy is a solo, one-on-one tour. Each duel is best of 3 rounds: ⛵ Broadside (ships + attack items), 🤺 Boarding (raw strength), 🏰 Siege (defense items). Win more duels and you take part of the loser's <b>loot vault</b> plus a bounty from the Docks rewards reserve: half to the islands that fought (by level, claimable to your Friend's wallet), half into your vault. Lose and your ship sinks for {WR.WAR.SHIP_REGEN_HOURS} h and your vault pays. Only a flag's loot vault is ever at risk: never your wallet or allowance.</p>
         <div className="docks-rf"><span>Your RF <b>{fmt(e.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Docks rewards reserve <b>{fmt(e.docksFund)}</b></span>
           <span>Your earned loot <b>{fmt(earned)}</b></span>
           <button type="button" className="rf-frame-primary" disabled={!earned} onClick={() => act(() => { const n = WR.claim(bk, e); say(`Claimed ${fmt(n)} RF of loot to #${friendId}'s wallet (simulated). It's yours now: never at risk.`); })}>Claim to #{String(friendId)}'s wallet</button></div>
         {villageError && <p role="alert" className="docks-note">{villageError}</p>}
         {!v ? <p className="docks-note">Your islands fly no founded flag yet. Plant or join one in 🚩 Flags to go to war.</p> : (() => {
-          const tier = WR.tierOf(w, v), shield = WR.shielded(v), ready = WR.readiness(w, bk, v), ships = WR.shipsOf(bk, v), rs = WR.readyShips(bk, v), picked = rs.filter(s => warShips.includes(s.id));
+          const tier = WR.tierOf(w, v), shield = WR.shielded(v), ready = WR.readiness(w, bk, v), ships = WR.shipsOf(bk, v), rs = WR.readyShips(bk, v);
           return <>
           <h3><i className="docks-pennant" style={{ background: v.color }} />{v.name} · {WR.tierName(tier)}</h3>
           <small>Battle power <b>{fmt(Math.round(WR.flagPower(w, v)))}</b> · {v.members.length} island{v.members.length === 1 ? "" : "s"} · loot vault <b>{fmt(WR.lootOf(bk, v))} RF</b> (loses {WR.lossBps(tier) / 100}% per lost battle) · {shield ? `🛡 shield: ${Math.ceil((WR.shieldEnds(v) - Date.now()) / VX.DAY)} days to build up, no raids either way` : "open to raids"}</small>
@@ -1145,31 +1157,42 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
             <button type="button" title="Preview only" onClick={() => { v.foundedAt -= WR.WAR.SHIELD_DAYS * VX.DAY; bump(); }}>⏩ End shield</button></div>}
           <div className="docks-row tight"><input aria-label={`Add RF to ${v.name}'s loot vault`} inputMode="numeric" value={vaultAdd} onChange={e2 => setVaultAdd(e2.target.value)} />
             <button type="button" onClick={() => act(() => { const n = rfIn(vaultAdd); WR.fund(bk, e, v, n); say(`${fmt(n)} RF into ${v.name}'s loot vault (simulated): a bigger target, and a bigger buffer.`); })}>Add to loot vault</button></div>
-          <h4>⛵ Ships ({WR.seatsOf(ships)} seats)</h4>
-          <div className="docks-row tight">{ships.map(sh => { const c = WR.SHIPS[sh.kind], left = sh.readyAt - Date.now();
-            return <label key={sh.id} className="docks-ship"><input type="checkbox" disabled={left > 0} checked={warShips.includes(sh.id)} onChange={() => setWarShips(x => x.includes(sh.id) ? x.filter(i => i !== sh.id) : [...x, sh.id])} />{c.icon} {c.name} · {c.seats} seat{c.seats === 1 ? "" : "s"}{left > 0 ? ` · 🔨 ${dur(left)}` : ""}</label>; })}</div>
+          {(() => { const me = v.members.find(p => p.mine); return me ? <div className="docks-item"><span><strong>{me.name} · island {WR.islandTierName(WR.islandTier(w, me))} · power {fmt(Math.round(WR.islandPower(w, me)))}</strong>
+            <small>Your island fights islands of its tier or one above or below, always.</small></span>
+            <label className="docks-ship"><input type="checkbox" checked={bk.autoJoin.has(me)} onChange={() => { if (bk.autoJoin.has(me)) bk.autoJoin.delete(me); else bk.autoJoin.add(me); bump(); }} />Auto-join {v.name}'s tours</label></div> : null; })()}
+          <h4>⛵ Ships</h4>
+          <div className="docks-row tight">{ships.map(sh => { const c = WR.SHIPS[sh.kind], left = sh.readyAt - Date.now(), gone = WR.sunk(sh), touring = WR.onTour(bk, sh), ok = rs.includes(sh);
+            return <label key={sh.id} className="docks-ship"><input type="radio" name="tour-ship" disabled={!ok} checked={tourShip === sh.id} onChange={() => setTourShip(sh.id)} />{c.icon} {c.name} · {c.seats} seat{c.seats === 1 ? "" : "s"} · up to {WR.islandTierName(c.maxTier)}{left > 0 ? ` · 🔨 ${dur(left)}` : gone ? ` · 🌊 sunk, back in ${dur(sh.sunkUntil! - Date.now())}` : touring ? " · on tour" : ""}</label>; })}</div>
           <div className="docks-row tight"><select aria-label="Ship to build" value={shipKind} onChange={e2 => setShipKind(Number(e2.target.value))}>
-            {WR.SHIPS.map((c, i) => <option key={i} value={i}>{c.icon} {c.name} · {c.seats} seats · +{c.attack * 100}% attack · {fmt(c.price)} RF · {dur(c.build)}</option>)}</select>
+            {WR.SHIPS.map((c, i) => <option key={i} value={i}>{c.icon} {c.name} · {c.seats} seat{c.seats === 1 ? "" : "s"} · up to {WR.islandTierName(c.maxTier)} · +{c.attack * 100}% attack · {fmt(c.price)} RF · {dur(c.build)}</option>)}</select>
             <button type="button" onClick={() => act(() => { const sh = WR.buildShip(bk, e, v, shipKind, "allowance"); say(`${WR.SHIPS[sh.kind].icon} ${WR.SHIPS[sh.kind].name} on the slipway for ${v.name} (allowance, simulated): ready in ${dur(WR.SHIPS[sh.kind].build)}.`); })}>Build · allowance</button>
             <button type="button" onClick={() => act(() => { const sh = WR.buildShip(bk, e, v, shipKind, "rf"); say(`${WR.SHIPS[sh.kind].icon} ${WR.SHIPS[sh.kind].name} on the slipway for ${v.name} (your RF, simulated): ready in ${dur(WR.SHIPS[sh.kind].build)}.`); })}>Build · my RF</button>
-            {ships.some(sh => sh.readyAt > Date.now()) && <button type="button" title="Preview only" onClick={() => { WR.finishShips(bk, v); bump(); }}>⏩ Finish ships</button>}</div>
+            {ships.some(sh => sh.readyAt > Date.now() || WR.sunk(sh)) && <button type="button" title="Preview only" onClick={() => { WR.finishShips(bk, v); bump(); }}>⏩ Finish ships</button>}</div>
+          <label className="docks-ship"><input type="checkbox" checked={autoSail} onChange={() => setAutoSail(x => !x)} />Auto-sail when full</label>
           <small>War items on your islands count in battle: {Object.entries(WR.ITEM_WAR).map(([n, x]) => `${n} ${x.attack ? `+${x.attack * 100}% attack` : ""}${x.attack && x.defense ? " " : ""}${x.defense ? `+${x.defense * 100}% defense` : ""}`).join(" · ")} (build them in 🚩 Flags; at most +{WR.WAR.ITEM_BONUS_CAP * 100}% per island and side).</small>
+          {bk.tours.filter(t => t.from === v).length > 0 && <h4>🧭 Tours</h4>}
+          {bk.tours.filter(t => t.from === v).map(t => { const c = WR.SHIPS[t.ship.kind], me = v.members.find(p => p.mine), why = me ? WR.boardProblem(w, bk, t, me) : "no island";
+            return <div className="docks-item" key={t.id}><span><strong>{c.icon} {c.name} → {t.target.name}</strong><small>{t.crew.length}/{c.seats} aboard: {t.crew.map(p => p.name).join(", ")} · {t.autoSail ? "sails when full" : "sails on the deployer's word"}</small></span>
+              <span className="docks-row tight">
+                {!why && <button type="button" onClick={() => act(() => { WR.board(w, bk, t, me!); if (t.autoSail && WR.full(t)) reportBattle(WR.sail(w, bk, e, t, WR.autoDefenders(t.target))); })}>Board</button>}
+                {t.deployer === VX.YOU && <button type="button" className="rf-frame-primary" onClick={() => doSail(t)}>⛵ Sail now</button>}
+                {t.deployer === VX.YOU && <button type="button" onClick={() => { WR.cancelTour(bk, t); bump(); }}>Call off</button>}</span></div>; })}
           <h4>🎯 Targets</h4>
           {WR.targets(w, bk, v).map(d => { const why = WR.raidProblem(w, bk, v, d), td = WR.tierOf(w, d), war = WR.atWar(bk, v, d);
             const voting = v.proposals.some(p => p.kind === "war" && !p.settled && w.villages[p.options[0]] === d);
             return <div className="docks-item" key={d.id}><span><strong><i className="docks-pennant" style={{ background: d.color }} />{d.name} · {WR.tierName(td)}{war ? " · ⚔️ at war" : ""}</strong>
-              <small>power {fmt(Math.round(WR.flagPower(w, d)))} · {d.members.length} island{d.members.length === 1 ? "" : "s"} · {VX.population(d).toLocaleString()} Friends · loot vault {fmt(WR.lootOf(bk, d))} RF{why ? ` · ${why}` : ` · ${picked.length ? `${WR.seatsOf(picked)} seats picked` : "pick ships above"}`}</small></span>
+              <small>power {fmt(Math.round(WR.flagPower(w, d)))} · islands {d.members.map(p => WR.islandTierName(WR.islandTier(w, p))).join(", ")} · {VX.population(d).toLocaleString()} Friends · loot vault {fmt(WR.lootOf(bk, d))} RF{why ? ` · ${why}` : ""}</small></span>
               <span className="docks-row tight">
-                <button type="button" className="rf-frame-primary" disabled={Boolean(why) || !picked.length} onClick={() => doRaid(v, d)}>⚔️ Raid</button>
+                <button type="button" className="rf-frame-primary" disabled={Boolean(why) || tourShip === null} onClick={() => doDeploy(v, d)}>⛵ Send on tour</button>
                 {!war && !voting && <button type="button" onClick={() => act(() => { VX.proposeWar(w, v, VX.YOU, d); say(`🗳 ${v.name} votes on war with ${d.name} (1 day). See the votes in 🚩 Flags.`); })}>🗳 Vote for war</button>}
                 {voting && <small>war vote open</small>}</span></div>; })}
           </>; })()}
-        {lastBattle && <div className="docks-item docks-battle"><span><strong>{lastBattle.attackerWon ? "🏆" : "💥"} {lastBattle.attacker.name} → {lastBattle.defender.name}: {lastBattle.attackerWon ? "raid won" : "raid beaten off"}</strong>
-          <small>{["⛵ Broadside", "🤺 Boarding", "🏰 Siege"].slice(0, lastBattle.rounds.length).map((n, i) => `${n} ${lastBattle.rounds[i] ? "✓" : "✗"}`).join(" · ")} · {lastBattle.seats} seats a side · loot {fmt(lastBattle.loot)} + bounty {fmt(lastBattle.bounty)} RF{lastBattle.war ? " (war: double bounty)" : ""}</small>
-          <small>{[...lastBattle.shares].map(([who, n]) => `${who === VX.YOU ? "you" : who} ${fmt(Math.floor(n))}`).join(" · ")}</small></span></div>}
+        {lastBattle && <div className="docks-item docks-battle"><span><strong>{lastBattle.attackerWon === null ? "🤝" : lastBattle.attackerWon ? "🏆" : "💥"} {lastBattle.attacker.name} → {lastBattle.defender.name}: {lastBattle.attackerWon === null ? "a draw" : lastBattle.attackerWon ? "raid won" : "raid beaten off"}</strong>
+          {lastBattle.duels.map((x, i) => <small key={i}>{x.attacker.name} ({WR.islandTierName(WR.islandTier(w, x.attacker))}) vs {x.defender ? `${x.defender.name} (${WR.islandTierName(WR.islandTier(w, x.defender))}): ${["⛵ Broadside", "🤺 Boarding", "🏰 Siege"].slice(0, x.rounds.length).map((n, k) => `${n} ${x.rounds[k] ? "✓" : "✗"}`).join(" · ")} → ${x.won ? "won" : "lost"}` : "no match within one tier: sat it out"}</small>)}
+          <small>loot {fmt(lastBattle.loot)} + bounty {fmt(lastBattle.bounty)} RF{lastBattle.war ? " (war: double bounty)" : ""}{lastBattle.shares.size ? ` · ${[...lastBattle.shares].map(([who, n]) => `${who === VX.YOU ? "you" : who} ${fmt(Math.floor(n))}`).join(" · ")}` : ""}</small></span></div>}
         {book.current.battles.length > 1 && <small>{book.current.battles.length} battles fought on the docks so far.</small>}
         <details><summary>War rules (all settings, tunable)</summary>
-          <p className="docks-note">Shield {WR.WAR.SHIELD_DAYS} days after founding · loot vault starts with {WR.WAR.LOOT_FROM_FOUNDING_BPS / 100}% of the flag's RF and gets {WR.WAR.LOOT_FROM_HARVEST_BPS / 100}% of every harvest's shared half; anyone can add to it · bounty {WR.WAR.DOCKS_BOUNTY_BPS / 100}% of the Docks rewards reserve per win (double in a declared war) · {WR.WAR.TO_FIGHTERS_BPS / 100}% of loot to the fighters by level, the rest to the winner's vault · loss per battle {WR.WAR.TIER_NAMES.map((n, t) => `${n} ${WR.lossBps(t) / 100}%`).join(", ")} · home advantage {WR.WAR.HOME_ADVANTAGE * 100}% · empty defense seats filled by the defender's strongest islands at {WR.WAR.EMPTY_SEAT_STRENGTH * 100}% · raid cooldown {WR.WAR.RAID_COOLDOWN_HOURS} h per target outside a war · war lasts {WR.WAR.WAR_DAYS} days · {WR.WAR.INTRO_DINGHIES} free dinghies per new flag · tiers by battle power: {WR.WAR.TIERS.map((m, t) => `${WR.WAR.TIER_NAMES[t]} ${fmt(m)}+`).join(", ")} (tier skins later). Island level = rank (reward weight) + log₂(Friends); strength = level × √Friends. On chain, each round is one Dice roll.</p></details>
+          <p className="docks-note">Shield {WR.WAR.SHIELD_DAYS} days after founding · loot vault starts with {WR.WAR.LOOT_FROM_FOUNDING_BPS / 100}% of the flag's RF and gets {WR.WAR.LOOT_FROM_FEES_BPS / 100}% of every harvest of its AMM fees; anyone can add to it · bounty {WR.WAR.DOCKS_BOUNTY_BPS / 100}% of the Docks rewards reserve per win (double in a declared war) · {WR.WAR.TO_FIGHTERS_BPS / 100}% of loot to the fighters by level, the rest to the winner's vault · loss per battle {WR.WAR.TIER_NAMES.map((n, t) => `${n} ${WR.lossBps(t) / 100}%`).join(", ")} · home advantage {WR.WAR.HOME_ADVANTAGE * 100}% · every island aboard duels a defender within one island tier ({WR.WAR.ISLAND_TIERS.map((m, t) => `tier ${t + 1} ${fmt(m)}+`).join(", ")}); no match, it sits out · a sunk ship comes back after {WR.WAR.SHIP_REGEN_HOURS} h · raid cooldown {WR.WAR.RAID_COOLDOWN_HOURS} h per target outside a war · war lasts {WR.WAR.WAR_DAYS} days · {WR.WAR.INTRO_DINGHIES} free dinghies per new flag · flag tiers by battle power: {WR.WAR.TIERS.map((m, t) => `${WR.WAR.TIER_NAMES[t]} ${fmt(m)}+`).join(", ")} (tier skins later). Island level = rank (reward weight) + log₂(Friends); strength = level × √Friends. On chain, each round is one Dice roll.</p></details>
       </div>; })() : menu === "tokens" ? <>
         <div className="docks-rf"><span>Your RF <b>{fmt(econ.current.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Into pools <b>{fmt(econ.current.pooled)}</b></span><span>Docks pool <b>{fmt(econ.current.docksPool)}</b></span><span>Platform fee <b>{PLATFORM_FEE_BPS / 100}%</b></span></div>
         <p className="docks-note">Launch a token from your island for {LAUNCH_FEE.toLocaleString()} RF. Airdrops and claims land in each Friend's own wallet; every claim costs RF. Launch fees and claim prices go into {poolName(w, h)} (the launching island's flag pool, or the shared Docks pool): nothing is burned. In this preview it's all simulated; the contracts are in the submission.</p>
@@ -1212,8 +1235,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <li><strong>Holes:</strong> if a saved Friend leaves your wallet (sending it clears its activation) or is deactivated, its spot becomes a hole in the island. The hole stays until that Friend comes back (it heals for free) or you fill it with another activated Friend of the same generation (normal arrange fee).</li>
         <li><strong>Arranging is the game:</strong> Arrange → tap a Friend and move it, or <em>Pick several</em> / <em>All</em> to move a group together; each Friend must touch another along part of a side. Save on chain pays RF for every Friend whose spot changed ({Object.entries(ARRANGE_FEE).map(([g, f]) => `Gen ${g}: ${f}`).join(", ")}), plus gas, into a pool (your flag's, or the shared Docks pool). Unmoved Friends are free; Undo returns to your last save.</li>
         <li><strong>No burning:</strong> every fee in The Docks goes into a permanent RF/ETH pool: your flag's, or the shared Docks pool. A flag pool's trading fees buy RF: half back into the pool, half shared as members' allowances. The shared Docks pool keeps everything from islands in no flag as liquidity; its trading fees are saved as earned, in ETH and RF, in the Docks rewards reserve for leaders and games later. The platform fee is {PLATFORM_FEE_BPS / 100}% for now (never above 5%).</li>
-        <li><strong>Dock:</strong> tap any island on the map and hit ⚓ Dock (free), or Docks → pick a loading zone next to another island. Docked (or bridged) to someone? 💬 Chat with them. Every island takes one berth whatever its size, so how far you can roam depends on how many islands there are. Docking and moving cost only gas. Neighbours are joined by a gangway.</li>
-        <li><strong>Bridges:</strong> can't dock next to an island? Build a bridge to it: free, like docking. It lasts until either island moves.</li>
+        <li><strong>Dock:</strong> tap any island on the map and hit ⚓ Dock ({DOCKING_FEE} RF docking fee, to The Docks fund), or Docks → pick a loading zone next to another island. Docked (or bridged) to someone? 💬 Chat with them. Every island takes one berth whatever its size, so how far you can roam depends on how many islands there are. Docking and moving cost only gas. Neighbours are joined by a gangway.</li>
+        <li><strong>Bridges:</strong> can't dock next to an island? Build a bridge to it: a {DOCKING_FEE} RF docking fee, like docking. It lasts until either island moves. Connected islands can be walked onto (a toll to the owner may come later).</li>
         <li><strong>Visit:</strong> for now only islands under a flag can be walked onto: every island of your flag, and, just to explore, a flag's islands your island is docked next to or bridged to.</li>
         <li><strong>Control any Friend:</strong> tap (or click) one of your Friends on its land or walking in a line: <em>Control</em> it (taken out of a line, it breaks off), <em>Break off crew</em> (it and those behind it follow it), <em>Call</em> it, <em>Send home</em>, <em>Pick</em>, make it the island's <em>captain</em> (the Friend you pick when you connect becomes captain; saved on chain once, you board as it every time) or <em>mayor</em> (a second Friend that stays home and greets visitors), or <em>Name</em> it (a public name, saved on chain). 👥 Crew → <em>Change Friend</em>, <em>Call all</em> to the primary leader, <em>Make primary leader</em>, <em>Walk solo</em>, <em>All go home</em>.</li>
         <li><strong>Flags:</strong> 🚩 Flags → plant a flag where your lead stands and lock RF. Anyone can lock more until it hits {fmt(VX.FLAG_TARGET)} RF; then it's founded: half permanent RF/ETH liquidity whose trading fees buy RF (half back into the pool, half shared), half the founders' allowances for building. Lockers hold soulbound founder marks. Everyone brings one island: founders free, others enroll ({fmt(VX.ENROLL_PRICE)} RF, open the first {VX.ENROLL_WINDOW_DAYS} days, then as voted). Every Friend is a vote, founders' multiplied by 1 + their share of the pool; vote on the pool share and enrollment. Spend your allowance on items for your flagged island (build timers, boost with RF); leaving takes a removal request and an epoch (~21 days), and the flag's items on your island are raffled to those who stayed. Not full in {VX.FLAG_DAYS} days? Refunds. Launch tokens to your flag.</li>

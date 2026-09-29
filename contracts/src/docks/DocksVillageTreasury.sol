@@ -30,9 +30,10 @@ interface IDocksBuyback {
 ///   each locked). Enrollment fees: half liquidity, half the enrollee's allowance. Allowances are
 ///   spent only on items for the member's village island (DocksItems); that RF goes to the
 ///   village's liquidity too. A member's unspent allowance goes to liquidity when they leave.
-/// - `harvest` collects a village pool's trading fees and buys RF with the WETH part. `poolBpsOf`
-///   of it (half by default, set by village vote) goes back into the pool; the rest is shared
-///   between members by Friend count.
+/// - `harvest` collects a village pool's trading fees and buys RF with the WETH part. LOOT_BPS
+///   of it goes to the flag's loot vault (`lootOf`, the only RF a flag can lose in war); of the
+///   rest, `poolBpsOf` (half by default, set by village vote) goes back into the pool and the
+///   remainder is shared between members by Friend count.
 /// - The shared Docks pool: every fee from islands in no village stays in it as permanent
 ///   liquidity. Its trading fees are kept as earned, in RF and WETH, in the Docks rewards
 ///   reserve (`docksRewardsRf`, `docksRewardsWeth`), set aside for leaders and games later.
@@ -44,6 +45,7 @@ contract DocksVillageTreasury is IDocksVillageTreasury, IDocksFeeSink, Reentranc
 
     uint16 public constant DEFAULT_POOL_BPS = 5000; // half of every buyback back into the pool
     uint16 public constant MAX_PLATFORM_FEE_BPS = 500; // 5%
+    uint16 public constant LOOT_BPS = 1000; // 10% of every flag harvest into the flag's loot vault
     uint256 public constant DOCKS_POOL = 0; // the shared pool of islands in no village
 
     error NotVillages();
@@ -61,7 +63,9 @@ contract DocksVillageTreasury is IDocksVillageTreasury, IDocksFeeSink, Reentranc
     event LiquidityQueued(uint256 indexed villageId, uint256 rf);
     event LiquidityAdded(uint256 indexed villageId, uint256 rf);
     event DocksRewardsCollected(uint256 rf, uint256 weth);
+    event DocksFeeReceived(uint256 amount, uint256 platformCut);
     event Harvested(uint256 indexed villageId, uint256 rfFees, uint256 wethFees, uint256 rfBought, uint256 toPool, uint256 shared);
+    event LootAdded(uint256 indexed villageId, uint256 rf);
     event FeeReceived(uint256 indexed villageId, uint256 amount, uint256 platformCut);
     event PlatformFeeSet(uint16 bps);
     event PlatformSet(address platform);
@@ -80,6 +84,8 @@ contract DocksVillageTreasury is IDocksVillageTreasury, IDocksFeeSink, Reentranc
     mapping(uint256 villageId => mapping(address wallet => uint256)) public credited; // beyond the founder half
     mapping(uint256 villageId => mapping(address wallet => uint256)) public spent;
     mapping(uint256 villageId => uint16) private _poolBps; // stored +1 so 0 can mean "unset"
+    /// @notice A flag's loot vault: what it could lose in war (the war contract comes later).
+    mapping(uint256 villageId => uint256) public lootOf;
     uint256 public docksRewardsRf; // the Docks pool's trading fees, kept for leaders and games later
     uint256 public docksRewardsWeth;
     address public platform;
@@ -126,6 +132,14 @@ contract DocksVillageTreasury is IDocksVillageTreasury, IDocksFeeSink, Reentranc
             revert NotFeePayer();
         }
         _fee(villages.villageOf(islandId), amount);
+    }
+
+    /// @inheritdoc IDocksFeeSink
+    function onDocksFee(uint256 amount) external {
+        if (msg.sender != address(villages.islands())) revert NotFeePayer();
+        uint256 cut = _platformCut(amount);
+        docksRewardsRf += amount - cut;
+        emit DocksFeeReceived(amount, cut);
     }
 
     modifier onlyVillages() {
@@ -218,6 +232,10 @@ contract DocksVillageTreasury is IDocksVillageTreasury, IDocksFeeSink, Reentranc
             bought = buyback.buyRf(wethFees, minRfOut, address(this));
         }
         uint256 total = rfFees + bought;
+        uint256 loot = total * LOOT_BPS / 10_000;
+        lootOf[villageId] += loot;
+        emit LootAdded(villageId, loot);
+        total -= loot;
         toPool = total * poolBpsOf(villageId) / 10_000;
         pendingLiquidity[villageId] += toPool;
         shared = _share(villageId, total - toPool);

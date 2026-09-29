@@ -31,6 +31,8 @@ interface IDocksPlacementGate {
 /// the pool of the island's village, or the shared Docks pool.
 interface IDocksFeeSink {
     function onFee(uint256 islandId, uint256 amount) external;
+    /// @notice A docking fee: into The Docks fund (the Docks rewards reserve).
+    function onDocksFee(uint256 amount) external;
 }
 
 /// @notice The Docks: floating islands made of activated Rare Friends.
@@ -52,8 +54,9 @@ interface IDocksFeeSink {
 /// - Docking: islands float on one shared berth grid, one island per berth whatever its size,
 ///   so the world grows with the number of islands. Dock at a free berth next to another
 ///   island (a loading zone); islands on neighbouring berths are connected. Gas only.
-/// - Bridges: link your island to one you can't dock next to. Free (gas only), like docking.
-///   A bridge lasts until either island moves.
+/// - Docking fee: DOCKING_FEE RF each time an island docks or builds a bridge, into The Docks
+///   fund. Bridges link your island to one you can't dock next to and last until either
+///   island moves. Connected islands can be walked onto (a toll may come later).
 /// - Access: each island is open or invite-only with approved visitors.
 /// - Captain: the Friend its owner controls whenever they board the island (the Friend they
 ///   choose when they first connect; changeable any time). Mayor: a second Friend of the
@@ -133,6 +136,9 @@ contract DocksIslands {
 
     IDocksGenerations public immutable generations;
     IERC20 public immutable rf;
+
+    /// @notice RF paid each time an island docks or builds a bridge, into The Docks fund.
+    uint256 public constant DOCKING_FEE = 2 ether;
 
     uint256 public totalIslands;
     uint256 public dockedCount;
@@ -363,6 +369,7 @@ contract DocksIslands {
         _berth[key] = islandId + 1;
         berthOf[islandId] = Berth(x, y, true, epoch + 1);
         ++dockedCount;
+        _chargeDocking();
         emit Docked(islandId, x, y);
     }
 
@@ -387,13 +394,14 @@ contract DocksIslands {
         return v == 0 ? 0 : v - 1;
     }
 
-    /* ── bridges (free: island to island costs nothing but gas) ── */
+    /* ── bridges (a docking fee, like docking) ── */
 
     function buildBridge(uint256 from, uint256 to) external {
         _onlyOwner(from);
         if (connected(from, to) || from == to) revert AlreadyConnected();
         if (!berthOf[from].docked || !berthOf[to].docked) revert NotDocked();
         _bridge[_pair(from, to)] = _epochs(from, to);
+        _chargeDocking();
         emit BridgeBuilt(from, to);
     }
 
@@ -504,6 +512,16 @@ contract DocksIslands {
         }
         rf.safeTransferFrom(msg.sender, address(fees), amount);
         fees.onFee(islandId, amount);
+    }
+
+    /// @dev The docking fee: to The Docks fund; burned only before the contracts are wired.
+    function _chargeDocking() private {
+        if (address(fees) == address(0)) {
+            rf.safeTransferFrom(msg.sender, BURN, DOCKING_FEE);
+            return;
+        }
+        rf.safeTransferFrom(msg.sender, address(fees), DOCKING_FEE);
+        fees.onDocksFee(DOCKING_FEE);
     }
 
     function _onlyOwner(uint256 islandId) private view {

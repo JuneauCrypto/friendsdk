@@ -19,9 +19,11 @@ is a saved layout that belongs to the wallet that built it, and it can't be sold
   **loading zone** next to another island; neighbours are joined by a **gangway**. Docking
   and moving an island cost only gas.
 - **Tap to dock.** Tap any island on the map for its options: **⚓ Dock** next to it, **🌉 Bridge**
-  or **💬 Chat**. Island to island is free: docking and bridges cost no RF (gas only on chain).
-- **Bridges.** Can't dock next to an island you want? Build a free **bridge** to it. It lasts
-  until either island moves.
+  or **💬 Chat**. Docking and bridges each cost a **2 RF docking fee**, into The Docks fund (the
+  Docks rewards reserve). Once connected, your Friends can walk onto that island (free for now;
+  a toll to its owner and the Docks may come later).
+- **Bridges.** Can't dock next to an island you want? Build a **bridge** to it (2 RF docking
+  fee). It lasts until either island moves.
 - **Chat.** Docked or bridged to someone else's island, you can chat with them (simulated:
   sample islands answer on their own; chat between real players needs a message relay).
 - **Docks screen.** Islands and flags are shown separately, with each island's artwork and
@@ -75,7 +77,7 @@ app's built-in browser (the SDK has no WalletConnect).
 | **Holes** | When the minute check finds a saved Friend gone from the wallet (or deactivated), its spot turns into a hole (drawn dark with a red dashed edge). 🏝 Islands lists holes with a **Fill with…** picker (same generation only; the Friend that left fills its own hole for free). It heals by itself if that Friend returns. ⚙️ More → *Preview: a Friend leaves your wallet* shows the flow without sending anything. |
 | **Islands** | Each island has its own grid of 4 × 4-tile cells; Friends cover whole cells at true size (Gen 1 = 30 tiles … Gen 6 = 4), and rounding becomes boardwalk. 🏝 Islands → switch islands, **＋ New island**, and deploy any Friend to another island from its row. |
 | **Docking** | ⚓ Docks → the berth map: one square per island, glowing loading zones next to docked islands. Pick one to dock or move (gas only). Islands are drawn centred in their berth with water between; neighbours are joined by a gangway you can walk. |
-| **Bridges** | On the berth map, tap an island you aren't next to (or **Bridge to …**): free (gas only). The bridge is a walkway over the water and lasts until either island moves. |
+| **Bridges** | On the berth map, tap an island you aren't next to (or **Bridge to …**): a 2 RF docking fee, to The Docks fund. The bridge is a walkway over the water and lasts until either island moves. |
 | **Access** | For now only islands under a flag can be walked onto: every island of your flag, plus, as a visitor who can only explore, a flag's islands once your island is docked next to or bridged to one of them. Islands with no flag are closed to visitors. |
 | **Your whole wallet** | `roster.ts` reads the wallet that holds your Friend (`ownerOf`), its owner-filtered `Transfer` history (the same account-filtered method the SDK runtime's picker uses; no collection scan) and then generation + activation tier for every held Friend through Multicall3, 250 per call. Inactive Friends are left out. Re-run every minute, so bought, sold, activated or upgraded Friends join, leave or update. Adding by number stays as a fallback. |
 | **Arrange** | ✥ Arrange → tap any Friend on the island (or **Next ▸**) and step it one cell (↖ ↗ ↙ ↘ or arrow keys); **Pick several** to move a group together, **All** for the whole island shape (moving the whole shape together costs nothing). Stepping onto a same-size neighbour swaps them, so packed islands can be reshuffled. **Auto-arrange** packs the island into one connected block. **Done** / **Save** refuse an island where a Friend doesn't touch another along part of a side. The bar shows how many Friends moved and the RF that saving burns. |
@@ -97,32 +99,37 @@ in-game under ⚔️ War → War rules, so the balance can be tuned and new dyna
   1M): cheap to start early, joining an existing flag makes more sense later.
 - **Loot vault.** Each flag has one, and it's the only thing a flag can lose: never a member's
   wallet or allowance. It starts with 10% of the flag's founding RF (from the liquidity half),
-  gets 20% of each harvest's shared half, and anyone can add to it. A bigger vault is a bigger
+  gets 10% of every harvest of its AMM fees (on chain: `DocksVillageTreasury.LOOT_BPS`,
+  `lootOf`), and anyone can add to it. A bigger vault is a bigger
   target, and a bigger buffer, because losses are a percentage.
 - **Shield.** A new flag has 7 days to get battle ready (a readiness checklist: islands, a
   defense item, an attack item, a real ship, a funded vault). No raids either way. After that,
   anyone matched to it can raid it; nobody has to declare anything.
-- **Tiers.** From the flag's battle power (islands' level × √Friends × items). Raid your tier or
-  one up, never down. Tier 1 (Driftwood) is wide because there are few players at first. Tier
-  skins come later.
-- **Ships.** A raid needs ships; their seats cap how many islands attack (Dinghy 1, Sloop 3,
-  Frigate 6, Galleon 12; bigger ones cost more and add attack). Every new flag gets 2 free
-  dinghies. The defender gets the same number of seats. Islands join first come, first served;
-  empty defense seats are held by the defender's strongest islands at half strength.
-- **Battle.** Best of 3 rounds: Broadside (ships + attack items), Boarding (raw strength), Siege
+- **Tiers.** Every island has one (level × √Friends × items). Nobody fights more than one tier
+  away: each island aboard a ship duels a defending island of its tier, one above or one below,
+  so it stays fair however islands grow. No match within a tier: that island sits it out. Flag
+  tiers (Driftwood, Harbor, Fleet, Armada, Empire) are shown for pride; tier skins come later.
+- **Ships and tours.** A member sends a ship on a tour to another flag. Islands board first
+  come, first served; members can set their island to auto-join tours. It sails when full if the
+  deployer chose auto-sail, or when the deployer says so. Ships carry islands up to their tier:
+  Sloop (3 seats, tiers 1–2), Frigate (6, tiers 1–3), Galleon (12, any tier); a Dinghy takes one
+  island of any tier, a solo one-on-one tour. Every new flag gets 2 free dinghies. A ship on a
+  lost raid sinks and comes back after 24 hours.
+- **Duels.** Best of 3 rounds: Broadside (ships + attack items), Boarding (raw strength), Siege
   (defense items count double; home advantage +10%). Each round the attacker wins with chance
-  A ÷ (A + D); on chain each round is a Dice roll.
+  A ÷ (A + D); on chain each round is a Dice roll. The raid goes to whoever wins more duels; a
+  tie moves no loot.
 - **Loot.** The winner takes a share of the loser's vault (10% in tier 1, gentler as tiers go
-  up: 6.7%, 5%, 4%, 3.3%) plus a 1% bounty from the Docks rewards reserve (double in a declared
-  war). Half goes to the islands that fought, split by level and claimable to the Friend's own
-  wallet; half into the winner's vault. Lose a raid and the ships that sailed sink.
+  up: 6.7%, 5%, 4%, 3.3%) × the share of duels it won, plus a 1% bounty from the Docks rewards
+  reserve (double in a declared war). Half goes to the winning side's islands that fought, split
+  by level and claimable to the Friend's own wallet; half into the winner's vault.
 - **War items.** Cannon, Sea wall, Armory, Fort (plus the Watchtower) add attack or defense to
   the island they're on, capped at +60% a side.
 - **Declaring war.** A flag votes to declare war on another; for 3 days its raids on that flag
   skip the 24 h raid cooldown and pay a double bounty.
 
-Not built yet: a war contract (vaults, ships, seats, Dice rounds), real-time joining between
-players, and tier skins.
+Not built yet: a war contract (ships, tours, duels with Dice; the loot vault's harvest share is
+already in the treasury), real-time boarding between players, and tier skins.
 
 ## Preview limits (what needs a server next)
 
@@ -155,7 +162,7 @@ pushes changes to connected players instead of polling.
 | Create an island on chain | gas only (happens on an island's first save; islands are not tokens) | — |
 | Fill a hole | the filling Friend's arrange fee (free if the Friend that left comes back) | the island's village pool, or the shared Docks pool |
 | Dock / move an island | gas only | — |
-| Build a bridge | free (gas only) | — |
+| Dock or build a bridge | 2 RF docking fee, plus gas | The Docks fund (Docks rewards reserve) |
 | Launch a token | 1,000 RF | the launching island's village pool, or the Docks pool |
 | Claim from a launch | launch's claim price (set by launcher) | the launching island's village pool, or the Docks pool |
 | Own items, boosts, raffle tickets | item price · RF per boost · 100 RF a ticket | the island's village pool, or the shared Docks pool |
@@ -195,8 +202,9 @@ needs backing.
   - *Docking (gas only):* one berth per island whatever its size; `dock(islandId, x, y)` at
     a free berth next to a docked island (`isLoadingZone`), also to move; `undock`;
     `islandAtBerth`; `connected(a, b)` = neighbouring berths or a live bridge.
-  - *Bridges:* `buildBridge(from, to)` is free (gas only), like docking; a bridge records
-    both islands' berth epochs and ends when either moves.
+  - *Docking fee:* `dock` and `buildBridge(from, to)` each pay `DOCKING_FEE` (2 RF) into The
+    Docks fund (`treasury.onDocksFee` → `docksRewardsRf`); a bridge records both islands'
+    berth epochs and ends when either moves.
   - *Access:* open / invite-only islands with approved visitors, set by the island's owner.
     Ownership and activation are checked through the live activation manager
     (`positions(generations, id)`).

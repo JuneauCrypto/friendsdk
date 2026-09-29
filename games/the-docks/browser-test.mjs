@@ -130,7 +130,7 @@ try {
   await game.getByRole("img", { name: /Map: \d+ docked islands, \d+ loading zones/ }).waitFor();
   await shot("map");
   await game.locator(".docks-slots button").first().click();
-  await game.getByText(/Your island docked next to .*: free, no RF/).waitFor();
+  await game.getByText(/Your island docked next to .*: 2 RF docking fee into The Docks fund/).waitFor();
   await page.waitForTimeout(600);
   await shot("docked");
   // docked with someone else: chat (simulated replies from sample islands)
@@ -176,7 +176,7 @@ try {
   // save on chain (simulated): creates the island and pays RF per Friend moved into the Docks pool (2 × Gen 3 = 40 RF)
   if (many) {
     await game.getByRole("button", { name: /Save · 10,002 moved · 55k RF/ }).click();
-    await game.getByText(/Saving costs 55k RF; you have 5,000/).waitFor();
+    await game.getByText(/Saving costs 55k RF; you have 4,998/).waitFor();   // 5,000 − the 2 RF docking fee
   } else {
     await game.getByRole("button", { name: /Save · 2 moved · 40 RF/ }).click();
     await game.getByText(/Saved on chain \(simulated\): created Island #\d+ on chain · 2 Friends moved · 40 RF into the Docks pool/).waitFor();
@@ -274,7 +274,7 @@ try {
   }
   await shot("tokens");
   const rfText = await game.locator(".docks-rf").textContent();
-  if (!many) { assert.match(rfText, /Your RF\s*3,950/, "5,000 − 40 save − 2×5 claims − 1,000 launch"); assert.match(rfText, /Into pools\s*1,050/); assert.match(rfText, /Platform fee\s*0%/); }
+  if (!many) { assert.match(rfText, /Your RF\s*3,948/, "5,000 − 2 docking fee − 40 save − 2×5 claims − 1,000 launch"); assert.match(rfText, /Into pools\s*1,050/); assert.match(rfText, /Platform fee\s*0%/); }
   await game.getByRole("button", { name: "Close Tokens" }).click();
   if (!many) {
     // island to island is free: a bridge costs no RF
@@ -282,9 +282,9 @@ try {
     await game.locator(".docks-isle").first().waitFor();
     assert.ok(await game.locator(".docks-isle img").count() > 0, "the docks show the islands' artwork");
     const bridge = game.getByRole("button", { name: /^Bridge to / }).first();
-    assert.equal(await bridge.locator("small").textContent(), "free");
+    assert.equal(await bridge.locator("small").textContent(), "2 RF", "a 2 RF docking fee");
     await bridge.click();
-    await game.getByText(/Bridge built from Your island to .*: free, no RF/).waitFor();
+    await game.getByText(/Bridge built from Your island to .*: 2 RF docking fee into The Docks fund/).waitFor();
     await shot("bridge");
     for (let i = 0; i < 5; i++) await game.getByRole("button", { name: "Zoom out" }).click();
     await page.waitForTimeout(1500); await shot("world");
@@ -352,12 +352,14 @@ try {
     await game.getByRole("button", { name: "Build · my RF" }).click();
     await game.getByText(/⛵ Sloop on the slipway for Dock Town \(your RF, simulated\): ready in 6 h/).waitFor();
     await game.getByRole("button", { name: "⏩ Finish ships" }).click();
+    // send the sloop on tour: your island boards; it isn't full (3 seats), so sail it by hand
     await game.locator(".docks-ship", { hasText: "Sloop" }).locator("input").check();
     const reed = game.locator(".docks-item", { hasText: "Reed Harbor ·" });
-    await reed.getByText(/3 seats picked/).waitFor();
-    await reed.getByRole("button", { name: "⚔️ Raid" }).click();
-    await game.getByText(/Dock Town (won|lost) the raid on Reed Harbor \([✓✗ ]+, simulated\)/).waitFor();
-    await game.locator(".docks-battle").waitFor();
+    await reed.getByRole("button", { name: "⛵ Send on tour" }).click();
+    await game.getByText(/⛵ Sloop on tour to Reed Harbor \(simulated\): 1\/3 aboard\. It sails when full\./).waitFor();
+    await game.getByRole("button", { name: "⛵ Sail now" }).click();
+    await game.getByText(/Dock Town (won|lost|drew) the raid on Reed Harbor \(duels [✓✗–]( [✓✗–])*, simulated\)/).waitFor();
+    await game.locator(".docks-battle").getByText(/Your island \(tier \d\) vs Reed Harbor|Your island \(tier \d\) vs no match|Reading Row \(tier \d\)/).first().waitFor();
     await shot("war");
     // declare war by vote: passes with Dock Town's votes, then raids skip the cooldown
     await reed.getByRole("button", { name: "🗳 Vote for war" }).click();
@@ -413,7 +415,7 @@ try {
     }
     const pop = game.getByRole("menu", { name: /options$/ });
     await pop.getByText(/Friends? ·/).waitFor();
-    assert.ok(await pop.getByRole("menuitem", { name: /⚓ Dock Your island here · free|🌉 Bridge from Your island · free|💬 Chat with/ }).count(), "island options offer dock, bridge or chat");
+    assert.ok(await pop.getByRole("menuitem", { name: /⚓ Dock Your island here · 2 RF|🌉 Bridge from Your island · 2 RF|💬 Chat with/ }).count(), "island options offer dock, bridge or chat");
     await shot("island-options");
     await pop.getByRole("menuitem", { name: "Close" }).click();
     await game.getByRole("button", { name: "Center on lead" }).click();
