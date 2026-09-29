@@ -132,19 +132,28 @@ export function refund(w: World, e: Economy | null, v: Village, who = YOU) {
   return amount;
 }
 
-/* ── people: bring islands, each at war or at peace ── */
+/* ── people: up to two islands per wallet, one at peace and one at war ── */
 
-/** A founder's first island joins free; every further island (anyone's) enrolls. */
+/** A wallet's island in the flag at a stance, or null. */
+export const islandAt = (v: Village, who: string, stance: Stance) => islandsOf(v, who).find(p => (v.stance.get(p) ?? "peace") === stance) ?? null;
+function stanceCheck(v: Village, p: Plot, stance: Stance) {
+  const has = islandAt(v, walletOf(p), stance);
+  if (has) throw new Error(`You already have a ${stance} island in ${v.name} (${has.name}): one at peace and one at war.`);
+}
+/** A founder's first island joins free; the second (the other stance) enrolls. */
 export const bringsFree = (v: Village, who: string) => weightOf(v, who) > 0 && !islandsOf(v, who).length;
 export function bring(w: World, v: Village, p: Plot, stance: Stance = "peace") {
   if (!weightOf(v, walletOf(p))) throw new Error(`Only ${v.name}'s founders bring an island free; everyone else enrolls.`);
-  if (!bringsFree(v, walletOf(p))) throw new Error(`Your free island is already in ${v.name}: enroll more islands.`);
-  joinChecks(w, v, p); addMember(w, v, p, stance);
+  if (!bringsFree(v, walletOf(p))) throw new Error(`Your free island is already in ${v.name}: enroll the other one.`);
+  stanceCheck(v, p, stance); joinChecks(w, v, p); addMember(w, v, p, stance);
 }
-/** War or peace: switch one of your islands in the flag. */
+/** War or peace: switch one of your islands in the flag. With both, the two swap. */
 export function setStance(w: World, v: Village, p: Plot, stance: Stance) {
   if (!v.members.includes(p)) throw new Error(`${p.name} isn't in ${v.name}.`);
-  v.stance.set(p, stance); w.version++;
+  const cur = v.stance.get(p) ?? "peace"; if (cur === stance) return null;
+  const other = islandAt(v, walletOf(p), stance);
+  v.stance.set(p, stance); if (other) v.stance.set(other, cur);
+  w.version++; return other;
 }
 function joinChecks(w: World, v: Village, p: Plot) {
   const until = w.cooldown.get(p) ?? 0;
@@ -155,7 +164,7 @@ function joinChecks(w: World, v: Village, p: Plot) {
 export function enroll(w: World, e: Economy | null, v: Village, p: Plot, stance: Stance = "peace") {
   const price = enrollPrice(v); if (!price) throw new Error(`${v.name}'s enrollment is closed.`);
   if (e && e.rf < price) throw new Error(`Enrolling costs ${price.toLocaleString()} RF; you have ${e.rf.toLocaleString()}.`);
-  joinChecks(w, v, p); addMember(w, v, p, stance);
+  stanceCheck(v, p, stance); joinChecks(w, v, p); addMember(w, v, p, stance);
   if (e) e.rf -= price;
   const who = walletOf(p);
   v.pool += price; v.credited.set(who, (v.credited.get(who) ?? 0) + price / 2); v.pendingLiquidity += price / 2;

@@ -34,6 +34,10 @@ export const PRODUCERS: Record<string, { good: number; perHour: number }> = {
   Kiln: { good: 4, perHour: 1 },
 };
 
+/** Extra output multiplier for an island (its flag Friend's level); set by the game. */
+let boostOf: (w: World, p: Plot) => number = () => 1;
+export function setPeaceBoost(fn: (w: World, p: Plot) => number) { boostOf = fn; }
+
 export type Listing = { id: number; seller: string; from: Plot; good: number | null; item: Item | null; qty: number; price: number; at: number };
 export type Market = {
   inv: Map<string, number[]>;            // wallet → goods held
@@ -51,7 +55,7 @@ export function outputOf(w: World, p: Plot, now = Date.now()) {
   const out = GOODS.map(() => 0);
   if (!peaceful(w, p)) return out;
   const items = itemsOn(w, p).filter(it => isReady(it, now));
-  const boost = items.some(it => CATALOG[it.kind].name === "Market stall") ? 1 + PEACE.MARKET_BOOST : 1;
+  const boost = (items.some(it => CATALOG[it.kind].name === "Market stall") ? 1 + PEACE.MARKET_BOOST : 1) * boostOf(w, p);
   for (const it of items) { const pr = PRODUCERS[CATALOG[it.kind].name]; if (pr) out[pr.good] += pr.perHour * boost; }
   return out;
 }
@@ -122,7 +126,7 @@ export function buy(w: World, m: Market, e: Economy | null, l: Listing, qty: num
   l.qty -= qty; if (l.qty <= 0) m.listings = m.listings.filter(x => x !== l);
   m.sales.push({ good: nameOf(l), qty, total, tax, buyer: who, seller: l.seller, at: Date.now() });
   w.version++;
-  return { total, tax, flag: f?.name ?? null };
+  return { total, tax, flag: f?.name ?? null, village: f };
 }
 /** Sample islands post goods for sale from their peace land (simulated market makers). */
 export function sampleListings(w: World, m: Market, rand = Math.random) {

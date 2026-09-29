@@ -32,9 +32,11 @@ interface IDocksVillageItems {
 /// take their RF back. Full: `found` (anyone) sends it all to the village treasury: half
 /// becomes permanent liquidity, half the founders' allowances. Nothing can be withdrawn after.
 ///
-/// People. Everyone brings one island (one per wallet; a wallet's other islands can be in
-/// other villages, one village per island): the planter's is the seat; founders bring theirs
-/// free; anyone else enrolls for the enrollment price (half liquidity, half their allowance).
+/// People. A wallet brings up to two islands: one at peace (makes and trades goods) and one at
+/// war (boards ships, defends, forms the border). A wallet's other islands can be in other
+/// villages, one village per island. The planter's island is the seat, at peace; a founder's
+/// first island is free; every other island enrolls for the enrollment price (half liquidity,
+/// half the owner's allowance). An island can switch stance; with both, they swap.
 /// Enrollment is open for ENROLL_WINDOW after founding, then it's what the village votes.
 /// The population (Friends on the village's islands) can be capped by vote: while full, no
 /// island joins and no Friend is added to a village island.
@@ -115,6 +117,9 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
         uint256[4] tally; // yes/no: [no, yes]; enrollment: per choice
     }
 
+    /// @notice Peace islands make and trade; war islands fight and form the border.
+    enum Stance { Peace, War }
+
     error NotIslandOwner();
     error NotDocked();
     error AlreadyInVillage();
@@ -153,6 +158,7 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
     event Refunded(uint256 indexed villageId, address indexed wallet, uint256 amount);
     event Joined(uint256 indexed villageId, uint256 indexed islandId, address indexed wallet, uint256 paid);
     event Left(uint256 indexed villageId, uint256 indexed islandId);
+    event StanceSet(uint256 indexed villageId, uint256 indexed islandId, Stance stance);
     event Proposed(uint256 indexed proposalId, uint256 indexed villageId, Kind kind, uint64 ends);
     event Voted(uint256 indexed proposalId, address indexed wallet, uint8 choice, uint256 power);
     event ProposalSettled(uint256 indexed proposalId, uint8 winner);
@@ -174,7 +180,9 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
     uint256 public villageCount;
     mapping(uint256 villageId => Village) private _villages;
     mapping(uint256 islandId => uint256 villageId) private _villageOf;
-    mapping(uint256 villageId => mapping(address wallet => uint256 islandId)) public islandOf;
+    /// @notice A wallet's island in the village at each stance (0: none).
+    mapping(uint256 villageId => mapping(address wallet => mapping(Stance => uint256 islandId))) public islandAt;
+    mapping(uint256 islandId => Stance) public stanceOf;
     mapping(uint256 villageId => address[]) private _members;
     mapping(uint256 villageId => mapping(address wallet => uint256 indexPlusOne)) private _memberIndex;
     Proposal[] private _proposals;
@@ -255,7 +263,7 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
         v.foundedAt = uint64(block.timestamp);
         v.pool = v.locked;
         address planter = islands.ownerOf(v.seatIsland);
-        _addMember(villageId, planter, v.seatIsland);
+        _addMember(villageId, planter, v.seatIsland, Stance.Peace);
         v.population = uint64(islands.memberCount(v.seatIsland));
         uint256 treasuryRf = uint256(v.locked) / 2;
         uint256 liquidityRf = uint256(v.locked) - treasuryRf;
@@ -279,25 +287,45 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
         emit Refunded(villageId, msg.sender, amount);
     }
 
-    /* ── people: everyone brings one island ── */
+    /* ── people: up to two islands per wallet, one at peace and one at war ── */
 
-    /// @notice Founders bring one island of theirs into the village, free.
-    function bring(uint256 villageId, uint256 islandId) external {
+    /// @notice A founder's first island joins free.
+    function bring(uint256 villageId, uint256 islandId, Stance stance) external {
         if (marks.weightOf(villageId, msg.sender) == 0) revert NotFounder();
-        _join(villageId, islandId);
+        if (inVillage(villageId, msg.sender)) revert HasIsland(); // the free one is used: enroll
+        _join(villageId, islandId, stance);
         emit Joined(villageId, islandId, msg.sender, 0);
     }
 
-    /// @notice Enroll one island of yours for the enrollment price, paid into the village pool.
-    function enroll(uint256 villageId, uint256 islandId) external nonReentrant returns (uint256 paid) {
+    /// @notice Enroll an island of yours at a stance for the enrollment price, paid into the pool.
+    function enroll(uint256 villageId, uint256 islandId, Stance stance) external nonReentrant returns (uint256 paid) {
         paid = enrollPrice(villageId);
         if (paid == 0) revert EnrollmentClosed();
-        _join(villageId, islandId);
+        _join(villageId, islandId, stance);
         Village storage v = _villages[villageId];
         v.pool += uint128(paid);
         rf.safeTransferFrom(msg.sender, address(treasury), paid);
         treasury.deposit(villageId, msg.sender, paid);
         emit Joined(villageId, islandId, msg.sender, paid);
+    }
+
+    /// @notice Switch an island between peace and war. If the wallet has an island at the other
+    /// stance, the two swap.
+    function setStance(uint256 islandId, Stance stance) external {
+        _onlyOwner(islandId);
+        uint256 villageId = villageOf(islandId);
+        if (villageId == 0) revert NotInVillage();
+        Stance cur = stanceOf[islandId];
+        if (cur == stance) return;
+        uint256 other = islandAt[villageId][msg.sender][stance];
+        islandAt[villageId][msg.sender][stance] = islandId;
+        islandAt[villageId][msg.sender][cur] = other;
+        stanceOf[islandId] = stance;
+        emit StanceSet(villageId, islandId, stance);
+        if (other != 0) {
+            stanceOf[other] = cur;
+            emit StanceSet(villageId, other, cur);
+        }
     }
 
     /// @notice Ask to take your island out of its village. It leaves at the next epoch
@@ -325,15 +353,19 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
         Village storage v = _villages[villageId];
         v.population -= uint64(islands.memberCount(islandId));
         delete _villageOf[islandId];
-        delete islandOf[villageId][wallet];
-        uint256 i = _memberIndex[villageId][wallet] - 1;
-        address[] storage m = _members[villageId];
-        address last = m[m.length - 1];
-        m[i] = last;
-        _memberIndex[villageId][last] = i + 1;
-        m.pop();
-        delete _memberIndex[villageId][wallet];
-        treasury.forfeit(villageId, wallet);
+        delete islandAt[villageId][wallet][stanceOf[islandId]];
+        delete stanceOf[islandId];
+        if (!inVillage(villageId, wallet)) {
+            // the wallet's last island here: it stops being a member and its allowance goes
+            uint256 i = _memberIndex[villageId][wallet] - 1;
+            address[] storage m = _members[villageId];
+            address last = m[m.length - 1];
+            m[i] = last;
+            _memberIndex[villageId][last] = i + 1;
+            m.pop();
+            delete _memberIndex[villageId][wallet];
+            treasury.forfeit(villageId, wallet);
+        }
         items.onIslandLeft(villageId, islandId);
         emit Left(villageId, islandId);
     }
@@ -371,7 +403,7 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
     /// allowances).
     function proposePoolShare(uint256 villageId, uint16 poolBps) external returns (uint256 proposalId) {
         if (!_villages[villageId].founded) revert NotFounded();
-        if (islandOf[villageId][msg.sender] == 0) revert NotInVillage();
+        if (!inVillage(villageId, msg.sender)) revert NotInVillage();
         if (poolBps > BPS) revert BadProposal();
         uint256[3] memory opts;
         opts[0] = poolBps;
@@ -383,7 +415,7 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
     function proposeEnrollment(uint256 villageId) external returns (uint256 proposalId) {
         Village storage v = _villages[villageId];
         if (!v.founded) revert NotFounded();
-        if (islandOf[villageId][msg.sender] == 0) revert NotInVillage();
+        if (!inVillage(villageId, msg.sender)) revert NotInVillage();
         if (v.enrollVote != 0) revert VoteRunning();
         uint256[3] memory none;
         proposalId = _propose(villageId, Kind.Enrollment, none, VOTE_PERIOD);
@@ -440,11 +472,10 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
 
     /* ── reads ── */
 
-    /// @notice Voting power: Friends on the wallet's village island × (1 + locked / pool).
+    /// @notice Voting power: Friends on the wallet's village islands × (1 + locked / pool).
     function powerOf(uint256 villageId, address wallet) public view returns (uint256) {
-        uint256 islandId = islandOf[villageId][wallet];
-        if (islandId == 0) return 0;
-        uint256 friends = islands.memberCount(islandId);
+        uint256 friends = friendsOf(villageId, wallet);
+        if (friends == 0) return 0;
         uint256 pool = _villages[villageId].pool;
         uint256 share = pool == 0 ? 0 : marks.weightOf(villageId, wallet) * BPS / pool;
         return friends * (BPS + share);
@@ -501,8 +532,22 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
         return v != 0 && v == villageOf(b);
     }
 
-    function inVillage(uint256 villageId, address wallet) external view returns (bool) {
-        return islandOf[villageId][wallet] != 0;
+    function inVillage(uint256 villageId, address wallet) public view returns (bool) {
+        return islandAt[villageId][wallet][Stance.Peace] != 0 || islandAt[villageId][wallet][Stance.War] != 0;
+    }
+
+    /// @notice The wallet's island here for items and allowances: its peace island, else its war island.
+    function islandOf(uint256 villageId, address wallet) public view returns (uint256) {
+        uint256 p = islandAt[villageId][wallet][Stance.Peace];
+        return p != 0 ? p : islandAt[villageId][wallet][Stance.War];
+    }
+
+    /// @notice Friends on all of the wallet's islands in the village.
+    function friendsOf(uint256 villageId, address wallet) public view returns (uint256 n) {
+        uint256 p = islandAt[villageId][wallet][Stance.Peace];
+        uint256 w = islandAt[villageId][wallet][Stance.War];
+        if (p != 0) n += islands.memberCount(p);
+        if (w != 0) n += islands.memberCount(w);
     }
 
     function villages(uint256 villageId) external view returns (Village memory) {
@@ -547,9 +592,9 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
         emit RFLocked(villageId, msg.sender, taken, v.locked);
     }
 
-    function _join(uint256 villageId, uint256 islandId) private {
+    function _join(uint256 villageId, uint256 islandId, Stance stance) private {
         if (!_villages[villageId].founded) revert NotFounded();
-        if (islandOf[villageId][msg.sender] != 0) revert HasIsland();
+        if (islandAt[villageId][msg.sender][stance] != 0) revert HasIsland();
         _onlyOwner(islandId);
         _docked(islandId);
         if (_taken(islandId)) revert AlreadyInVillage();
@@ -558,14 +603,18 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
         uint256 friends = islands.memberCount(islandId);
         if (v.enrollCap != 0 && v.population + friends > v.enrollCap) revert PopulationFull();
         v.population += uint64(friends);
-        _addMember(villageId, msg.sender, islandId);
+        _addMember(villageId, msg.sender, islandId, stance);
     }
 
-    function _addMember(uint256 villageId, address wallet, uint256 islandId) private {
+    function _addMember(uint256 villageId, address wallet, uint256 islandId, Stance stance) private {
         _villageOf[islandId] = villageId;
-        islandOf[villageId][wallet] = islandId;
-        _members[villageId].push(wallet);
-        _memberIndex[villageId][wallet] = _members[villageId].length;
+        if (_memberIndex[villageId][wallet] == 0) {
+            _members[villageId].push(wallet);
+            _memberIndex[villageId][wallet] = _members[villageId].length;
+        }
+        islandAt[villageId][wallet][stance] = islandId;
+        stanceOf[islandId] = stance;
+        emit StanceSet(villageId, islandId, stance);
     }
 
     function _propose(uint256 villageId, Kind kind, uint256[3] memory options, uint256 period)

@@ -151,7 +151,7 @@ contract DocksForkTest is Test {
         assertGt(lower, tickBefore, "one-sided: only RF, just above the price");
 
         vm.prank(b);
-        vil.bring(v, plotB);
+        vil.bring(v, plotB, DocksVillages.Stance.Peace);
         assertTrue(vil.sameVillage(plotA, plotB));
 
         _tradeThrough(pool, lower);

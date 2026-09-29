@@ -93,9 +93,11 @@ Controls: WASD / arrow keys or tap to walk; zoom with ＋/－, the mouse wheel, 
 
 ## War and peace islands, and the peace economy (simulated)
 
-- **Several islands per flag.** A wallet can bring as many islands as it likes: a founder's
-  first is free, every other island enrolls at the flag's enrollment price. Votes count every
-  Friend on all of a wallet's islands.
+- **Two islands per wallet per flag: one at war, one at peace.** A founder's first island is
+  free; the other enrolls at the flag's enrollment price. Switching one island's stance swaps
+  the two. Votes count every Friend on both islands. On chain: `DocksVillages.islandAt(flag,
+  wallet, stance)`, `stanceOf`, `setStance`, `friendsOf`; a wallet stays a member (and keeps
+  its allowance) until its last island there leaves.
 - **War or peace.** Every island that joins a flag picks one (and can switch later):
   - ⚔️ **War islands** board ships, defend the flag and form its border: an island from outside
     the flag can't dock straight against one, or bridge to it.
@@ -115,8 +117,16 @@ Controls: WASD / arrow keys or tap to walk; zoom with ＋/－, the mouse wheel, 
   between islands in no flag pay no tax.
 - **Chat** works between any connected islands, flag or no flag.
 
-Not on chain yet: stances, several islands per wallet in a flag (the contract still allows
-one), goods, listings and the trade tax.
+- **The flag Friend.** Every flag gets its own generated Friend when it's planted (its look
+  comes from the flag's name and colour). It belongs to the flag and levels up (1–5: Sprout,
+  Keeper, Warden, Champion, Legend) from its upgrade fund: 5% of the founding RF, 10% of every
+  enrollment fee (the population growing), and its own revenue: it runs the flag's market and
+  takes half the flag's 5% trade tax. Each level adds +5% output to the flag's peace islands
+  (more goods, more trade, more tax) and +3% defense to its war islands. At the top level its
+  fund overflows into the flag's loot vault. It stands by the flag's pole on the map.
+
+Not on chain yet: the war-island docking border, goods, listings, the trade tax and the flag
+Friend.
 
 ## War (simulated; tunable)
 

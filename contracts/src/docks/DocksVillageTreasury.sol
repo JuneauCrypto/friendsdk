@@ -247,9 +247,8 @@ contract DocksVillageTreasury is IDocksVillageTreasury, IDocksFeeSink, Reentranc
     function _share(uint256 villageId, uint256 amount) private returns (uint256 shared) {
         uint256 pop = villages.population(villageId);
         address[] memory m = villages.members(villageId);
-        DocksIslands isl = villages.islands();
         for (uint256 i; i < m.length && pop > 0; ++i) {
-            uint256 part = amount * isl.memberCount(villages.islandOf(villageId, m[i])) / pop;
+            uint256 part = amount * villages.friendsOf(villageId, m[i]) / pop;
             credited[villageId][m[i]] += part;
             shared += part;
         }

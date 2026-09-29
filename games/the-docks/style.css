@@ -161,3 +161,8 @@
 .docks-war .docks-item{flex-wrap:wrap}
 .docks-war .docks-item>span:first-child{flex:1 1 200px;min-width:0}
 .docks-ship{display:inline-flex;gap:4px;align-items:center;font-size:12px}
+/* the flag Friend: on the map by its pole, and its card in Flags */
+.docks-flag .docks-flag-friend{position:absolute;left:-24px;bottom:0;width:20px;height:20px;image-rendering:pixelated}
+.docks-flagfriend{display:grid;grid-template-columns:56px 1fr;gap:8px;align-items:center;margin:6px 0;padding:6px;border:1px solid #000;background:#fff;color:#000}
+.docks-flagfriend img{width:56px;height:56px;image-rendering:pixelated;background:#eee;border:1px solid #000}
+.docks-flagfriend strong,.docks-flagfriend small{display:block}

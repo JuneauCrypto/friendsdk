@@ -26,6 +26,9 @@
  *  - War: a flag can declare war on another by vote. For WAR_DAYS its raids on that flag skip the
  *    raid cooldown and pay a double bounty. */
 import { rankOf, walletOf, type Plot, type Village, type World } from "./world.js";
+/** Extra defense multiplier for an island (its flag Friend's level); set by the game. */
+let defenseOf: (w: World, p: Plot) => number = () => 1;
+export function setDefenseBoost(fn: (w: World, p: Plot) => number) { defenseOf = fn; }
 /** A member island's stance in its flag (peace unless set to war). */
 export const atWarStance = (v: Village, p: Plot) => (v.stance.get(p) ?? "peace") === "war";
 import { CATALOG, DAY, HOUR, YOU, allowanceOf, islandOf, itemsOn, isReady, population } from "./villages.js";
@@ -234,7 +237,7 @@ export function cancelTour(b: WarBook, t: Tour) { b.tours = b.tours.filter(x => 
 function duelStrength(w: World, p: Plot, side: "attack" | "defense", round: number, shipBonus: number, k = 1) {
   const bonus = itemBonus(w, p), base = strengthOf(p), item = side === "attack" ? bonus.attack : bonus.defense;
   const s = round === 0 ? base * (1 + (side === "attack" ? item + shipBonus : item)) : round === 1 ? base : base * (1 + (side === "defense" ? 2 * item : item / 2));
-  return (side === "defense" ? s * (1 + WAR.HOME_ADVANTAGE) : s) * k;
+  return (side === "defense" ? s * (1 + WAR.HOME_ADVANTAGE) * defenseOf(w, p) : s) * k;
 }
 /** Best of 3 rounds between two islands (`defK` < 1: peace islands defending as militia). */
 export function duel(w: World, att: Plot, def: Plot, shipBonus: number, rand = Math.random, defK = 1) {

@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { spriteFrame, type GenerationSprites, type SpriteFacing } from "@rarefriends/friendsdk/sprites";
 import { fromScreen, toScreen } from "./land.js";
 import { CATALOG } from "./villages.js";
-import { CELL, canEnter, ck, neighboursOf, plotOf, rankOf, tileAt, villageOf, flagTile, type Placed, type Plot, type World } from "./world.js";
+import { CELL, canEnter, ck, neighboursOf, plotOf, rankOf, tileAt, villageOf, flagTile, type Placed, type Plot, type World, type Village } from "./world.js";
 
 /** A Friend walking around off its land: following the lead, or left standing somewhere. */
 /** A Friend walking around: following `leader` (in line behind it) or standing where it was left. */
@@ -28,6 +28,7 @@ type Props = {
   onWalkerTap: (id: bigint, at: { x: number; y: number }) => void;   // tapped a walking Friend (client px)
   onFriendTap: (id: bigint, at: { x: number; y: number }) => void;   // tapped one of your Friends at home
   onIslandTap?: (plotId: string | null, at: { x: number; y: number }) => void; // tapped someone else's island (null: anywhere else)
+  flagFriendArt?: (v: Village) => string | null;                   // the flag's generated Friend, drawn by its pole
   onBlocked: (plot: Plot) => void; onEnterPlot: (plot: Plot | null) => void;
   onPick: (pl: Placed) => void;                  // arrange mode: tap one of your Friends
   onVisible: (pls: Placed[]) => void;            // Friends near the camera (for lazy art loading)
@@ -419,7 +420,7 @@ export function DocksView(props: Props) {
       {gates.map(g => <span key={g.key} className={`docks-gate ${g.open ? "open" : "shut"}`} style={{ left: g.x, top: g.y, zIndex: 600 }}>{g.open ? "⇄" : "🔒"}</span>)}
       {builds.map(b => <span key={b.id} className={`docks-item-mark${b.ready ? "" : " building"}`} style={{ left: b.x, top: b.y, zIndex: 640 }} title={b.name}>{b.icon}{!b.ready && <i>🔨</i>}</span>)}
       {flags.map(f => <span key={f.v.id} className={`docks-flag${f.v.founded ? "" : " rising"}`} style={{ left: f.x, top: f.y, zIndex: 650, ["--flag" as string]: f.v.color, ["--raised" as string]: `${f.v.founded ? 100 : Math.max(8, Math.floor(f.v.locked / f.v.target * 100))}%` }}>
-        <i className="pole" /><i className="cloth" /><b>{f.v.name} · {f.v.founded ? `${f.v.members.length} island${f.v.members.length === 1 ? "" : "s"}` : `${Math.floor(f.v.locked / f.v.target * 100)}% raised`}</b></span>)}
+        <i className="pole" /><i className="cloth" />{(() => { const a = state.current.flagFriendArt?.(f.v); return a ? <img className="docks-flag-friend" src={a} alt="" /> : null; })()}<b>{f.v.name} · {f.v.founded ? `${f.v.members.length} island${f.v.members.length === 1 ? "" : "s"}` : `${Math.floor(f.v.locked / f.v.target * 100)}% raised`}</b></span>)}
       {labels.map(l => <span key={l.plot.id} className={`docks-plot-label ${l.plot.mine ? "mine" : ""}`} style={{ left: l.x, top: l.y, zIndex: 700 }}>
         {l.village && <i className="docks-pennant" style={{ background: l.village.color }} title={l.village.name} />}{l.plot.name} · {l.rank}{l.plot.mine ? ` · ${l.plot.friends.length}` : l.village ? "" : " · no flag"}{l.plot.berth ? "" : " · floating"}</span>)}
       {myVisible.length <= 150 && myVisible.map(({ pl, x, y }) => { const c = toScreen(x + T(pl.m.cw) / 2, y + T(pl.m.ch) / 2);

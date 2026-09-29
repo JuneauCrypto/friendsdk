@@ -310,10 +310,14 @@ try {
     await game.getByText(/You locked .* RF into Dock Town's flag \(simulated\) · 100% full/).waitFor();
     await game.getByText(/your mark: .* RF \(\d+% of the flag, soulbound\)/).first().waitFor();
     await game.getByRole("button", { name: "🏛 Found Dock Town" }).click();
-    await game.getByText(/🏛 Dock Town is founded! 78k RF into permanent RF\/ETH liquidity, 97\.5k RF as founders' allowances to build with, 19\.5k RF into its loot vault/).waitFor();
+    await game.getByText(/🏛 Dock Town is founded! [\d.]+k RF into permanent RF\/ETH liquidity, 97\.5k RF as founders' allowances to build with, 19\.5k RF into its loot vault, 9,750 RF to upgrade \w+, its flag Friend/).waitFor();
     assert.equal(await game.locator(".docks-flag.rising").count(), 1, "only Crystal Hollow still rising");
     await game.locator(".docks-nav").getByRole("button", { name: /Flags/ }).click();
     const town = game.locator(".docks-village", { hasText: "Dock Town" });
+    // every flag gets a generated flag Friend; part of the founding RF upgrades it
+    await town.getByText(/\w+ · Dock Town's flag Friend · level 1 Sprout/).waitFor();
+    await town.getByText(/upgrade fund 9,750 \/ 10k RF to level 2/).waitFor();
+    assert.ok(await game.locator(".docks-flag-friend").count() >= 3, "flag Friends stand by their poles");
     // the planter's island is the seat: already in, voting with its Friends × the founder multiplier
     await town.getByText(/Your island: 2 Friends × 2\.00 = 4\.0 votes/).waitFor();
     await town.getByText(/enrollment open · 10k RF \(first week: 7 days left\)/).waitFor();

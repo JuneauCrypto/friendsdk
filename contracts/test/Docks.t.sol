@@ -750,14 +750,14 @@ contract DocksTest is Test {
 
     function _bring(address who, uint256 v) internal {
         vm.prank(who);
-        vil.bring(v, plotOf[who]);
+        vil.bring(v, plotOf[who], DocksVillages.Stance.Peace);
     }
 
     function _enroll(address who, uint256 v) internal {
         rf.mint(who, 1_000_000 ether);
         vm.startPrank(who);
         rf.approve(address(vil), type(uint256).max);
-        vil.enroll(v, plotOf[who]);
+        vil.enroll(v, plotOf[who], DocksVillages.Stance.Peace);
         vm.stopPrank();
     }
 
@@ -887,15 +887,51 @@ contract DocksTest is Test {
         vil.refund(v);
     }
 
+    function testTwoIslandsPerWalletOneAtPeaceOneAtWar() public {
+        uint256 v = _village();
+        _bring(bob, v); // bob's first island: free, at peace
+        // a second island of bob's, enrolled at war
+        vm.prank(bob);
+        uint256 war = reg.create("");
+        _friend(11, bob);
+        rf.mint(bob, 20_000 ether);
+        vm.startPrank(bob);
+        reg.arrange(war, _one(11), _i(0), _i(0));
+        reg.dock(war, 1, 1);
+        vm.expectRevert(DocksVillages.HasIsland.selector);
+        vil.enroll(v, war, DocksVillages.Stance.Peace); // one island per stance
+        vil.enroll(v, war, DocksVillages.Stance.War);
+        vm.stopPrank();
+        assertEq(vil.islandAt(v, bob, DocksVillages.Stance.Peace), plotOf[bob]);
+        assertEq(vil.islandAt(v, bob, DocksVillages.Stance.War), war);
+        assertEq(vil.friendsOf(v, bob), 2, "votes count both islands");
+        assertEq(vil.members(v).length, 2, "bob is one member");
+        // switching one stance swaps the two
+        vm.prank(bob);
+        vil.setStance(war, DocksVillages.Stance.Peace);
+        assertEq(vil.islandAt(v, bob, DocksVillages.Stance.Peace), war);
+        assertEq(vil.islandAt(v, bob, DocksVillages.Stance.War), plotOf[bob]);
+        assertEq(uint8(vil.stanceOf(plotOf[bob])), uint8(DocksVillages.Stance.War));
+        // one island leaves: bob stays a member with the other, allowance kept
+        uint256 allowance = tre.allowanceOf(v, bob);
+        vm.prank(bob);
+        vil.requestRemoval(war);
+        _toNextEpoch();
+        vil.processRemoval(war);
+        assertTrue(vil.inVillage(v, bob));
+        assertEq(vil.islandOf(v, bob), plotOf[bob]);
+        assertEq(tre.allowanceOf(v, bob), allowance, "the allowance stays with the wallet's last island");
+    }
+
     function testEveryoneBringsOneIslandAndNobodyJoinsFree() public {
         uint256 v = _village();
         _bring(bob, v);
         vm.prank(bob);
         vm.expectRevert(DocksVillages.HasIsland.selector);
-        vil.bring(v, plotOf[bob]);
+        vil.bring(v, plotOf[bob], DocksVillages.Stance.Peace);
         vm.prank(carol);
         vm.expectRevert(DocksVillages.NotFounder.selector);
-        vil.bring(v, plotOf[carol]);
+        vil.bring(v, plotOf[carol], DocksVillages.Stance.Peace);
         uint256 before = rf.balanceOf(address(tre));
         _enroll(carol, v);
         assertEq(rf.balanceOf(address(tre)) - before, ENROLL);
@@ -956,7 +992,7 @@ contract DocksTest is Test {
         vm.stopPrank();
         rf.mint(carol, 100 ether);
         vm.prank(carol);
-        vil.enroll(w, plotOf[carol]);
+        vil.enroll(w, plotOf[carol], DocksVillages.Stance.Peace);
         vm.prank(carol);
         vm.expectRevert(DocksVillages.BoundElsewhere.selector);
         reg.arrange(plotOf[carol], _one(10), _i(1), _i(0));
@@ -991,12 +1027,12 @@ contract DocksTest is Test {
         vm.stopPrank();
         vm.prank(alice);
         vm.expectRevert(DocksVillages.CoolingDown.selector);
-        vil.enroll(w, second); // #2 on it is still bound to Dock Town
+        vil.enroll(w, second, DocksVillages.Stance.Peace); // #2 on it is still bound to Dock Town
         _toNextEpoch();
         vil.settle(1); // w's first enrollment vote: nobody voted, keep open
         rf.mint(alice, 10_000 ether);
         vm.prank(alice);
-        vil.enroll(w, second);
+        vil.enroll(w, second, DocksVillages.Stance.Peace);
         assertEq(vil.population(w), 2);
     }
 
@@ -1021,7 +1057,7 @@ contract DocksTest is Test {
         assertEq(vil.population(v), 3);
         _dave(10);
         vm.prank(dave);
-        vil.enroll(v, plotOf[dave]);
+        vil.enroll(v, plotOf[dave], DocksVillages.Stance.Peace);
         assertEq(vil.population(v), 13);
         assertEq(vil.enrollPrice(v), 0, "full");
         gen.set(10, carol);
