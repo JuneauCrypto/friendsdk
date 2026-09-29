@@ -26,6 +26,8 @@
  *  - War: a flag can declare war on another by vote. For WAR_DAYS its raids on that flag skip the
  *    raid cooldown and pay a double bounty. */
 import { rankOf, walletOf, type Plot, type Village, type World } from "./world.js";
+/** A member island's stance in its flag (peace unless set to war). */
+export const atWarStance = (v: Village, p: Plot) => (v.stance.get(p) ?? "peace") === "war";
 import { CATALOG, DAY, HOUR, YOU, allowanceOf, islandOf, itemsOn, isReady, population } from "./villages.js";
 import type { Economy } from "./launch.js";
 
@@ -37,7 +39,7 @@ export const WAR = {
   TO_FIGHTERS_BPS: 5_000,              // half the loot to the islands that fought, half to the winner's vault
   BASE_LOSS_BPS: 1_000,                // tier 1 loses 10% of its vault per lost battle; higher tiers less
   HOME_ADVANTAGE: 0.1,
-  EMPTY_SEAT_STRENGTH: 0.5,            // unfilled defense seats: the flag's strongest islands at half strength
+  EMPTY_SEAT_STRENGTH: 0.5,            // a flag with no war islands defends with its peace islands at half strength
   RAID_COOLDOWN_HOURS: 24,             // between raids on the same flag (not during a declared war)
   WAR_DAYS: 3,
   ITEM_BONUS_CAP: 0.6,                 // most a single island gets from items, per side
@@ -200,6 +202,7 @@ export function boardProblem(w: World, b: WarBook, t: Tour, p: Plot) {
   if (t.sailed) return "That ship has sailed.";
   if (!t.from.members.includes(p)) return `Only ${t.from.name}'s islands board its ships.`;
   if (t.crew.includes(p)) return `${p.name} is already aboard.`;
+  if (!atWarStance(t.from, p)) return `${p.name} is a peace island: only war islands board ships.`;
   if (b.tours.some(o => !o.sailed && o.crew.includes(p))) return `${p.name} is aboard another ship.`;
   const s = SHIPS[t.ship.kind];
   if (t.crew.length >= s.seats) return `The ${s.name} is full.`;
@@ -210,6 +213,7 @@ export function boardProblem(w: World, b: WarBook, t: Tour, p: Plot) {
 export const islandTierName = (t: number) => `tier ${t + 1}`;
 /** Put a ship on a tour at `target`. The deployer's island boards first, then members set to auto-join. */
 export function deployTour(w: World, b: WarBook, a: Village, target: Village, shipId: number, deployer: Plot, autoSail: boolean): Tour {
+  if (!atWarStance(a, deployer)) throw new Error(`${deployer.name} is a peace island: set it to war to send ships.`);
   const why = raidProblem(w, b, a, target); if (why) throw new Error(why);
   const ship = readyShips(b, a).find(s => s.id === shipId); if (!ship) throw new Error("That ship isn't ready.");
   const t: Tour = { id: b.seq++, ship, from: a, target, deployer: walletOf(deployer), autoSail, crew: [], sailed: false };
@@ -227,16 +231,16 @@ export function cancelTour(b: WarBook, t: Tour) { b.tours = b.tours.filter(x => 
 
 /* ── the battle: duels within one tier ── */
 
-function duelStrength(w: World, p: Plot, side: "attack" | "defense", round: number, shipBonus: number) {
+function duelStrength(w: World, p: Plot, side: "attack" | "defense", round: number, shipBonus: number, k = 1) {
   const bonus = itemBonus(w, p), base = strengthOf(p), item = side === "attack" ? bonus.attack : bonus.defense;
   const s = round === 0 ? base * (1 + (side === "attack" ? item + shipBonus : item)) : round === 1 ? base : base * (1 + (side === "defense" ? 2 * item : item / 2));
-  return side === "defense" ? s * (1 + WAR.HOME_ADVANTAGE) : s;
+  return (side === "defense" ? s * (1 + WAR.HOME_ADVANTAGE) : s) * k;
 }
-/** Best of 3 rounds between two islands. */
-export function duel(w: World, att: Plot, def: Plot, shipBonus: number, rand = Math.random) {
+/** Best of 3 rounds between two islands (`defK` < 1: peace islands defending as militia). */
+export function duel(w: World, att: Plot, def: Plot, shipBonus: number, rand = Math.random, defK = 1) {
   const rounds: boolean[] = [];
   for (let r = 0; r < 3 && rounds.filter(Boolean).length < 2 && rounds.filter(x => !x).length < 2; r++) {
-    const A = duelStrength(w, att, "attack", r, shipBonus), D = duelStrength(w, def, "defense", r, 0);
+    const A = duelStrength(w, att, "attack", r, shipBonus), D = duelStrength(w, def, "defense", r, 0, defK);
     rounds.push(rand() < A / (A + D));
   }
   return { rounds, won: rounds.filter(Boolean).length >= 2 };
@@ -255,13 +259,16 @@ export function sail(w: World, b: WarBook, e: Economy, t: Tour, defending: Plot[
   if (!t.crew.length) throw new Error("Nobody's aboard.");
   t.sailed = true; b.tours = b.tours.filter(x => x !== t);
   const s = SHIPS[t.ship.kind], shipBonus = s.attack;
-  const pool = defending.filter(p => d.members.includes(p)), used = new Set<Plot>(), duels: Duel[] = [];
+  // war islands defend; a flag with none left defends with its peace islands at half strength
+  const warPool = defending.filter(p => d.members.includes(p) && atWarStance(d, p));
+  const militia = !warPool.length, pool = militia ? defending.filter(p => d.members.includes(p)) : warPool;
+  const used = new Set<Plot>(), duels: Duel[] = [];
   for (const att of t.crew) {
     const ta = islandTier(w, att);
     const def = pool.find(p => !used.has(p) && Math.abs(islandTier(w, p) - ta) <= 1) ?? null;
     if (!def) { duels.push({ attacker: att, defender: null, rounds: [], won: null }); continue; }
     used.add(def);
-    const r = duel(w, att, def, shipBonus, rand);
+    const r = duel(w, att, def, shipBonus, rand, militia ? WAR.EMPTY_SEAT_STRENGTH : 1);
     duels.push({ attacker: att, defender: def, rounds: r.rounds, won: r.won });
   }
   const fought = duels.filter(x => x.won !== null), wins = fought.filter(x => x.won).length, losses = fought.length - wins;
@@ -295,5 +302,5 @@ export function claim(b: WarBook, e: Economy, who = YOU) {
 }
 
 /** Sample flags defend on their own: every member answers, strongest first. */
-export const autoDefenders = (d: Village) => [...d.members].sort((x, y) => strengthOf(y) - strengthOf(x));
+export const autoDefenders = (d: Village) => [...d.members].sort((x, y) => Number(atWarStance(d, y)) - Number(atWarStance(d, x)) || strengthOf(y) - strengthOf(x));
 export const popOf = population;

@@ -1,7 +1,7 @@
 /* The berth map: one square per island, whatever its size. Glowing squares are loading
  * zones where the chosen island can dock. Tap an island to build a bridge to it. */
 import { useState } from "react";
-import { connected, DOCKING_FEE, type Berth, type Plot, type World } from "./world.js";
+import { connected, DOCKING_FEE, hostileBorder, type Berth, type Plot, type World } from "./world.js";
 
 export function ChainMap({ world, island, zones, onDock, onBridge }: {
   world: World; island: Plot; zones: Berth[];
@@ -12,7 +12,7 @@ export function ChainMap({ world, island, zones, onDock, onBridge }: {
   const all = [...docked.map(p => p.berth!), ...zones];
   const xs = all.map(b => b.x), ys = all.map(b => b.y);
   const x0 = Math.min(0, ...xs) - 1, x1 = Math.max(0, ...xs) + 2, y0 = Math.min(0, ...ys) - 1, y1 = Math.max(0, ...ys) + 2;
-  const bridgeable = (p: Plot) => !p.mine && island.berth && p.berth && !connected(world, island, p);
+  const bridgeable = (p: Plot) => !p.mine && island.berth && p.berth && !connected(world, island, p) && !hostileBorder(world, island, p);
   return <div className="docks-chainmap">
     <svg viewBox={`${x0} ${y0} ${x1 - x0} ${y1 - y0}`} role="img" aria-label={`Map: ${docked.length} docked islands, ${zones.length} loading zones`}>
       {world.bridges.map((b, i) => <line key={i} x1={b.a.berth!.x + 0.5} y1={b.a.berth!.y + 0.5} x2={b.b.berth!.x + 0.5} y2={b.b.berth!.y + 0.5} className="bridge-line" />)}

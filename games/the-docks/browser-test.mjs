@@ -343,6 +343,11 @@ try {
     await shot("village-menu");
     await game.getByRole("button", { name: "Close Flags" }).click();
     await page.waitForTimeout(300); await shot("village");
+    // each island in a flag is at war or at peace: only war islands board ships
+    await game.locator(".docks-nav").getByRole("button", { name: /Flags/ }).click();
+    await town.getByRole("button", { name: "⚔️ Make it war" }).click();
+    await game.getByText(/Your island is now ⚔️ a war island/).waitFor();
+    await game.getByRole("button", { name: "Close Flags" }).click();
     // war: a new flag is shielded for a week; then raid a flag of the same tier with ships
     await btn("War").click();
     // (the first-week skip above also ended Dock Town's 7-day shield)
@@ -379,6 +384,37 @@ try {
       await game.getByText(/Claimed .* RF of loot to #7730's wallet/).waitFor();
     }
     await game.getByRole("button", { name: "Close War" }).click();
+    // peace: back to peace, build a Farm, collect its grain, sell some and buy from a neighbour
+    await game.locator(".docks-nav").getByRole("button", { name: /Flags/ }).click();
+    await town.getByRole("button", { name: "🕊 Make it peace" }).click();
+    await game.getByText(/Your island is now 🕊 a peace island/).waitFor();
+    await game.getByLabel("Own item to build").selectOption("8");   // 🌾 Farm
+    for (let tries = 0; tries < 4; tries++) {
+      await game.getByRole("button", { name: /Buy where #\d+ stands · my RF/ }).click();
+      if (await game.getByText(/🌾 Farm is being built on Your island/).count()) break;
+      await game.getByRole("button", { name: "Close Flags" }).click();
+      await page.keyboard.down("d"); await page.waitForTimeout(350); await page.keyboard.up("d");
+      await game.locator(".docks-nav").getByRole("button", { name: /Flags/ }).click();
+    }
+    await game.getByText(/🌾 Farm is being built on Your island/).waitFor();
+    await game.locator(".docks-nav").getByRole("button", { name: /Flags/ }).click();
+    await game.locator(".docks-item", { hasText: "🌾 Farm" }).getByRole("button", { name: /^Finish · / }).click();
+    await game.getByRole("button", { name: "Close Flags" }).click();
+    await btn("Market").click();
+    const land = game.locator(".docks-item", { hasText: "🕊 Your island" });
+    await land.getByText(/makes 7\.2 🌾\/h/).waitFor();   // 6 an hour, +20% for the Market stall on the island
+    await land.getByRole("button", { name: "⏩ 12 h" }).click();
+    await land.getByRole("button", { name: "Collect" }).click();
+    await game.getByText(/Collected from Your island \(simulated\): 86 Grain/).waitFor();
+    await game.getByLabel("What to sell").selectOption("g0");
+    await game.getByLabel("Quantity").fill("20");
+    await game.getByLabel("Price each (RF)").fill("9");
+    await game.getByRole("button", { name: "List for sale" }).click();
+    await game.getByText(/🏷 Listed 20 Grain at 9 RF each from Your island/).waitFor();
+    await game.getByRole("button", { name: "Buy 1" }).first().click();
+    await game.getByText(/🛒 Bought 1 from .* for \d+ RF \(simulated\)/).waitFor();
+    await shot("market");
+    await game.getByRole("button", { name: "Close Market" }).click();
     // deploy #7573 to a second island: joining a new island counts as a move (Gen 3: 20 RF)
     await btn("Islands").click();
     await game.getByRole("button", { name: "＋ New island" }).click();
@@ -415,7 +451,8 @@ try {
     }
     const pop = game.getByRole("menu", { name: /options$/ });
     await pop.getByText(/Friends? ·/).waitFor();
-    assert.ok(await pop.getByRole("menuitem", { name: /⚓ Dock Your island here · 2 RF|🌉 Bridge from Your island · 2 RF|💬 Chat with/ }).count(), "island options offer dock, bridge or chat");
+    assert.ok(await pop.getByRole("menuitem", { name: /⚓ Dock Your island here · 2 RF|🌉 Bridge from Your island · 2 RF|💬 Chat with/ }).count()
+      || await pop.getByText(/war island: dock next to one of its peace islands instead/).count(), "island options offer dock, bridge or chat (or explain a war border)");
     await shot("island-options");
     await pop.getByRole("menuitem", { name: "Close" }).click();
     await game.getByRole("button", { name: "Center on lead" }).click();

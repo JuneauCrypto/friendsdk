@@ -10,12 +10,13 @@ import {
   ARRANGE_FEE, RANKS, addBridge, addToPlot, autoArrange, canEnter, connected, DOCKING_FEE, createWorld, deploy, disconnected, zonesNextTo,
   dockAt, loadingZones, member, memberOf, moveGroup, myPlots, neighboursOf, pendingChanges, plotOf, rankOf, rebuild,
   refreshMember, removeFromPlot, swapInto, undock, weightOf, burnHole, fillHole, holesOf, feeOf,
-  CELL, exploring, canEnterFrom, flagProblem, joinProblem, newVillage, risingFlagOf, tileAt, villageOf, flagTile, walletOf, type Village,
+  CELL, exploring, hostileBorder, stanceOf, canEnterFrom, flagProblem, joinProblem, newVillage, risingFlagOf, tileAt, villageOf, flagTile, walletOf, type Village,
   type Access, type Berth, type Hole, type Member, type Placed, type Plot, type World,
 } from "./world.js";
 import { DocksView, clampZoom, spawnOn, type CrewMember, type ViewApi } from "./view.js";
 import { ChainMap } from "./chainmap.js";
 import * as WR from "./war.js";
+import * as PC from "./peace.js";
 import { LAUNCH_FEE, PLATFORM_FEE_BPS, SCOPES, poolName, toPool, claimAll, createEconomy, eligibleFriends, fmt, launch, seedLaunch, type Economy, type Launch, type Scope } from "./launch.js";
 import * as VX from "./villages.js";
 import type { Item, Proposal } from "./world.js";
@@ -24,7 +25,7 @@ const dur = (ms: number) => { const m = Math.max(0, Math.ceil(ms / 60_000)); ret
 import "@rarefriends/friendsdk/frame.css";
 import "./style.css";
 
-type Menu = "control" | "plot" | "docks" | "village" | "war" | "tokens" | "help" | "settings" | null;
+type Menu = "control" | "plot" | "docks" | "village" | "war" | "market" | "tokens" | "help" | "settings" | null;
 const CHECK_EVERY_MS = 60_000;
 const MAX_DRAWN = 40;                             // crew sprites drawn at once (the rest are counted)
 const ART_CONCURRENCY = 6, ART_CACHE = 500;       // lazy on-chain art: parallel reads, Friends kept in memory
@@ -97,7 +98,9 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const [saving, setSaving] = useState(false);
   const world = useRef<World | null>(null);
   const econ = useRef<Economy>(createEconomy());
-  const book = useRef<WR.WarBook>(WR.newWarBook());                               // war: loot vaults, ships, battles (simulated)
+  const book = useRef<WR.WarBook>(WR.newWarBook());
+  const market = useRef<PC.Market>(PC.newMarket());                               // peace economy: goods, listings (simulated)
+  const [sellWhat, setSellWhat] = useState("g0"), [sellQty, setSellQty] = useState("10"), [sellPrice, setSellPrice] = useState("10");                               // war: loot vaults, ships, battles (simulated)
   const [tourShip, setTourShip] = useState<number | null>(null), [autoSail, setAutoSail] = useState(true);   // deploying a ship on a tour
   const [shipKind, setShipKind] = useState(1), [vaultAdd, setVaultAdd] = useState("10000");
   const [lastBattle, setLastBattle] = useState<WR.Battle | null>(null);
@@ -133,11 +136,12 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         const home: Plot = { id: "me-1", name: "Your island", mine: true, access: "invite", friends: [{ m: walker, x: 0, y: 0 }], berth: null };
         plotSeq.current = 1;
         world.current = createWorld(samples.filter(s => s.friends.length), [home]);
-        econ.current = createEconomy(); book.current = WR.newWarBook(); setLastBattle(null); setTourShip(null); setLead(friendId); setPrimary(friendId); setCrewLeader(new Map()); setQuick(null); setCrewModes(new Map()); setCrewSel(new Set()); setCrewBar(false); setApprovedVisitors([]); setRequests([]); onChain.current = new Map(); savedRef.current = new Map(); simGone.current = new Set(); setIslandId("me-1");
-        const market = world.current.plots.find(p => p.id === "s4" && p.friends.length);
-        if (market) seedLaunch(econ.current, { name: "Market Coin", symbol: "MKT", supply: 1_000_000, creator: market, creatorFriend: market.friends[0].m.id,
+        econ.current = createEconomy(); book.current = WR.newWarBook(); market.current = PC.newMarket(); setLastBattle(null); setTourShip(null); setLead(friendId); setPrimary(friendId); setCrewLeader(new Map()); setQuick(null); setCrewModes(new Map()); setCrewSel(new Set()); setCrewBar(false); setApprovedVisitors([]); setRequests([]); onChain.current = new Map(); savedRef.current = new Map(); simGone.current = new Set(); setIslandId("me-1");
+        const mkt = world.current.plots.find(p => p.id === "s4" && p.friends.length);
+        if (mkt) seedLaunch(econ.current, { name: "Market Coin", symbol: "MKT", supply: 1_000_000, creator: mkt, creatorFriend: mkt.friends[0].m.id,
           scope: "anyDocked", claimEach: 500, claimPrice: 5, claimRemaining: 50_000 });
         seedVillages(world.current);
+        PC.sampleListings(world.current, market.current);
         asked.current = new Set();
         setReady(true); setLastCheck(new Date());
         say("Finding the rest of your Friends…");
@@ -605,7 +609,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     if (market) {
       const v = newVillage(w, market, "Market Town", at(market), VX.FLAG_TARGET, Date.now() - VX.DAY);
       v.lockers.set(market.name, 700_000); v.lockers.set(rooftop?.name ?? "Rooftop Pair", 300_000); v.locked = VX.FLAG_TARGET;
-      VX.found(w, v); if (rooftop) VX.bring(w, v, rooftop);
+      VX.found(w, v); if (rooftop) VX.bring(w, v, rooftop, "war");   // Market Cluster at peace in the middle, Rooftop Pair its war border
       v.foundedAt -= 10 * VX.DAY; if (v.enrollVote) { v.enrollVote.ends = Date.now() - 1; VX.settle(v, v.enrollVote); }   // founded 10 days ago, kept open
       WR.onFounded(book.current, v); WR.fund(book.current, { ...econ.current, rf: Infinity }, v, 50_000);
       book.current.ships.set(v, [...WR.shipsOf(book.current, v), { id: book.current.seq++, kind: 1, readyAt: 0, owner: v.name }]);
@@ -655,11 +659,15 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     act(() => { const p = VX.proposePoolShare(v, VX.YOU, Math.round(Math.min(100, Math.max(0, Number(burnPct) || 0)) * 100));
       say(`Proposal #${p.id + 1} is up for ${v.name} (${VX.VOTE_DAYS}-day vote; every Friend is a vote).`); });
   }
-  function doBring(v: Village, p: Plot) {
-    act(() => { VX.bring(world.current!, v, p); say(`${p.name} is in ${v.name}: your ${p.friends.length.toLocaleString()} Friends vote ×${VX.multiplier(v, VX.YOU).toFixed(2)} (founder, simulated).`); });
+  const stanceWord = (st: "war" | "peace") => st === "war" ? "⚔️ a war island (fights, boards ships, defends the flag)" : "🕊 a peace island (makes goods and trades)";
+  function doBring(v: Village, p: Plot, st: "war" | "peace") {
+    act(() => { VX.bring(world.current!, v, p, st); say(`${p.name} is in ${v.name} as ${stanceWord(st)}: your ${p.friends.length.toLocaleString()} Friends vote ×${VX.multiplier(v, VX.YOU).toFixed(2)} (founder, simulated).`); });
   }
-  function doEnroll(v: Village, p: Plot) {
-    act(() => { const n = VX.enroll(world.current!, econ.current, v, p); say(`${p.name} enrolled in ${v.name} for ${fmt(n)} RF (simulated): ${fmt(n / 2)} to liquidity, ${fmt(n / 2)} your allowance. Its ${p.friends.length.toLocaleString()} Friends vote.`); });
+  function doEnroll(v: Village, p: Plot, st: "war" | "peace") {
+    act(() => { const n = VX.enroll(world.current!, econ.current, v, p, st); say(`${p.name} enrolled in ${v.name} as ${stanceWord(st)} for ${fmt(n)} RF (simulated): ${fmt(n / 2)} to liquidity, ${fmt(n / 2)} your allowance. Its ${p.friends.length.toLocaleString()} Friends vote.`); });
+  }
+  function doStance(v: Village, p: Plot, st: "war" | "peace") {
+    act(() => { VX.setStance(world.current!, v, p, st); say(`${p.name} is now ${stanceWord(st)} in ${v.name}.${st === "war" ? " Outsiders can't dock straight against it." : " Anyone can dock next to it and trade."}`); });
   }
   function doSettle(v: Village, p: Proposal) {
     act(() => { const msg = VX.settle(v, p);
@@ -698,7 +706,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     const w = world.current!, at = leadSpot();
     act(() => {
       if (!at || !at.p.mine) throw new Error(`Walk #${lead} onto the spot on your island where it should go.`);
-      const it = v ? (() => { if (VX.islandOf(v, VX.YOU) !== at.p) throw new Error(`Stand on your ${v.name} island (${VX.islandOf(v, VX.YOU)?.name ?? "bring or enroll one first"}).`); return VX.buyForVillage(w, v, VX.YOU, buildKind, at.cx, at.cy); })()
+      const it = v ? (() => { if (!VX.islandsOf(v, VX.YOU).includes(at.p)) throw new Error(`Stand on one of your ${v.name} islands (${VX.islandsOf(v, VX.YOU).map(p => p.name).join(", ") || "bring or enroll one first"}).`); return VX.buyForVillage(w, v, VX.YOU, buildKind, at.cx, at.cy, at.p); })()
         : VX.buyOwn(w, econ.current, VX.YOU, buildKind, at.p, at.cx, at.cy);
       const c = VX.CATALOG[it.kind]; setMenu(null);
       say(`${c.icon} ${c.name} is being built on ${at.p.name} (simulated): ready in ${dur(it.readyAt - Date.now())}. ${v ? `Paid from your ${v.name} allowance; it belongs to the flag.` : "Paid with your RF; it's yours."} Boost it with RF to finish sooner.`);
@@ -750,6 +758,13 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         }
       }
       for (const line of VX.processRemovals(w)) msg = line;
+      // the market: sample islands that can reach your listings buy some; samples restock theirs
+      for (const l of [...market.current.listings]) if (l.seller === VX.YOU && Math.random() < 0.35) {
+        const buyer = samples.find(q => !PC.tradeProblem(w, q, l.from));
+        if (buyer) { const r = PC.buy(w, market.current, null, l, 1 + Math.floor(Math.random() * l.qty), buyer, walletOf(buyer), econ.current);
+          msg = `🧺 ${buyer.name} (sample) bought ${l.good !== null ? PC.GOODS[l.good].name : VX.CATALOG[l.item!.kind].name} from you for ${fmt(r.total)} RF${r.tax ? ` (${fmt(r.tax)} RF tax to ${r.flag})` : ""}.`; }
+      }
+      if (Math.random() < 0.2) PC.sampleListings(w, market.current);
       if (msg) say(msg);
       bump();
     }, 4000);
@@ -888,6 +903,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         {chatNeighbours().length > 0 && <button type="button" onClick={() => openChat()} disabled={uiBlocked}>💬<span>Chat</span></button>}
         <button type="button" onClick={() => { setVillageError(""); setMenu("village"); }} disabled={uiBlocked}>🚩<span>Flags</span></button>
         <button type="button" onClick={() => { setVillageError(""); setMenu("war"); }} disabled={uiBlocked}>⚔️<span>War</span></button>
+        <button type="button" onClick={() => { setVillageError(""); for (const p of myPlots(w)) PC.track(market.current, p); setMenu("market"); }} disabled={uiBlocked}>🧺<span>Market</span></button>
         <button type="button" onClick={() => setMenu("tokens")} disabled={uiBlocked}>🚀<span>Tokens</span></button>
         <button type="button" onClick={() => void checkChain(true)} disabled={uiBlocked || checking}>{checking ? "⏳" : "🔄"}<span>Check</span></button>
         <button type="button" onClick={() => setZoom(z => clampZoom(z * 1.4))} disabled={uiBlocked} aria-label="Zoom in">＋</button>
@@ -921,9 +937,11 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       const left = Math.max(8, Math.min((islandPop.x - (rc?.left ?? 0)), (rc?.width ?? 400) - 240)), top = Math.max(8, Math.min(islandPop.y - (rc?.top ?? 0) + 12, (rc?.height ?? 400) - 220));
       return <div className="docks-quick" role="menu" aria-label={`${p.name} options`} style={{ left, top }}>
         <strong>{p.name}</strong>
-        <small>{p.friends.length.toLocaleString()} Friend{p.friends.length === 1 ? "" : "s"} · {r.rank} · {fl ? `🚩 ${fl.name}${fl.founded ? "" : " (rising)"}` : "no flag"}{conn ? ` · docked with ${me.name}` : ""}</small>
+        <small>{p.friends.length.toLocaleString()} Friend{p.friends.length === 1 ? "" : "s"} · {r.rank} · {fl ? `🚩 ${fl.name}${fl.founded ? "" : " (rising)"}${stanceOf(w, p) ? ` · ${stanceOf(w, p) === "war" ? "⚔️ war" : "🕊 peace"}` : ""}` : "no flag"}{conn ? ` · docked with ${me.name}` : ""}</small>
+        {canChat(p) && PC.peaceful(w, p) && <button type="button" role="menuitem" onClick={() => { setIslandPop(null); setMenu("market"); }}>🧺 Trade with {p.name}</button>}
         {!conn && next.length > 0 && <button type="button" role="menuitem" className="rf-frame-primary" onClick={() => dockNextTo(p)}>⚓ Dock {me.name} here · {DOCKING_FEE} RF</button>}
-        {!conn && !next.length && <button type="button" role="menuitem" onClick={() => buildBridge(p)} disabled={!me.berth || !p.berth}>🌉 Bridge from {me.name} · {DOCKING_FEE} RF</button>}
+        {!conn && hostileBorder(w, me, p) && <small>⚔️ {p.name} is {villageOf(w, p)?.name}'s war island: dock next to one of its peace islands instead.</small>}
+        {!conn && !next.length && !hostileBorder(w, me, p) && <button type="button" role="menuitem" onClick={() => buildBridge(p)} disabled={!me.berth || !p.berth}>🌉 Bridge from {me.name} · {DOCKING_FEE} RF</button>}
         {canChat(p) && <button type="button" role="menuitem" onClick={() => openChat(p)}>💬 Chat with {p.name}</button>}
         <button type="button" role="menuitem" onClick={() => setIslandPop(null)}>Close</button>
       </div>; })()}
@@ -948,7 +966,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         {nameOf(naming) && <button type="button" onClick={() => saveName(naming, "")}>Clear</button>}
       </div>
     </GameMenu>}
-    {menu && <GameMenu onClose={() => setMenu(null)} title={menu === "control" ? "Change Friend" : menu === "plot" ? "My islands" : menu === "docks" ? "The Docks" : menu === "village" ? "Flags" : menu === "war" ? "War" : menu === "tokens" ? "Tokens" : menu === "help" ? "How it works" : "Settings"}>
+    {menu && <GameMenu onClose={() => setMenu(null)} title={menu === "control" ? "Change Friend" : menu === "plot" ? "My islands" : menu === "docks" ? "The Docks" : menu === "village" ? "Flags" : menu === "war" ? "War" : menu === "market" ? "Market" : menu === "tokens" ? "Tokens" : menu === "help" ? "How it works" : "Settings"}>
       {menu === "control" ? <>
         <p>Control any of your Friends: tap one on the map, or pick it here. A Friend in a line breaks off when you take it over; make it the primary leader to call the others to it.</p>
         <div className="docks-list">{[lead, ...[...crewModes.keys()], ...allMine.map(x => x.m.id).filter(id => id !== lead && !crewModes.has(id))].slice(0, 150).map(id => { const pl = allMine.find(x => x.m.id === id), m = id === lead ? "you" : crewModes.get(id) ?? "home";
@@ -1026,7 +1044,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           return <div className="docks-isle" key={p.id}>
             <div className="crop">{art ? <img src={art} alt={`${p.name} on-chain artwork`} loading="lazy" /> : <span className="docks-note">{p.name}</span>}</div>
             <span><strong>{p.name}{p.mine ? " (yours)" : ""}</strong>
-              <small>{p.friends.length.toLocaleString()} Friend{p.friends.length === 1 ? "" : "s"} · {r.rank}{fl ? ` · 🚩 ${fl.name}` : ""}{conn ? ` · next to ${isl.name}` : ""}</small></span>
+              <small>{p.friends.length.toLocaleString()} Friend{p.friends.length === 1 ? "" : "s"} · {r.rank}{fl ? ` · 🚩 ${fl.name}` : ""}{stanceOf(w, p) ? ` · ${stanceOf(w, p) === "war" ? "⚔️ war" : "🕊 peace"}` : ""}{conn ? ` · next to ${isl.name}` : ""}</small></span>
             <div className="docks-row tight">
               {!p.mine && !conn && next.length > 0 && <button type="button" className="rf-frame-primary" onClick={() => dockNextTo(p)}>⚓ Dock</button>}
               {!p.mine && !conn && !next.length && isl.berth && p.berth && <button type="button" onClick={() => buildBridge(p)}>🌉 Bridge</button>}
@@ -1043,14 +1061,14 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
             <div className="docks-flag-isles">{isles.map(p => { const art = p.friends.find(x => x.m.friend)?.m.friend?.art, conn = connected(w, isl, p), next = !p.mine && !conn ? zonesNextTo(w, isl, p) : [];
               return <div key={p.id} className="docks-flag-isle">
                 <div className="crop small">{art ? <img src={art} alt="" loading="lazy" /> : null}</div>
-                <small>{p.name}{p.mine ? " (yours)" : ""}</small>
+                <small>{v.stance.get(p) === "war" ? "⚔️" : "🕊"} {p.name}{p.mine ? " (yours)" : ""}</small>
                 {next.length > 0 && <button type="button" onClick={() => dockNextTo(p)}>⚓ Dock</button>}
                 {conn && !p.mine && <small>docked</small>}
               </div>; })}</div>
           </div>; })}</div> : <p className="docks-note">No flags yet. Plant one in 🚩 Flags.</p>}
         <p className="docks-note">Rank follows the official Rare Friends reward weight (Generation × Activation tier), summed over an island's Friends. Neighbours are other people's public Friends shown as samples; their answers to visit requests are simulated.</p>
       </> : menu === "village" ? <>
-        <p>Plant a flag and raise it together. Anyone can lock RF into it until it reaches its target; then it's founded. Targets follow a bonding curve: the next flag needs {fmt(VX.flagPrice(w))} RF ({fmt(VX.FLAG_BASE)} RF × {VX.FLAG_CURVE} per flag already up, at most {fmt(VX.FLAG_TARGET)}), so early flags are cheap and joining makes more sense later. Locked RF never comes back once it's founded (no rug): half becomes permanent RF/ETH liquidity whose trading fees buy RF (half back into the pool, half shared as allowances), half each founder's allowance to build flag items on their island. Everyone who locked holds a soulbound founder mark. Not full in {VX.FLAG_DAYS} days? Everyone takes their RF back. Once founded, everyone brings one island: founders free, anyone else enrolls ({fmt(VX.ENROLL_PRICE)} RF: half liquidity, half their allowance). Every Friend votes; founders' votes are multiplied.</p>
+        <p>Plant a flag and raise it together. Anyone can lock RF into it until it reaches its target; then it's founded. Targets follow a bonding curve: the next flag needs {fmt(VX.flagPrice(w))} RF ({fmt(VX.FLAG_BASE)} RF × {VX.FLAG_CURVE} per flag already up, at most {fmt(VX.FLAG_TARGET)}), so early flags are cheap and joining makes more sense later. Locked RF never comes back once it's founded (no rug): half becomes permanent RF/ETH liquidity whose trading fees buy RF (half back into the pool, half shared as allowances), half each founder's allowance to build flag items on their island. Everyone who locked holds a soulbound founder mark. Not full in {VX.FLAG_DAYS} days? Everyone takes their RF back. Once founded, bring as many islands as you like: a founder's first is free, every other island enrolls ({fmt(VX.ENROLL_PRICE)} RF: half liquidity, half the owner's allowance). Each island joins at ⚔️ war (fights, boards ships, forms the border: outsiders can't dock straight against it) or at 🕊 peace (makes goods, trades; outsiders dock next to it). Best layout: war islands around the edge, peace in the middle. Every Friend votes; founders' votes are multiplied.</p>
         <div className="docks-rf"><span>Your RF <b>{fmt(econ.current.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Into pools <b>{fmt(econ.current.pooled)}</b></span>
           <button type="button" onClick={() => { econ.current.rf += 250_000; bump(); }}>＋250k preview RF</button></div>
         {(() => { const mv = mine.map(p => villageOf(w, p) ?? risingFlagOf(w, p)).find(Boolean);
@@ -1089,13 +1107,16 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
               <div className="docks-row tight">
                 {mine1 && <button type="button" onClick={() => doHarvest(v)}>🌾 Harvest fees</button>}
                 {v.pendingLiquidity > 0 && <button type="button" onClick={() => act(() => { VX.provideLiquidity(v); say(`Queued enrollment RF added to ${v.name}'s liquidity.`); })}>Add queued liquidity</button>}
-                {mine1 ? (mine1 !== v.seat && (v.removals.has(mine1) ? <small>{mine1.name} leaves {new Date(v.removals.get(mine1)!).toLocaleDateString()}</small>
-                    : <button type="button" onClick={() => doRequestRemoval(v, mine1)}>Request removal (next epoch)</button>))
-                  : mineW > 0 ? <button type="button" className="rf-frame-primary" disabled={Boolean(why)} onClick={() => doBring(v, isl)}>Bring {isl.name} (founder, free)</button>
-                  : <button type="button" className="rf-frame-primary" disabled={Boolean(why) || !price} onClick={() => doEnroll(v, isl)}>{price ? `Enroll ${isl.name} · ${fmt(price)} RF` : "Enrollment closed"}</button>}
+                {!v.members.includes(isl) && (VX.bringsFree(v, VX.YOU)
+                  ? <>{(["peace", "war"] as const).map(st => <button type="button" key={st} className={st === "peace" ? "rf-frame-primary" : ""} disabled={Boolean(why)} onClick={() => doBring(v, isl, st)}>{st === "peace" ? "🕊" : "⚔️"} Bring {isl.name} at {st} (founder, free)</button>)}</>
+                  : <>{(["peace", "war"] as const).map(st => <button type="button" key={st} className={st === "peace" ? "rf-frame-primary" : ""} disabled={Boolean(why) || !price} onClick={() => doEnroll(v, isl, st)}>{price ? `${st === "peace" ? "🕊" : "⚔️"} Enroll ${isl.name} at ${st} · ${fmt(price)} RF` : "Enrollment closed"}</button>)}</>)}
                 {VX.inWindow(v) && <button type="button" title="Preview only" onClick={() => { v.foundedAt -= VX.ENROLL_WINDOW_DAYS * VX.DAY; if (v.enrollVote) v.enrollVote.ends = Date.now() - 1; bump(); }}>⏩ Skip the first week</button>}</div>
               {[...v.removals.keys()].length > 0 && <button type="button" title="Preview only" onClick={() => act(() => { VX.skipEpoch(w); for (const line of VX.processRemovals(w)) say(line); })}>⏩ Skip to the next epoch</button>}
-              {!mine1 && why && <small>{why}</small>}
+              {!v.members.includes(isl) && why && <small>{why}</small>}
+              {VX.islandsOf(v, VX.YOU).map(p => { const st = v.stance.get(p) ?? "peace";
+                return <div className="docks-item" key={p.id}><span><strong>{st === "war" ? "⚔️" : "🕊"} {p.name} · {st}</strong><small>{st === "war" ? "boards ships and defends; outsiders can't dock straight against it" : "makes goods and trades; anyone can dock next to it (2 RF docking fee)"}</small></span>
+                  <span className="docks-row tight"><button type="button" onClick={() => doStance(v, p, st === "war" ? "peace" : "war")}>{st === "war" ? "🕊 Make it peace" : "⚔️ Make it war"}</button>
+                    {p !== v.seat && (v.removals.has(p) ? <small>leaves {new Date(v.removals.get(p)!).toLocaleDateString()}</small> : <button type="button" onClick={() => doRequestRemoval(v, p)}>Request removal</button>)}</span></div>; })}
               {mine1 && <>
                 <h4>🧱 Build on {mine1.name}</h4>
                 <div className="docks-row tight"><select aria-label="Item to build" value={buildKind} onChange={e => setBuildKind(Number(e.target.value))}>
@@ -1193,6 +1214,41 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         {book.current.battles.length > 1 && <small>{book.current.battles.length} battles fought on the docks so far.</small>}
         <details><summary>War rules (all settings, tunable)</summary>
           <p className="docks-note">Shield {WR.WAR.SHIELD_DAYS} days after founding · loot vault starts with {WR.WAR.LOOT_FROM_FOUNDING_BPS / 100}% of the flag's RF and gets {WR.WAR.LOOT_FROM_FEES_BPS / 100}% of every harvest of its AMM fees; anyone can add to it · bounty {WR.WAR.DOCKS_BOUNTY_BPS / 100}% of the Docks rewards reserve per win (double in a declared war) · {WR.WAR.TO_FIGHTERS_BPS / 100}% of loot to the fighters by level, the rest to the winner's vault · loss per battle {WR.WAR.TIER_NAMES.map((n, t) => `${n} ${WR.lossBps(t) / 100}%`).join(", ")} · home advantage {WR.WAR.HOME_ADVANTAGE * 100}% · every island aboard duels a defender within one island tier ({WR.WAR.ISLAND_TIERS.map((m, t) => `tier ${t + 1} ${fmt(m)}+`).join(", ")}); no match, it sits out · a sunk ship comes back after {WR.WAR.SHIP_REGEN_HOURS} h · raid cooldown {WR.WAR.RAID_COOLDOWN_HOURS} h per target outside a war · war lasts {WR.WAR.WAR_DAYS} days · {WR.WAR.INTRO_DINGHIES} free dinghies per new flag · flag tiers by battle power: {WR.WAR.TIERS.map((m, t) => `${WR.WAR.TIER_NAMES[t]} ${fmt(m)}+`).join(", ")} (tier skins later). Island level = rank (reward weight) + log₂(Friends); strength = level × √Friends. On chain, each round is one Dice roll.</p></details>
+      </div>; })() : menu === "market" ? (() => { const mk = market.current, e = econ.current, inv = PC.invOf(mk, VX.YOU), mineP = myPlots(w);
+        const peaceMine = mineP.filter(p => PC.peaceful(w, p)), sellFrom = peaceMine.includes(isl) ? isl : peaceMine[0];
+        const own = w.items.filter(it => it.owner === VX.YOU && !mk.listings.some(l => l.item === it));
+        return <div className="docks-war">
+        <p>Peace land makes goods and trades them: build 🌾 Farms, 🎣 Fisheries, 🔨 Workshops, 🧵 Looms and 🏺 Kilns on a peace island (or any island in no flag), collect what they make, and sell it, or your own items, at your price. You can buy from islands docked or bridged to yours and from your flag-mates; war islands don't trade. A sale from a flag's peace island pays {PC.PEACE.TRADE_TAX_BPS / 100}% tax to that flag's treasury; islands in no flag trade tax-free.</p>
+        <div className="docks-rf"><span>Your RF <b>{fmt(e.rf)}</b><span className="docks-sim">SIMULATED</span></span>{PC.GOODS.map((g, i) => <span key={i}>{g.icon} {g.name} <b>{inv[i]}</b></span>)}</div>
+        {villageError && <p role="alert" className="docks-note">{villageError}</p>}
+        <h4>🌾 Your land</h4>
+        {mineP.map(p => { const out = PC.outputOf(w, p), wait = PC.waiting(w, mk, p), any = out.some(x => x > 0), st = stanceOf(w, p);
+          return <div className="docks-item" key={p.id}><span><strong>{st === "war" ? "⚔️" : "🕊"} {p.name}{st ? ` · ${st}` : " · no flag"}</strong>
+            <small>{st === "war" ? "a war island: it doesn't produce" : any ? `makes ${out.map((r, i) => r ? `${r.toFixed(1)} ${PC.GOODS[i].icon}/h` : "").filter(Boolean).join(" · ")} · waiting ${wait.map((n, i) => n ? `${n} ${PC.GOODS[i].icon}` : "").filter(Boolean).join(" ") || "nothing yet"}` : "no producers yet: build a Farm, Fishery, Workshop, Loom or Kiln here (🚩 Flags → your own items)"}</small></span>
+            <span className="docks-row tight">{any && <button type="button" onClick={() => act(() => { const got = PC.collect(w, mk, p); say(`Collected from ${p.name} (simulated): ${got.map((n, i) => n ? `${n} ${PC.GOODS[i].name}` : "").filter(Boolean).join(", ") || "nothing yet"}.`); })}>Collect</button>}
+              {any && <button type="button" title="Preview only" onClick={() => { mk.lastCollect.set(p, Date.now() - 12 * VX.HOUR); bump(); }}>⏩ 12 h</button>}</span></div>; })}
+        <h4>🏷 Sell {sellFrom ? `from ${sellFrom.name}` : ""}</h4>
+        {!sellFrom ? <p className="docks-note">All your islands are at war: make one peace to trade.</p> : <div className="docks-row tight">
+          <select aria-label="What to sell" value={sellWhat} onChange={e2 => setSellWhat(e2.target.value)}>
+            {PC.GOODS.map((g, i) => <option key={`g${i}`} value={`g${i}`}>{g.icon} {g.name} ({inv[i]})</option>)}
+            {own.map(it => <option key={`i${it.id}`} value={`i${it.id}`}>{VX.CATALOG[it.kind].icon} {VX.CATALOG[it.kind].name} (your item)</option>)}</select>
+          {sellWhat.startsWith("g") && <input aria-label="Quantity" inputMode="numeric" value={sellQty} onChange={e2 => setSellQty(e2.target.value)} />}
+          <input aria-label="Price each (RF)" inputMode="numeric" value={sellPrice} onChange={e2 => setSellPrice(e2.target.value)} />
+          <button type="button" className="rf-frame-primary" onClick={() => act(() => { const id = Number(sellWhat.slice(1)), what = sellWhat.startsWith("g") ? { good: id } : { item: w.items.find(it => it.id === id)! };
+            const l = PC.list(w, mk, sellFrom, what, rfIn(sellQty), rfIn(sellPrice)); say(`🏷 Listed ${l.qty} ${l.good !== null ? PC.GOODS[l.good].name : VX.CATALOG[l.item!.kind].name} at ${fmt(l.price)} RF each from ${sellFrom.name} (simulated).`); })}>List for sale</button></div>}
+        {mk.listings.filter(l => l.seller === VX.YOU).map(l => <div className="docks-item" key={l.id}><span><strong>🏷 {l.qty} {l.good !== null ? `${PC.GOODS[l.good].icon} ${PC.GOODS[l.good].name}` : `${VX.CATALOG[l.item!.kind].icon} ${VX.CATALOG[l.item!.kind].name}`} · {fmt(l.price)} RF each</strong><small>yours, from {l.from.name}</small></span>
+          <button type="button" onClick={() => act(() => PC.unlist(w, mk, l))}>Take down</button></div>)}
+        <h4>🛒 For sale near you</h4>
+        {(() => { const near = mk.listings.filter(l => l.seller !== VX.YOU).map(l => ({ l, buyer: PC.buyerFor(w, mineP, l.from) }));
+          const reach = near.filter(x => x.buyer), far = near.length - reach.length;
+          return <>{reach.length ? reach.map(({ l, buyer }) => <div className="docks-item" key={l.id}><span><strong>{l.qty} {l.good !== null ? `${PC.GOODS[l.good].icon} ${PC.GOODS[l.good].name}` : `${VX.CATALOG[l.item!.kind].icon} ${VX.CATALOG[l.item!.kind].name}`} · {fmt(l.price)} RF each</strong>
+            <small>from {l.from.name}{villageOf(w, l.from) ? ` (🚩 ${villageOf(w, l.from)!.name}: ${PC.PEACE.TRADE_TAX_BPS / 100}% tax to it)` : " (no flag: no tax)"}</small></span>
+            <span className="docks-row tight">
+              <button type="button" onClick={() => act(() => { const r = PC.buy(w, mk, e, l, 1, buyer!); say(`🛒 Bought 1 from ${l.from.name} for ${fmt(r.total)} RF (simulated)${r.tax ? `, ${fmt(r.tax)} RF of it tax to ${r.flag}` : ""}.`); })}>Buy 1</button>
+              {l.qty > 1 && <button type="button" onClick={() => act(() => { const r = PC.buy(w, mk, e, l, l.qty, buyer!); say(`🛒 Bought all from ${l.from.name} for ${fmt(r.total)} RF (simulated)${r.tax ? `, ${fmt(r.tax)} RF of it tax to ${r.flag}` : ""}.`); })}>Buy all · {fmt(l.qty * l.price)} RF</button>}</span></div>)
+            : <p className="docks-note">Nothing you can reach: dock next to a peace island (or an island in no flag) to trade with it.</p>}
+            {far > 0 && <small>{far} more listing{far === 1 ? "" : "s"} on islands you aren't docked or bridged to.</small>}</>; })()}
+        {mk.sales.length > 0 && <small>{mk.sales.length} sale{mk.sales.length === 1 ? "" : "s"} on the docks so far · {fmt(mk.sales.reduce((n, x) => n + x.tax, 0))} RF paid in tax to flags.</small>}
       </div>; })() : menu === "tokens" ? <>
         <div className="docks-rf"><span>Your RF <b>{fmt(econ.current.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Into pools <b>{fmt(econ.current.pooled)}</b></span><span>Docks pool <b>{fmt(econ.current.docksPool)}</b></span><span>Platform fee <b>{PLATFORM_FEE_BPS / 100}%</b></span></div>
         <p className="docks-note">Launch a token from your island for {LAUNCH_FEE.toLocaleString()} RF. Airdrops and claims land in each Friend's own wallet; every claim costs RF. Launch fees and claim prices go into {poolName(w, h)} (the launching island's flag pool, or the shared Docks pool): nothing is burned. In this preview it's all simulated; the contracts are in the submission.</p>

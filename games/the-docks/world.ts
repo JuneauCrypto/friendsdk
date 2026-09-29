@@ -9,7 +9,9 @@
  * - Islands float on one shared berth grid: one island per berth, whatever its size, so the
  *   world grows with the number of plots, not their size. An island docks at a free berth
  *   next to another island (a loading zone). Neighbouring islands are joined by a gangway.
- * - Bridges (paid in RF, per berth of distance) join islands that aren't neighbours.
+ * - Bridges (a 2 RF docking fee) join islands that aren't neighbours.
+ * - A flag's islands are each war or peace. Islands outside a flag dock next to its peace
+ *   islands only, never directly against a war island (its border).
  * - Crossing onto someone else's island needs their approval unless they keep it open.
  * Built to scale to 10,000+ Friends per island: layout needs no artwork (footprints come from
  * generation) and occupancy is per cell. */
@@ -72,9 +74,12 @@ export type Item = { id: number; kind: number; village: Village | null; owner: s
 export type Raffle = { item: Item; ends: number; tickets: Map<string, number> };
 /** A flag planted on an island rises as people lock RF into it; full, it's founded as a flag
  *  and other islands choose to join while connected to it. Mirrors contracts/src/docks/DocksVillages.sol. */
+/** A flag's island is at war (fights: boards ships, defends) or at peace (produces, trades). */
+export type Stance = "war" | "peace";
 export type Village = {
   id: string; name: string; seat: Plot; flag: { x: number; y: number }; color: string;
-  members: Plot[];                                                // one island per wallet (walletOf)
+  members: Plot[];                                                // a wallet may bring several islands
+  stance: Map<Plot, Stance>;                                      // each member island: war or peace
   target: number; deadline: number; locked: number; lockers: Map<string, number>;   // founder (wallet label) → RF locked
   founded: boolean; failed: boolean; foundedAt: number;
   pool: number;                                                   // locked + enrollment fees: founder shares are of this
@@ -302,8 +307,10 @@ const around = (b: Berth) => [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) =
 /** Free berths next to a docked island, where `p` can dock. The first island docks anywhere. */
 export function loadingZones(w: World, p: Plot): Berth[] {
   const out = new Map<number, Berth>();
-  for (const q of w.plots) if (q !== p && q.berth && q.friends.length)
+  for (const q of w.plots) if (q !== p && q.berth && q.friends.length && !hostileBorder(w, p, q))
     for (const b of around(q.berth)) { const o = w.berths.get(ck(b.x, b.y)); if (!o || o === p) out.set(ck(b.x, b.y), b); }
+  // never directly against someone else's war island
+  for (const [k, b] of out) if (around(b).some(n => { const q = w.berths.get(ck(n.x, n.y)); return q && q !== p && q.friends.length && hostileBorder(w, p, q); })) out.delete(k);
   if (!out.size && ![...w.berths.values()].some(q => q !== p)) out.set(ck(0, 0), { x: 0, y: 0 });
   return [...out.values()];
 }
@@ -327,7 +334,7 @@ export function connected(w: World, a: Plot, b: Plot) {
 }
 export function neighboursOf(w: World, p: Plot) { return w.plots.filter(q => q.friends.length && connected(w, p, q)); }
 export function addBridge(w: World, a: Plot, b: Plot) {
-  if (!a.berth || !b.berth || connected(w, a, b)) return false;
+  if (!a.berth || !b.berth || connected(w, a, b) || hostileBorder(w, a, b)) return false;
   w.bridges.push({ a, b, at: [{ ...a.berth }, { ...b.berth }] }); rebuild(w); return true;
 }
 
@@ -336,6 +343,10 @@ export function addBridge(w: World, a: Plot, b: Plot) {
 const FLAG_COLORS = ["#ff4d6d", "#4dabf7", "#ffd43b", "#69db7c", "#b197fc", "#ff922b"];
 /** The founded village an island is in (a rising flag isn't a flag yet). */
 export const villageOf = (w: World, p: Plot) => w.villages.find(v => v.founded && v.members.includes(p)) ?? null;
+/** War or peace for an island in a founded flag; null outside one. */
+export const stanceOf = (w: World, p: Plot): Stance | null => { const v = villageOf(w, p); return v ? v.stance.get(p) ?? "peace" : null; };
+/** A war island of a flag `p` isn't in: `p` can't dock directly against it or bridge to it. */
+export const hostileBorder = (w: World, p: Plot, q: Plot) => stanceOf(w, q) === "war" && villageOf(w, q) !== villageOf(w, p);
 /** A flag still rising on this island (it's the seat). */
 export const risingFlagOf = (w: World, p: Plot) => w.villages.find(v => !v.founded && !v.failed && v.seat === p) ?? null;
 /** Why `p` can't plant a flag (null: it can). `at` is an island-local tile the flag stands on. */
@@ -352,7 +363,7 @@ export function newVillage(w: World, seat: Plot, name: string, at: { x: number; 
     color: FLAG_COLORS[w.villages.length % FLAG_COLORS.length], target, deadline, locked: 0, lockers: new Map(), founded: false, failed: false, foundedAt: 0,
     pool: 0, enrollOpen: false, enrollPrice: 0, enrollCap: 0, enrollVote: null,
     liquidity: 0, pendingLiquidity: 0, fees: { rf: 0, eth: 0 }, poolBps: 5000, compounded: 0,
-    credited: new Map(), spent: new Map(), removals: new Map(), raffles: [], proposals: [] };
+    credited: new Map(), spent: new Map(), removals: new Map(), raffles: [], proposals: [], stance: new Map() };
   w.villages.push(v); w.version++; return v;
 }
 /** Everyone in a flag brings exactly one island (one per wallet). Why `p` can't (null: it can). */
@@ -360,12 +371,11 @@ export function joinProblem(w: World, v: Village, p: Plot): string | null {
   if (!v.founded) return `${v.name}'s flag is still rising: islands join once it's founded.`;
   if (!p.berth) return `Dock ${p.name} first.`;
   const cur = villageOf(w, p) ?? risingFlagOf(w, p); if (cur) return cur === v ? `${p.name} is in ${v.name}.` : `${p.name} already flies ${cur.name}'s flag.`;
-  if (v.members.some(m => walletOf(m) === walletOf(p))) return `You already have an island in ${v.name}: everyone brings one.`;
   return null;
 }
-export function addMember(w: World, v: Village, p: Plot) {
+export function addMember(w: World, v: Village, p: Plot, stance: Stance = "peace") {
   const why = joinProblem(w, v, p); if (why) throw new Error(why);
-  v.members.push(p); w.version++;
+  v.members.push(p); v.stance.set(p, stance); w.version++;
 }
 export function flagTile(w: World, v: Village) {
   const o = w.origin.get(v.seat); return o ? { x: o.x + v.flag.x, y: o.y + v.flag.y } : null;

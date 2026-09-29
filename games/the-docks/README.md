@@ -21,7 +21,8 @@ is a saved layout that belongs to the wallet that built it, and it can't be sold
 - **Tap to dock.** Tap any island on the map for its options: **⚓ Dock** next to it, **🌉 Bridge**
   or **💬 Chat**. Docking and bridges each cost a **2 RF docking fee**, into The Docks fund (the
   Docks rewards reserve). Once connected, your Friends can walk onto that island (free for now;
-  a toll to its owner and the Docks may come later).
+  a toll to its owner and the Docks may come later). You can't dock straight against another
+  flag's war island: dock next to its peace islands.
 - **Bridges.** Can't dock next to an island you want? Build a **bridge** to it (2 RF docking
   fee). It lasts until either island moves.
 - **Chat.** Docked or bridged to someone else's island, you can chat with them (simulated:
@@ -89,6 +90,33 @@ app's built-in browser (the SDK has no WalletConnect).
 | **Rank** | Sum of the official reward weight (Generation × Activation tier, per rarefriends.com/docs/generations) of a plot's Friends: Speck 0+ · Hamlet 5+ · Village 50+ · Town 500+ · City 5,000+ · Capital 50,000+. |
 
 Controls: WASD / arrow keys or tap to walk; zoom with ＋/－, the mouse wheel, pinch, or the +/- keys; drag to pan; ⤢ fits every island on screen and ⌖ returns to your lead (zoomed far out, lands are drawn as outlines so 10,000 Friends stay fast); reduced-motion in More.
+
+## War and peace islands, and the peace economy (simulated)
+
+- **Several islands per flag.** A wallet can bring as many islands as it likes: a founder's
+  first is free, every other island enrolls at the flag's enrollment price. Votes count every
+  Friend on all of a wallet's islands.
+- **War or peace.** Every island that joins a flag picks one (and can switch later):
+  - ⚔️ **War islands** board ships, defend the flag and form its border: an island from outside
+    the flag can't dock straight against one, or bridge to it.
+  - 🕊 **Peace islands** make goods and trade. Anyone can dock next to them (still the 2 RF
+    docking fee) and trade. A flag with no war islands defends with its peace islands at half
+    strength.
+  - Best layout: war islands around the edge, peace in the middle. The game suggests this but
+    doesn't enforce it yet.
+- **Goods.** Peace land (a flag's peace islands, or any island in no flag) produces goods from
+  peace items: 🌾 Farm → Grain, 🎣 Fishery → Fish, 🔨 Workshop → Tools, 🧵 Loom → Cloth,
+  🏺 Kiln → Pottery. A Market stall on the island adds 20%. Goods pile up (up to 48 h) until
+  the owner collects them.
+- **Market (🧺).** List goods or your own items at your price from a peace island. You can buy
+  from islands docked or bridged to yours and from your flag-mates; islands in no flag trade
+  with each other freely when connected. War islands don't trade.
+- **Tax.** A sale from a flag's peace island pays 5% to that flag's treasury (its pool). Sales
+  between islands in no flag pay no tax.
+- **Chat** works between any connected islands, flag or no flag.
+
+Not on chain yet: stances, several islands per wallet in a flag (the contract still allows
+one), goods, listings and the trade tax.
 
 ## War (simulated; tunable)
 

@@ -12,7 +12,7 @@
  *  - votes: every Friend on a member's island is a vote; founders ×(1 + their share of the pool);
  *  - harvest: fees buy back RF; the pool share (half) goes back into the pool, the rest is
  *    shared by Friends (less the flag's loot-vault share, see war.ts). Nothing is burned. */
-import { addMember, CELL, flagProblem, newVillage, villageOf, walletOf, type Item, type Plot, type Proposal, type ProposalKind, type Raffle, type Village, type World } from "./world.js";
+import { addMember, CELL, type Stance, flagProblem, newVillage, villageOf, walletOf, type Item, type Plot, type Proposal, type ProposalKind, type Raffle, type Village, type World } from "./world.js";
 import { toPool, type Economy } from "./launch.js";
 
 export const FLAG_TARGET = 1_000_000;                 // RF to fill a flag (a contract setting)
@@ -43,6 +43,12 @@ export const CATALOG = [
   { name: "Sea wall", icon: "🧱", price: 20_000, build: DAY },
   { name: "Armory", icon: "⚔️", price: 60_000, build: 3 * DAY },
   { name: "Fort", icon: "🏰", price: 60_000, build: 3 * DAY },
+  // peace items: they make goods on peace land (see peace.ts PRODUCERS)
+  { name: "Farm", icon: "🌾", price: 5_000, build: 2 * HOUR },
+  { name: "Fishery", icon: "🎣", price: 8_000, build: 4 * HOUR },
+  { name: "Workshop", icon: "🔨", price: 15_000, build: 12 * HOUR },
+  { name: "Loom", icon: "🧵", price: 15_000, build: 12 * HOUR },
+  { name: "Kiln", icon: "🏺", price: 30_000, build: DAY },
 ];
 /** Flags get dearer as more are planted (a bonding curve): cheap to start early, joining makes
  *  more sense later. FLAG_BASE × FLAG_CURVE^(flags so far), capped at FLAG_TARGET. */
@@ -60,12 +66,14 @@ export const rising = (v: Village, now = Date.now()) => !v.founded && !v.failed 
 export const weightOf = (v: Village, who: string) => v.lockers.get(who) ?? 0;
 export const daysLeft = (v: Village, now = Date.now()) => Math.max(0, Math.ceil((v.deadline - now) / DAY));
 export const islandOf = (v: Village, who: string) => v.members.find(p => walletOf(p) === who) ?? null;
+/** Every island a wallet has in the flag (a wallet may bring several). */
+export const islandsOf = (v: Village, who: string) => v.members.filter(p => walletOf(p) === who);
 export const population = (v: Village) => v.members.reduce((n, p) => n + p.friends.length, 0);
 /** Founder multiplier: 1 + RF locked / pool. */
 export const multiplier = (v: Village, who: string) => 1 + (v.pool ? weightOf(v, who) / v.pool : 0);
 /** Voting power: Friends on your flagged island × your founder multiplier. */
-export const powerOf = (v: Village, who: string) => { const p = islandOf(v, who); return p ? p.friends.length * multiplier(v, who) : 0; };
-export const totalPower = (v: Village) => v.members.reduce((n, p) => n + powerOf(v, walletOf(p)), 0);
+export const powerOf = (v: Village, who: string) => islandsOf(v, who).reduce((n, p) => n + p.friends.length, 0) * multiplier(v, who);
+export const totalPower = (v: Village) => [...new Set(v.members.map(walletOf))].reduce((n, who) => n + powerOf(v, who), 0);
 /** RF left to spend on items for your flagged island: half your lock + your credits − spent. */
 export const allowanceOf = (v: Village, who: string) => Math.max(0, weightOf(v, who) / 2 + (v.credited.get(who) ?? 0) - (v.spent.get(who) ?? 0));
 export const nextEpoch = (w: World, now = Date.now()) => w.genesis + (Math.floor((now - w.genesis) / (EPOCH_DAYS * DAY)) + 1) * EPOCH_DAYS * DAY;
@@ -109,7 +117,7 @@ export function found(w: World, v: Village) {
   if (v.locked < v.target) throw new Error(`${v.name}'s flag is ${pct(v)}% full.`);
   v.founded = true; v.foundedAt = Date.now(); v.pool = v.locked; v.enrollPrice = ENROLL_PRICE;
   v.liquidity = v.locked / 2;                                     // the other half: founders' allowances
-  v.members = [v.seat];
+  v.members = [v.seat]; v.stance.set(v.seat, "peace");
   v.enrollVote = newProposal(v, "enrollment", [], "", ENROLL_WINDOW_DAYS);
   w.version++;
 }
@@ -124,12 +132,19 @@ export function refund(w: World, e: Economy | null, v: Village, who = YOU) {
   return amount;
 }
 
-/* ── people: everyone brings one island ── */
+/* ── people: bring islands, each at war or at peace ── */
 
-/** Founders bring one island of theirs, free. */
-export function bring(w: World, v: Village, p: Plot) {
+/** A founder's first island joins free; every further island (anyone's) enrolls. */
+export const bringsFree = (v: Village, who: string) => weightOf(v, who) > 0 && !islandsOf(v, who).length;
+export function bring(w: World, v: Village, p: Plot, stance: Stance = "peace") {
   if (!weightOf(v, walletOf(p))) throw new Error(`Only ${v.name}'s founders bring an island free; everyone else enrolls.`);
-  joinChecks(w, v, p); addMember(w, v, p);
+  if (!bringsFree(v, walletOf(p))) throw new Error(`Your free island is already in ${v.name}: enroll more islands.`);
+  joinChecks(w, v, p); addMember(w, v, p, stance);
+}
+/** War or peace: switch one of your islands in the flag. */
+export function setStance(w: World, v: Village, p: Plot, stance: Stance) {
+  if (!v.members.includes(p)) throw new Error(`${p.name} isn't in ${v.name}.`);
+  v.stance.set(p, stance); w.version++;
 }
 function joinChecks(w: World, v: Village, p: Plot) {
   const until = w.cooldown.get(p) ?? 0;
@@ -137,10 +152,10 @@ function joinChecks(w: World, v: Village, p: Plot) {
   if (v.enrollCap && population(v) + p.friends.length > v.enrollCap) throw new Error(`${v.name} is capped at ${v.enrollCap.toLocaleString()} Friends.`);
 }
 /** Enroll one island for the enrollment price, paid into the pool (half treasury, half liquidity). */
-export function enroll(w: World, e: Economy | null, v: Village, p: Plot) {
+export function enroll(w: World, e: Economy | null, v: Village, p: Plot, stance: Stance = "peace") {
   const price = enrollPrice(v); if (!price) throw new Error(`${v.name}'s enrollment is closed.`);
   if (e && e.rf < price) throw new Error(`Enrolling costs ${price.toLocaleString()} RF; you have ${e.rf.toLocaleString()}.`);
-  joinChecks(w, v, p); addMember(w, v, p);
+  joinChecks(w, v, p); addMember(w, v, p, stance);
   if (e) e.rf -= price;
   const who = walletOf(p);
   v.pool += price; v.credited.set(who, (v.credited.get(who) ?? 0) + price / 2); v.pendingLiquidity += price / 2;
@@ -279,8 +294,8 @@ export function processRemovals(w: World, now = Date.now()): string[] {
   const out: string[] = [];
   for (const v of w.villages) for (const [p, at] of [...v.removals]) {
     if (now < at) continue;
-    v.removals.delete(p); v.members = v.members.filter(x => x !== p);
-    const who = walletOf(p), left = allowanceOf(v, who);
+    v.removals.delete(p); v.members = v.members.filter(x => x !== p); v.stance.delete(p);
+    const who = walletOf(p), left = islandsOf(v, who).length ? 0 : allowanceOf(v, who);   // the allowance goes with the wallet's last island
     v.spent.set(who, (v.spent.get(who) ?? 0) + left); v.pendingLiquidity += left;
     let n = 0;
     for (const it of w.items) if (it.village === v && it.plot === p) { it.plot = null; v.raffles.push({ item: it, ends: now + RAFFLE_DAYS * DAY, tickets: new Map() }); n++; }
@@ -308,8 +323,8 @@ function newItem(w: World, kind: number, village: Village | null, owner: string 
   w.items.push(it); w.version++; return it;
 }
 /** A flag item on your flagged island, paid from your allowance (its RF → liquidity). */
-export function buyForVillage(w: World, v: Village, who: string, kind: number, cx: number, cy: number) {
-  const p = islandOf(v, who); if (!p) throw new Error(`Bring or enroll an island in ${v.name} first.`);
+export function buyForVillage(w: World, v: Village, who: string, kind: number, cx: number, cy: number, on?: Plot) {
+  const p = (on && islandsOf(v, who).includes(on) ? on : null) ?? islandOf(v, who); if (!p) throw new Error(`Bring or enroll an island in ${v.name} first.`);
   const why = cellProblem(w, p, cx, cy); if (why) throw new Error(why);
   const price = CATALOG[kind].price;
   if (allowanceOf(v, who) < price) throw new Error(`Your ${v.name} allowance is ${Math.floor(allowanceOf(v, who)).toLocaleString()} RF.`);
