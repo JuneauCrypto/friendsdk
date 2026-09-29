@@ -120,7 +120,7 @@ try {
   await game.locator("img.docks-land").first().waitFor();
   await game.getByText(many ? /All [\d,]+ of your activated Friends joined into one floating island/ : /All 2 of your activated Friends joined into one floating island/).waitFor();
   // boarding the first time: the Friend chosen in the picker becomes the captain, no second prompt
-  await game.getByText(/#7730, the Friend you chose, is Your island's captain/).waitFor();
+  await game.getByText(/#7730 is your captain/).waitFor();
   if (await game.getByRole("dialog").count()) throw new Error("no captain prompt expected after the picker");
   await page.waitForTimeout(1200);
   await shot("start");

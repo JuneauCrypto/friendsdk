@@ -208,7 +208,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         const members = [...held.values()].map(l => have.get(l.id)?.m ?? member(l.id, l.gen, l.tier));
         const h = home(); h.friends = autoArrange(members); rebuild(w);
         const sp = spawnOn(w, h.friends.find(p => p.m.id === friendId)!); api.current?.teleport(sp.x, sp.y);
-        const sc = sim.current, welcome = sc ? ` 🌊 Welcome to the simulated Docks: ${sc.flags.length} flags (${sc.flags.map(x => x.name).join(", ")}), ${sc.wanderers.length} wanderers, ${sc.islands} islands, ${sc.friends.toLocaleString()} residents; you start with 50,000 RF. Tap ⤢ to see it all.` : "";
+        const sc = sim.current, welcome = sc ? ` 🌊 Simulated Docks: ${sc.flags.length} flags, ${sc.islands} islands, ${sc.friends.toLocaleString()} residents; you start with 50,000 RF. Tap ⤢ to see it all.` : "";
         say((members.length > 1 ? `All ${members.length.toLocaleString()} of your activated Friends joined into one floating island. Open Docks to find a loading zone.`
           : "Your Friend is a floating island. Open Docks to find a loading zone next to the others.") + welcome);
       } else {
@@ -430,7 +430,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     if (mayorOf(p) === id) { mayors.current.set(p.id, null); try { localStorage.removeItem(mayorKey(p.id)); } catch { /* ignore */ } }
     try { localStorage.setItem(storeKey(p.id), String(id)); } catch { /* storage unavailable: session only */ }
     setQuick(null); bump();
-    if (first) { const m = `#${id}, the Friend you chose, is ${p.name}'s captain (saved on chain, simulated, gas only). You won't be asked again; change it any time in 🏝 Islands.`; setToast(t => t ? `${t} ${m}` : m); }
+    if (first) { const m = `#${id} is your captain (change it in 🏝 Islands).`; setToast(t => t ? `${t} ${m}` : m); }
     else say(`${who(id)} is ${p.name}'s captain (simulated on chain, gas only): you'll board as #${id} every time.`);
   }
   /* ── each island's mayor: a second Friend that stays home and greets visitors ── */
@@ -918,7 +918,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       </div>
     </div>
 
-    <p className="docks-toast" role="status" aria-live="polite">{toast}</p>
+    {(arranging || crewBar) && <p className="docks-toast" role="status" aria-live="polite">{toast}</p>}
 
     {arranging ? <div className="docks-arrange" role="toolbar" aria-label="Arrange your Friends">
       <div className="docks-arrange-info"><strong>{selected.length === 0 ? "Tap a Friend" : selected.length === 1 ? `Moving #${selected[0].m.id}` : selected.length === isl.friends.length ? `Moving all ${selected.length.toLocaleString()}` : `Moving ${selected.length.toLocaleString()} Friends`}</strong>
@@ -957,6 +957,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       <button type="button" disabled={!crewModes.size} onClick={() => { setModes([...crewModes.keys()], "home"); setCrewSel(new Set()); say("Everyone went back to their own land."); }}>All go home</button>
       <button type="button" onClick={() => { setCrewBar(false); setCrewSel(new Set()); }}>Done</button>
     </div> : <div className="docks-bar" inert={uiBlocked || undefined}>
+      <p className="docks-toast in-bar" role="status" aria-live="polite">{toast}</p>
       {gate && !canEnter(w, gate) ? <span className="docks-hint">🚩 {gate.name}: {villageOf(w, gate) ? `only ${villageOf(w, gate)!.name}'s islands walk here; bridge to it to explore` : "only islands under a flag can be visited for now"}</span>
         : dirty ? <div className="docks-row tight docks-unsaved">
           <button type="button" className="docks-act" disabled={saving} onClick={() => void saveOnChain()}>{saving ? "Saving…" : `⛓ ${[...pending.plots].some(p => !nftOf(p)) ? "Save" : "Save"} · ${pending.moved.length.toLocaleString()} moved · ${fmt(pending.rf)} RF`}</button>

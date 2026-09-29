@@ -88,6 +88,7 @@
 .docks-arrange-info{display:flex;flex-direction:column;min-width:120px}.docks-arrange-info small{font-size:10px;color:#bbb}
 .docks-save{display:flex;flex-direction:column;gap:4px;align-items:flex-end}.docks-save small{font-size:10px;color:var(--signal)}
 .docks .docks-nav .docks-arrange-btn{background:var(--signal);color:#000;border-color:var(--signal)}
+.docks-toast.in-bar{position:static;transform:none;max-width:100%;order:-1}
 .docks-unsaved{width:100%;max-width:420px}.docks-unsaved .docks-act{flex:1}
 .docks-seams .gangway{fill:#2b2b2b;stroke:#555;stroke-width:.3}
 .docks-seams .bridge{fill:#3a3320;stroke:#ccff00;stroke-width:.3}
