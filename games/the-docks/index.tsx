@@ -11,6 +11,7 @@ import {
   dockAt, loadingZones, member, memberOf, moveGroup, myPlots, neighboursOf, pendingChanges, plotOf, rankOf, rebuild,
   refreshMember, removeFromPlot, swapInto, undock, weightOf, burnHole, fillHole, holesOf, feeOf,
   CELL, exploring, hostileBorder, stanceOf, canEnterFrom, flagProblem, joinProblem, newVillage, risingFlagOf, tileAt, villageOf, flagTile, walletOf, type Village,
+  zOf, levelName, plotBounds, berthDist,
   type Access, type Berth, type Hole, type Member, type Placed, type Plot, type World,
 } from "./world.js";
 import { DocksView, clampZoom, spawnOn, type CrewMember, type ViewApi } from "./view.js";
@@ -33,6 +34,14 @@ const CHECK_EVERY_MS = 60_000;
 const MAX_DRAWN = 40;                             // crew sprites drawn at once (the rest are counted)
 const ART_CONCURRENCY = 6, ART_CACHE = 500;       // lazy on-chain art: parallel reads, Friends kept in memory
 const PAGE = 50;
+/** A small top-down map of an island: every Friend's footprint, lighter for older generations. */
+const GEN_FILL: Record<number, string> = { 1: "#ffffff", 2: "#eeeeee", 3: "#d6d6d6", 4: "#bdbdbd", 5: "#a3a3a3", 6: "#8a8a8a" };
+function IslandThumb({ p, color }: { p: Plot; color?: string }) {
+  const b = plotBounds(p), W = b.x1 - b.x0, H = b.y1 - b.y0, pad = Math.max(W, H) * 0.08 + 0.3;
+  return <svg className="docks-thumb" viewBox={`${b.x0 - pad} ${b.y0 - pad} ${W + pad * 2} ${H + pad * 2}`} role="img" aria-label={`${p.name}: ${p.friends.length} Friends`}>
+    {p.friends.map(pl => <rect key={String(pl.m.id)} x={pl.x + 0.08} y={pl.y + 0.08} width={pl.m.cw - 0.16} height={pl.m.ch - 0.16} fill={GEN_FILL[pl.m.gen] ?? "#999"} stroke={color ?? "#000"} strokeWidth={0.12} />)}
+  </svg>;
+}
 
 /* Sample neighbours: other people's public, activated Friends, read live from chain and clearly
  * labelled, floating at their berths. Their access answers are simulated until a shared world exists. */
@@ -106,6 +115,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const flagFriends = useRef<FF.FlagFriends>(new Map());
   const sim = useRef<SIM.SimWorld | null>(null);                                  // the simulated Docks
   const templates = useRef<Map<bigint, Promise<Friend>>>(new Map());              // borrowed on-chain art for simulated residents                           // each flag's generated Friend (simulated)                               // peace economy: goods, listings (simulated)
+  const [marketAt, setMarketAt] = useState<string | null>(null);   // a flag's market to show first
   const [sellWhat, setSellWhat] = useState("g0"), [sellQty, setSellQty] = useState("10"), [sellPrice, setSellPrice] = useState("10");                               // war: loot vaults, ships, battles (simulated)
   const [tourShip, setTourShip] = useState<number | null>(null), [autoSail, setAutoSail] = useState(true);   // deploying a ship on a tour
   const [shipKind, setShipKind] = useState(1), [vaultAdd, setVaultAdd] = useState("10000");
@@ -207,7 +217,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       if (first) {
         const members = [...held.values()].map(l => have.get(l.id)?.m ?? member(l.id, l.gen, l.tier));
         const h = home(); h.friends = autoArrange(members); rebuild(w);
-        const sp = spawnOn(w, h.friends.find(p => p.m.id === friendId)!); api.current?.teleport(sp.x, sp.y);
+        const sp = spawnOn(w, h.friends.find(p => p.m.id === friendId)!); api.current?.teleport(sp.x, sp.y, sp.z);
         const sc = sim.current, welcome = sc ? ` 🌊 Simulated Docks: ${sc.flags.length} flags, ${sc.islands} islands, ${sc.friends.toLocaleString()} residents; you start with 50,000 RF. Tap ⤢ to see it all.` : "";
         say((members.length > 1 ? `All ${members.length.toLocaleString()} of your activated Friends joined into one floating island. Open Docks to find a loading zone.`
           : "Your Friend is a floating island. Open Docks to find a loading zone next to the others.") + welcome);
@@ -480,7 +490,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   /* ── actions ── */
   function goTo(p: Plot) {
     const w = world.current!, pl = p.friends.find(x => x.m.id === lead) ?? p.friends[0];
-    if (pl) { const sp = spawnOn(w, pl); api.current?.teleport(sp.x, sp.y); }
+    if (pl) { const sp = spawnOn(w, pl); api.current?.teleport(sp.x, sp.y, sp.z); }
   }
   function askToVisit(p: Plot) {
     const w = world.current!; if (w.visits.get(p.id) === "pending") return;
@@ -601,16 +611,30 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     if (!dockAt(w, p, b)) { say("That loading zone was just taken."); return; }
     econ.current.rf -= DOCKING_FEE; econ.current.docksFund += DOCKING_FEE;
     setMenu(null); setIslandPop(null); goTo(p); bump();
-    const n = neighboursOf(w, p).filter(q => !q.mine);
-    say(`${p.name} docked${neighboursOf(w, p).length ? ` next to ${neighboursOf(w, p).map(q => q.name).join(", ")}` : ""}: ${DOCKING_FEE} RF docking fee into The Docks fund (simulated). A gangway joins you: your Friends can walk across.${n.length ? " 💬 Chat is open with your new neighbours." : ""}`);
+    const n = neighboursOf(w, p).filter(q => !q.mine), fl = n.map(q => villageOf(w, q)).find(Boolean);
+    say(`${p.name} docked${zOf(b) ? ` on the ${levelName(zOf(b)).toLowerCase()}` : ""}${neighboursOf(w, p).length ? ` next to ${neighboursOf(w, p).map(q => q.name).join(", ")}` : ""}: ${DOCKING_FEE} RF docking fee into The Docks fund (simulated). ${zOf(b) ? "Stairs join the levels" : "A boardwalk joins you"}: your Friends can walk across.${fl ? ` You're at ${fl.name}'s harbor: its whole market is open to you (🧺 Market).` : ""}${n.length ? " 💬 Chat is open with your new neighbours." : ""}`);
   }
   /** Tap another island → Dock: the first free loading zone right next to it. */
-  function dockNextTo(target: Plot) {
-    const w = world.current!, p = island();
+  /** Tap another island → Dock: the first free loading zone beside it (or, with `level`, straight above/below it). */
+  function dockNextTo(target: Plot, level?: "above" | "below") {
+    const w = world.current!, p = island(), tz = zOf(target.berth);
     if (connected(w, p, target)) { say(`${p.name} is already next to ${target.name}.`); return; }
-    const z = zonesNextTo(w, p, target);
-    if (!z.length) { say(`No free loading zone next to ${target.name}. Build a bridge to it instead (${DOCKING_FEE} RF docking fee).`); return; }
+    const z = zonesNextTo(w, p, target).filter(b => level === "above" ? zOf(b) > tz : level === "below" ? zOf(b) < tz : zOf(b) === tz);
+    if (!z.length) { say(`No free loading zone ${level ?? "next to"} ${target.name}. Build a bridge to it instead (${DOCKING_FEE} RF docking fee).`); return; }
     dockIsland(z[0]);
+  }
+  /** Free loading zones at a flag's harbor: beside, above or below any of its peace islands. */
+  function harborOf(v: Village) {
+    const w = world.current!, p = island(), out: { b: Berth; next: Plot }[] = [], seen = new Set<string>();
+    for (const m of v.members) if (stanceOf(w, m) !== "war") for (const b of zonesNextTo(w, p, m)) { const k = `${b.x},${b.y},${zOf(b)}`; if (!seen.has(k)) { seen.add(k); out.push({ b, next: m }); } }
+    return out.sort((a, b) => Math.abs(zOf(a.b)) - Math.abs(zOf(b.b)) || (p.berth ? berthDist(a.b, p.berth) - berthDist(b.b, p.berth) : 0));
+  }
+  function dockAtHarbor(v: Village) {
+    const w = world.current!, p = island();
+    if (v.members.some(m => connected(w, p, m) && stanceOf(w, m) !== "war")) { setMenu(null); goTo(p); say(`${p.name} is already at ${v.name}'s harbor: walk over, or open 🧺 Market to trade with it.`); return; }
+    const h = harborOf(v)[0];
+    if (!h) { say(`${v.name}'s harbor is full right now. Dock above or below one of its peace islands, or bridge to one.`); return; }
+    dockIsland(h.b);
   }
   function buildBridge(to: Plot) {
     const w = world.current!, p = island();
@@ -674,7 +698,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   function doPlantFlag() {
     const w = world.current!; setVillageError("");
     const pos = api.current?.position(); if (!pos) return;
-    const p = tileAt(w, Math.floor(pos.x), Math.floor(pos.y))?.plot ?? null;
+    const p = tileAt(w, Math.floor(pos.x), Math.floor(pos.y), pos.z)?.plot ?? null;
     if (!p || !p.mine) { setVillageError(`Walk #${lead} onto one of your docked islands first: the flag goes where your lead stands.`); return; }
     if (!onChain.current.has(p.id)) { setVillageError(`Save ${p.name} on chain first (Arrange → Save): flags go on saved, docked islands.`); return; }
     const o = w.origin.get(p)!, at = { x: pos.x - o.x, y: pos.y - o.y };
@@ -743,7 +767,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   /** Where the lead stands on its island (island-local tiles), to build or plant there. */
   function leadSpot() {
     const w = world.current!, pos = api.current?.position(); if (!pos) return null;
-    const p = tileAt(w, Math.floor(pos.x), Math.floor(pos.y))?.plot ?? null; if (!p) return null;
+    const p = tileAt(w, Math.floor(pos.x), Math.floor(pos.y), pos.z)?.plot ?? null; if (!p) return null;
     const o = w.origin.get(p)!; return { p, ...VX.cellAt({ x: pos.x - o.x, y: pos.y - o.y }) };
   }
   function doBuild(v: Village | null) {
@@ -764,7 +788,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     act(() => { if (!at || !at.p.mine) throw new Error(`Walk #${lead} onto the spot on your island where it should go.`); VX.placeOwn(w, it, VX.YOU, at.p, at.cx, at.cy); setMenu(null); say(`${VX.CATALOG[it.kind].icon} placed on ${at.p.name}.`); });
   }
   function lookAtFlag(v: Village) {
-    const t = flagTile(world.current!, v); setMenu(null); if (t) api.current?.focusOn(t.x, t.y);
+    const t = flagTile(world.current!, v); setMenu(null); if (t) api.current?.focusOn(t.x, t.y, zOf(v.seat.berth));
   }
   // the simulated world around your flags: sample lockers, trading fees, sample votes, sample islands joining
   useEffect(() => {
@@ -1002,12 +1026,16 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     {islandPop && !menu && !quick && (() => { const p = w.plots.find(q => q.id === islandPop.id); if (!p || p.mine) return null;
       const me = isl, conn = connected(w, me, p), next = zonesNextTo(w, me, p), fl = villageOf(w, p) ?? risingFlagOf(w, p), r = rankOf(p);
       const rc = (document.querySelector(".docks") as HTMLElement | null)?.getBoundingClientRect();
-      const left = Math.max(8, Math.min((islandPop.x - (rc?.left ?? 0)), (rc?.width ?? 400) - 240)), top = Math.max(8, Math.min(islandPop.y - (rc?.top ?? 0) + 12, (rc?.height ?? 400) - 220));
-      return <div className="docks-quick" role="menu" aria-label={`${p.name} options`} style={{ left, top }}>
+      const left = Math.max(8, Math.min((islandPop.x - (rc?.left ?? 0)), (rc?.width ?? 400) - 240)), top = Math.max(8, Math.min(islandPop.y - (rc?.top ?? 0) + 12, (rc?.height ?? 400) * 0.45));
+      return <div className="docks-quick" role="menu" aria-label={`${p.name} options`} style={{ left, top, maxHeight: `calc(100% - ${Math.round(top) + 72}px)`, overflowY: "auto" }}>
         <strong>{p.name}</strong>
-        <small>{p.friends.length.toLocaleString()} Friend{p.friends.length === 1 ? "" : "s"} · {r.rank} · {fl ? `🚩 ${fl.name}${fl.founded ? "" : " (rising)"}${stanceOf(w, p) ? ` · ${stanceOf(w, p) === "war" ? "⚔️ war" : "🕊 peace"}` : ""}` : "no flag: trades, chats and docks, never at war"}{conn ? ` · docked with ${me.name}` : ""}</small>
+        <small>{zOf(p.berth) ? `${levelName(zOf(p.berth))} · ` : ""}{p.friends.length.toLocaleString()} Friend{p.friends.length === 1 ? "" : "s"} · {r.rank} · {fl ? `🚩 ${fl.name}${fl.founded ? "" : " (rising)"}${stanceOf(w, p) ? ` · ${stanceOf(w, p) === "war" ? "⚔️ war" : "🕊 peace"}` : ""}` : "no flag: trades, chats and docks, never at war"}{conn ? ` · docked with ${me.name}` : ""}</small>
         {canChat(p) && PC.peaceful(w, p) && <button type="button" role="menuitem" onClick={() => { setIslandPop(null); setMenu("market"); }}>🧺 Trade with {p.name}</button>}
-        {!conn && next.length > 0 && <button type="button" role="menuitem" className="rf-frame-primary" onClick={() => dockNextTo(p)}>⚓ Dock {me.name} here · {DOCKING_FEE} RF</button>}
+        {!conn && next.some(b => zOf(b) === zOf(p.berth)) && <button type="button" role="menuitem" className="rf-frame-primary" onClick={() => dockNextTo(p)}>⚓ Dock {me.name} beside it · {DOCKING_FEE} RF</button>}
+        {!conn && next.some(b => zOf(b) > zOf(p.berth)) && <button type="button" role="menuitem" onClick={() => dockNextTo(p, "above")}>⬆ Dock on the deck above · {DOCKING_FEE} RF</button>}
+        {!conn && next.some(b => zOf(b) < zOf(p.berth)) && <button type="button" role="menuitem" onClick={() => dockNextTo(p, "below")}>⬇ Dock on the deck below · {DOCKING_FEE} RF</button>}
+        {!conn && fl?.founded && stanceOf(w, p) === "war" && harborOf(fl).length > 0 && <button type="button" role="menuitem" className="rf-frame-primary" onClick={() => dockAtHarbor(fl)}>⚓ Dock at {fl.name}'s harbor · {DOCKING_FEE} RF</button>}
+        {fl?.founded && <button type="button" role="menuitem" onClick={() => { setIslandPop(null); setMarketAt(fl.id); setMenu("market"); }}>🧺 {fl.name} market</button>}
         {!conn && hostileBorder(w, me, p) && <small>⚔️ {p.name} is {villageOf(w, p)?.name}'s war island: dock next to one of its peace islands instead.</small>}
         {!conn && !next.length && !hostileBorder(w, me, p) && <button type="button" role="menuitem" onClick={() => buildBridge(p)} disabled={!me.berth || !p.berth}>🌉 Bridge from {me.name} · {DOCKING_FEE} RF</button>}
         {canChat(p) && <button type="button" role="menuitem" onClick={() => openChat(p)}>💬 Chat with {p.name}</button>}
@@ -1112,29 +1140,51 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <div className="docks-isles">{[...w.plots].filter(p => p.friends.length && p !== isl).sort((a, b) => { const d = (q: Plot) => isl.berth && q.berth ? Math.abs(q.berth.x - isl.berth.x) + Math.abs(q.berth.y - isl.berth.y) : q.berth ? Math.abs(q.berth.x) + Math.abs(q.berth.y) : 99; return d(a) - d(b) || rankOf(b).weight - rankOf(a).weight; }).slice(0, 30).map(p => { const r = rankOf(p), fl = villageOf(w, p) ?? risingFlagOf(w, p), art = p.friends.find(x => x.m.friend)?.m.friend?.art;
           const conn = connected(w, isl, p), next = !p.mine && !conn ? zonesNextTo(w, isl, p) : [];
           return <div className="docks-isle" key={p.id}>
-            <div className="crop">{art ? <img src={art} alt={`${p.name} on-chain artwork`} loading="lazy" /> : <span className="docks-note">{p.name}</span>}</div>
+            <div className="crop">{art && p.friends.length === 1 ? <img src={art} alt={`${p.name} on-chain artwork`} loading="lazy" /> : <IslandThumb p={p} color={fl?.color} />}</div>
             <span><strong>{p.name}{p.mine ? " (yours)" : ""}</strong>
-              <small>{p.friends.length.toLocaleString()} Friend{p.friends.length === 1 ? "" : "s"} · {r.rank}{fl ? ` · 🚩 ${fl.name}` : ""}{stanceOf(w, p) ? ` · ${stanceOf(w, p) === "war" ? "⚔️ war" : "🕊 peace"}` : ""}{conn ? ` · next to ${isl.name}` : ""}</small></span>
+              <small>{zOf(p.berth) ? `${levelName(zOf(p.berth))} · ` : ""}{p.friends.length.toLocaleString()} Friend{p.friends.length === 1 ? "" : "s"} · {r.rank}{fl ? ` · 🚩 ${fl.name}` : ""}{stanceOf(w, p) ? ` · ${stanceOf(w, p) === "war" ? "⚔️ war" : "🕊 peace"}` : ""}{conn ? ` · next to ${isl.name}` : ""}</small></span>
             <div className="docks-row tight">
-              {!p.mine && !conn && next.length > 0 && <button type="button" className="rf-frame-primary" onClick={() => dockNextTo(p)}>⚓ Dock</button>}
+              {!p.mine && !conn && next.some(b => zOf(b) === zOf(p.berth)) && <button type="button" className="rf-frame-primary" onClick={() => dockNextTo(p)}>⚓ Dock</button>}
+              {!p.mine && !conn && !next.some(b => zOf(b) === zOf(p.berth)) && next.length > 0 && <button type="button" className="rf-frame-primary" onClick={() => dockNextTo(p, next.some(b => zOf(b) > zOf(p.berth)) ? "above" : "below")}>⚓ Dock {next.some(b => zOf(b) > zOf(p.berth)) ? "above" : "below"}</button>}
               {!p.mine && !conn && !next.length && isl.berth && p.berth && <button type="button" onClick={() => buildBridge(p)}>🌉 Bridge</button>}
               {canChat(p) && <button type="button" onClick={() => { setMenu(null); openChat(p); }}>💬</button>}
               <button type="button" onClick={() => { setMenu(null);
                 if (canEnter(w, p)) { goTo(p); say(p.mine ? `On ${p.name}.` : `You and your crew walked over to ${p.name}.`); }
-                else { const b = w.box.get(p); if (b) api.current?.focusOn((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2); say(villageOf(w, p) ? `${p.name} is under ${villageOf(w, p)!.name}'s flag: join it, or bridge to one of its islands to explore. Here's the view.` : `${p.name} has no flag, so it's closed to visitors for now. Here's the view.`); } }}>{canEnter(w, p) ? "Go" : "Look"}</button>
+                else { const b = w.box.get(p); if (b) api.current?.focusOn((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2, zOf(p.berth)); say(villageOf(w, p) ? `${p.name} is under ${villageOf(w, p)!.name}'s flag: join it, or bridge to one of its islands to explore. Here's the view.` : `${p.name} has no flag, so it's closed to visitors for now. Here's the view.`); } }}>{canEnter(w, p) ? "Go" : "Look"}</button>
             </div></div>; })}</div>
         <h3>🚩 Flags</h3>
-        {w.villages.filter(v => !v.failed).length ? <div className="docks-flags">{w.villages.filter(v => !v.failed).map(v => { const isles = v.founded ? v.members : [v.seat];
-          return <div className="docks-flagcard" key={v.id}>
-            <span className="docks-flag-emblem" style={{ background: v.color }} aria-hidden="true">🚩</span>
-            <span><strong>{v.name}</strong><small>{v.founded ? `${v.members.length} island${v.members.length === 1 ? "" : "s"}` : `rising · ${fmt(v.locked)} / ${fmt(v.target)} RF`}</small></span>
-            <div className="docks-flag-isles">{isles.map(p => { const art = p.friends.find(x => x.m.friend)?.m.friend?.art, conn = connected(w, isl, p), next = !p.mine && !conn ? zonesNextTo(w, isl, p) : [];
+        {w.villages.filter(v => !v.failed).length ? <div className="docks-flags">{[...w.villages].filter(v => !v.failed).sort((a, b) => VX.population(b) - VX.population(a)).map(v => {
+          const isles = v.founded ? v.members : [v.seat], pop = VX.population(v), tier = SK.tierOfFlag(v), nextAt = SK.nextMilestone(pop), prevAt = SK.tierStart(tier);
+          const here = isles.some(m => connected(w, isl, m) && stanceOf(w, m) !== "war"), harbor = v.founded && !here ? harborOf(v) : [], peace = v.members.filter(m => stanceOf(w, m) !== "war").length;
+          const shown = [...isles].sort((a, b) => (stanceOf(w, a) === "war" ? 1 : 0) - (stanceOf(w, b) === "war" ? 1 : 0) || zOf(b.berth) - zOf(a.berth)).slice(0, 12);
+          return <div className="docks-flagcard" key={v.id} style={{ ["--flag" as string]: v.color }}>
+            <div className="docks-flaghead">
+              <span className="docks-flag-emblem" style={{ background: v.color }} aria-hidden="true">{v.founded && tier ? SK.skinIcon(tier) : "🚩"}</span>
+              <span><strong>{v.name}</strong>
+                <small className="docks-flag-level">{v.founded ? `Level ${tier} · ${SK.skinName(tier)}` : "Rising flag"}</small></span>
+              <span className="docks-flag-pop"><b>{pop.toLocaleString()}</b><small>Friends</small></span>
+            </div>
+            {v.founded && <div className="docks-meter" role="progressbar" aria-label={`${v.name} population toward level ${tier + 1}`} aria-valuemin={prevAt} aria-valuemax={nextAt} aria-valuenow={pop}><i style={{ width: `${Math.min(100, Math.max(3, (pop - prevAt) / (nextAt - prevAt) * 100))}%` }} /><small>{(nextAt - pop).toLocaleString()} more Friends to level {tier + 1} ({SK.skinName(tier + 1)})</small></div>}
+            <small>{v.founded ? `${v.members.length} islands (${peace} 🕊 peace · ${v.members.length - peace} ⚔️ war)${new Set(v.members.map(m => zOf(m.berth))).size > 1 ? ` on ${new Set(v.members.map(m => zOf(m.berth))).size} levels` : ""}` : `${fmt(v.locked)} / ${fmt(v.target)} RF raised`}</small>
+            <small className={`docks-founding ${v.founded ? "closed" : "open"}`}>{v.founded ? `Founding closed (${v.lockers.size} founders, the OGs) · ${v.enrollOpen ? `open to join: ${fmt(v.enrollPrice)} RF per island` : "not taking new islands"}` : `Founding open: lock RF by ${new Date(v.deadline).toLocaleDateString()} to become a founder (OG)`}</small>
+            <div className="docks-row tight">
+              {v.founded && here && <span className="docks-note">⚓ You're at its harbor</span>}
+              {v.founded && !here && harbor.length > 0 && <button type="button" className="rf-frame-primary" onClick={() => dockAtHarbor(v)}>⚓ Dock at harbor · {DOCKING_FEE} RF</button>}
+              {v.founded && !here && !harbor.length && <span className="docks-note">Harbor full</span>}
+              {v.founded && <button type="button" onClick={() => { setMarketAt(v.id); setMenu("market"); }}>🧺 Market</button>}
+              <button type="button" onClick={() => lookAtFlag(v)}>👁 Look</button>
+              {!v.founded && <button type="button" onClick={() => setMenu("village")}>🔒 Lock RF</button>}
+            </div>
+            <div className="docks-flag-isles">{shown.map(p => { const conn = connected(w, isl, p), next = !p.mine && !conn ? zonesNextTo(w, isl, p) : [];
               return <div key={p.id} className="docks-flag-isle">
-                <div className="crop small">{art ? <img src={art} alt="" loading="lazy" /> : null}</div>
-                <small>{v.stance.get(p) === "war" ? "⚔️" : "🕊"} {p.name}{p.mine ? " (yours)" : ""}</small>
-                {next.length > 0 && <button type="button" onClick={() => dockNextTo(p)}>⚓ Dock</button>}
+                <div className="crop small"><IslandThumb p={p} color={v.color} /></div>
+                <small>{stanceOf(w, p) === "war" ? "⚔️" : "🕊"}{zOf(p.berth) ? (zOf(p.berth) > 0 ? `▲${zOf(p.berth)}` : `▼${-zOf(p.berth)}`) : ""} {p.name}{p.mine ? " (yours)" : ""} · {p.friends.length}</small>
+                <span className="docks-row tight">{next.some(b => zOf(b) === zOf(p.berth)) && <button type="button" onClick={() => dockNextTo(p)}>⚓ Dock</button>}
+                  {stanceOf(w, p) !== "war" && next.some(b => zOf(b) > zOf(p.berth)) && <button type="button" title={`Dock on the deck above ${p.name}`} aria-label={`Dock above ${p.name}`} onClick={() => dockNextTo(p, "above")}>⬆</button>}
+                  {stanceOf(w, p) !== "war" && next.some(b => zOf(b) < zOf(p.berth)) && <button type="button" title={`Dock on the deck below ${p.name}`} aria-label={`Dock below ${p.name}`} onClick={() => dockNextTo(p, "below")}>⬇</button>}</span>
                 {conn && !p.mine && <small>docked</small>}
-              </div>; })}</div>
+              </div>; })}
+              {isles.length > shown.length && <small className="docks-note">+{isles.length - shown.length} more islands on the map</small>}</div>
           </div>; })}</div> : <p className="docks-note">No flags yet. Plant one in 🚩 Flags.</p>}
         <p className="docks-note">Rank follows the official Rare Friends reward weight (Generation × Activation tier), summed over an island's Friends. Neighbours are other people's public Friends shown as samples; their answers to visit requests are simulated.</p>
       </> : menu === "village" ? <>
@@ -1306,6 +1356,17 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <p>Peace land makes goods and trades them: build 🌾 Farms, 🎣 Fisheries, 🔨 Workshops, 🧵 Looms and 🏺 Kilns on a peace island (or any island in no flag), collect what they make, and sell it, or your own items, at your price. You can buy from islands docked or bridged to yours and from your flag-mates; war islands don't trade. A sale from a flag's peace island pays {PC.PEACE.TRADE_TAX_BPS / 100}% tax to that flag's treasury; islands in no flag trade tax-free.</p>
         <div className="docks-rf"><span>Your RF <b>{fmt(e.rf)}</b><span className="docks-sim">SIMULATED</span></span>{PC.GOODS.map((g, i) => <span key={i}>{g.icon} {g.name} <b>{inv[i]}</b></span>)}</div>
         {villageError && <p role="alert" className="docks-note">{villageError}</p>}
+        {(() => { const fv = w.villages.find(v => v.id === marketAt && v.founded); if (!fv) return null;
+          const ls = mk.listings.filter(l => l.seller !== VX.YOU && fv.members.includes(l.from)), buyer = ls.length ? PC.buyerFor(w, mineP, ls[0].from) : mineP.find(m => fv.members.some(q => PC.peaceful(w, q) && connected(w, m, q))) ?? null;
+          return <div className="docks-citymarket" style={{ ["--flag" as string]: fv.color }}>
+            <h4>🏙 {fv.name} market <small>Level {SK.tierOfFlag(fv)} · 👥 {VX.population(fv).toLocaleString()} · {PC.PEACE.TRADE_TAX_BPS / 100}% tax to the flag</small></h4>
+            {!buyer && <div className="docks-row tight"><span className="docks-note">Dock at its harbor to buy here.</span>{harborOf(fv).length > 0 && <button type="button" className="rf-frame-primary" onClick={() => dockAtHarbor(fv)}>⚓ Dock at harbor · {DOCKING_FEE} RF</button>}</div>}
+            {ls.length ? ls.slice(0, 20).map(l => <div className="docks-item" key={l.id}><span><strong>{l.qty} {l.good !== null ? `${PC.GOODS[l.good].icon} ${PC.GOODS[l.good].name}` : `${VX.CATALOG[l.item!.kind].icon} ${VX.CATALOG[l.item!.kind].name}`} · {fmt(l.price)} RF each</strong><small>from {l.from.name}</small></span>
+              {buyer && <button type="button" onClick={() => act(() => { const r = PC.buy(w, mk, e, l, 1, buyer); afterSale(r.village, r.tax); say(`🛒 Bought 1 at ${fv.name}'s market for ${fmt(r.total)} RF (simulated), ${fmt(r.tax)} RF of it tax to the flag.`); })}>Buy 1</button>}</div>)
+              : <p className="docks-note">Nothing listed right now; residents post goods every few minutes.</p>}
+            {ls.length > 20 && <small>{ls.length - 20} more listings.</small>}
+            <button type="button" onClick={() => setMarketAt(null)}>Show all markets near me</button>
+          </div>; })()}
         <h4>🌾 Your land</h4>
         {mineP.map(p => { const out = PC.outputOf(w, p), wait = PC.waiting(w, mk, p), any = out.some(x => x > 0), st = stanceOf(w, p);
           return <div className="docks-item" key={p.id}><span><strong>{st === "war" ? "⚔️" : "🕊"} {p.name}{st ? ` · ${st}` : " · no flag"}</strong>

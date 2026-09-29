@@ -5,7 +5,8 @@
  *    Loom → Cloth, Kiln → Pottery. A Market stall on the island adds MARKET_BOOST to its output.
  *    Goods pile up on the island until its owner collects them.
  *  - Market: sell goods (and your own items) from a peace island at your price. Buyers are
- *    islands docked next to it or bridged to it, or its flag-mates. War islands don't trade.
+ *    islands docked next to it or bridged to it, its flag-mates, and anyone docked at the flag's
+ *    harbor (next to any of its peace islands): that opens the flag's whole market. War islands don't trade.
  *    Islands in no flag trade with each other freely when connected.
  *  - Tax: a sale from a flag's peace island pays TRADE_TAX_BPS to that flag's treasury (its
  *    pool). A sale between islands in no flag pays none. */
@@ -81,7 +82,9 @@ export function tradeProblem(w: World, buyer: Plot, from: Plot): string | null {
   if (!peaceful(w, buyer)) return `${buyer.name} is a war island: trade from a peace island.`;
   if (buyer === from || connected(w, buyer, from)) return null;
   const f = villageOf(w, from); if (f && villageOf(w, buyer) === f) return null;
-  return `Dock next to ${from.name} (or bridge to it) to trade.`;
+  // docked at a flag's harbor (next to any of its peace islands): its whole market is open to you
+  if (f && f.members.some(m => peaceful(w, m) && connected(w, buyer, m))) return null;
+  return f ? `Dock at ${f.name}'s harbor (next to any of its peace islands) to trade.` : `Dock next to ${from.name} (or bridge to it) to trade.`;
 }
 /** The first of `mine` that can buy from `from`, or null. */
 export const buyerFor = (w: World, mine: Plot[], from: Plot) => mine.find(p => !tradeProblem(w, p, from)) ?? null;

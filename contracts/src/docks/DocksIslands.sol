@@ -53,7 +53,10 @@ interface IDocksFeeSink {
 ///   with another activated Friend of the same size (`fillHole`, normal arrange fee).
 /// - Docking: islands float on one shared berth grid, one island per berth whatever its size,
 ///   so the world grows with the number of islands. Dock at a free berth next to another
-///   island (a loading zone); islands on neighbouring berths are connected. Gas only.
+///   island (a loading zone); islands on neighbouring berths are connected.
+/// - Levels: the berth grid stacks from MIN_LEVEL (below the water line) to MAX_LEVEL. A berth
+///   straight above or below a docked island is a loading zone too, and islands stacked on
+///   neighbouring levels are connected (stairs). Bridges join islands on the same level.
 /// - Docking fee: DOCKING_FEE RF each time an island docks or builds a bridge, into The Docks
 ///   fund. Bridges link your island to one you can't dock next to and last until either
 ///   island moves. Connected islands can be walked onto (a toll may come later).
@@ -111,6 +114,8 @@ contract DocksIslands {
     error NotLoadingZone();
     error NotDocked();
     error AlreadyConnected();
+    error BadLevel();
+    error DifferentLevels();
     error NotAHole();
     error WrongSize();
     error StillValid();
@@ -124,7 +129,7 @@ contract DocksIslands {
     event Removed(uint256 indexed friendId, uint256 indexed islandId);
     event HoleBurned(uint256 indexed islandId, uint256 indexed friendId, int32 x, int32 y);
     event HoleFilled(uint256 indexed islandId, uint256 indexed oldFriendId, uint256 indexed newFriendId);
-    event Docked(uint256 indexed islandId, int32 x, int32 y);
+    event Docked(uint256 indexed islandId, int32 x, int32 y, int8 z);
     event Undocked(uint256 indexed islandId);
     event BridgeBuilt(uint256 indexed from, uint256 indexed to);
     event CaptainSet(uint256 indexed islandId, uint256 indexed friendId);
@@ -159,6 +164,10 @@ contract DocksIslands {
     mapping(uint256 friendId => uint256 indexPlusOne) private _memberIndex;
 
     mapping(uint256 islandId => Berth) public berthOf;
+    /// @notice The level an island is docked on (0: the water line; see MIN_LEVEL / MAX_LEVEL).
+    mapping(uint256 islandId => int8) public levelOf;
+    int8 public constant MIN_LEVEL = -2;
+    int8 public constant MAX_LEVEL = 3;
     mapping(bytes32 berth => uint256 islandIdPlusOne) private _berth;
     mapping(bytes32 pair => uint128 epochs) private _bridge;
 
@@ -351,33 +360,45 @@ contract DocksIslands {
 
     /* ── docking islands (gas only) ── */
 
-    /// @notice Dock (or move) your island at a free berth next to another island. The first
-    /// island in the world may dock anywhere.
+    /// @notice Dock (or move) your island at a free berth next to another island, on the water
+    /// line. The first island in the world may dock anywhere.
     function dock(uint256 islandId, int32 x, int32 y) external {
+        _dock(islandId, x, y, 0);
+    }
+
+    /// @notice Dock (or move) your island at a free berth on level `z`: beside another island on
+    /// that level, or straight above or below one.
+    function dockAt(uint256 islandId, int32 x, int32 y, int8 z) external {
+        _dock(islandId, x, y, z);
+    }
+
+    function _dock(uint256 islandId, int32 x, int32 y, int8 z) private {
         _onlyOwner(islandId);
         if (_members[islandId].length == 0) revert EmptyIsland();
-        bytes32 key = _key(x, y);
+        if (z < MIN_LEVEL || z > MAX_LEVEL) revert BadLevel();
+        bytes32 key = _key(x, y, z);
         uint256 there = _berth[key];
         if (there != 0 && there != islandId + 1) revert BerthTaken();
         Berth storage b = berthOf[islandId];
         uint64 epoch = b.epoch;
         if (b.docked) {
-            delete _berth[_key(b.x, b.y)];
+            delete _berth[_key(b.x, b.y, levelOf[islandId])];
             --dockedCount;
         }
-        if (dockedCount > 0 && !_nextToIsland(x, y)) revert NotLoadingZone();
+        if (dockedCount > 0 && !_nextToIsland(x, y, z)) revert NotLoadingZone();
         _berth[key] = islandId + 1;
         berthOf[islandId] = Berth(x, y, true, epoch + 1);
+        levelOf[islandId] = z;
         ++dockedCount;
         _chargeDocking();
-        emit Docked(islandId, x, y);
+        emit Docked(islandId, x, y, z);
     }
 
     function undock(uint256 islandId) external {
         _onlyOwner(islandId);
         Berth storage b = berthOf[islandId];
         if (!b.docked) revert NotDocked();
-        delete _berth[_key(b.x, b.y)];
+        delete _berth[_key(b.x, b.y, levelOf[islandId])];
         b.docked = false;
         ++b.epoch;
         --dockedCount;
@@ -386,11 +407,20 @@ contract DocksIslands {
 
     /// @notice Whether a free berth is a loading zone: next to a docked island.
     function isLoadingZone(int32 x, int32 y) external view returns (bool) {
-        return _berth[_key(x, y)] == 0 && (dockedCount == 0 || _nextToIsland(x, y));
+        return isLoadingZoneAt(x, y, 0);
+    }
+
+    /// @notice The same on level `z`.
+    function isLoadingZoneAt(int32 x, int32 y, int8 z) public view returns (bool) {
+        return z >= MIN_LEVEL && z <= MAX_LEVEL && _berth[_key(x, y, z)] == 0 && (dockedCount == 0 || _nextToIsland(x, y, z));
     }
 
     function islandAtBerth(int32 x, int32 y) external view returns (uint256) {
-        uint256 v = _berth[_key(x, y)];
+        return islandAtBerthAt(x, y, 0);
+    }
+
+    function islandAtBerthAt(int32 x, int32 y, int8 z) public view returns (uint256) {
+        uint256 v = _berth[_key(x, y, z)];
         return v == 0 ? 0 : v - 1;
     }
 
@@ -400,6 +430,7 @@ contract DocksIslands {
         _onlyOwner(from);
         if (connected(from, to) || from == to) revert AlreadyConnected();
         if (!berthOf[from].docked || !berthOf[to].docked) revert NotDocked();
+        if (levelOf[from] != levelOf[to]) revert DifferentLevels();
         _bridge[_pair(from, to)] = _epochs(from, to);
         _chargeDocking();
         emit BridgeBuilt(from, to);
@@ -415,7 +446,7 @@ contract DocksIslands {
         Berth storage ba = berthOf[a];
         Berth storage bb = berthOf[b];
         if (!ba.docked || !bb.docked || a == b) return false;
-        return _distance(ba, bb) == 1 || hasBridge(a, b);
+        return _distance(ba, bb) + _gap(levelOf[a], levelOf[b]) == 1 || hasBridge(a, b);
     }
 
     /* ── reads ── */
@@ -634,9 +665,14 @@ contract DocksIslands {
         return (1, 1);
     }
 
-    function _nextToIsland(int32 x, int32 y) private view returns (bool) {
-        return _berth[_key(x + 1, y)] != 0 || _berth[_key(x - 1, y)] != 0
-            || _berth[_key(x, y + 1)] != 0 || _berth[_key(x, y - 1)] != 0;
+    function _nextToIsland(int32 x, int32 y, int8 z) private view returns (bool) {
+        return _berth[_key(x + 1, y, z)] != 0 || _berth[_key(x - 1, y, z)] != 0
+            || _berth[_key(x, y + 1, z)] != 0 || _berth[_key(x, y - 1, z)] != 0
+            || (z < MAX_LEVEL && _berth[_key(x, y, z + 1)] != 0) || (z > MIN_LEVEL && _berth[_key(x, y, z - 1)] != 0);
+    }
+
+    function _gap(int8 a, int8 b) private pure returns (uint256) {
+        return a > b ? uint256(int256(a) - int256(b)) : uint256(int256(b) - int256(a));
     }
 
     function _distance(Berth storage a, Berth storage b) private view returns (uint256) {
@@ -663,8 +699,8 @@ contract DocksIslands {
         }
     }
 
-    function _key(int32 x, int32 y) private pure returns (bytes32) {
-        return keccak256(abi.encode(x, y));
+    function _key(int32 x, int32 y, int8 z) private pure returns (bytes32) {
+        return keccak256(abi.encode(x, y, z));
     }
 
     function _cellKey(uint256 islandId, int32 x, int32 y) private pure returns (bytes32) {

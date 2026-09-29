@@ -20,6 +20,8 @@ export function skinTier(pop: number) {
   if (pop < 100) return 0; if (pop < 1_000) return 1; if (pop < 10_000) return 2; if (pop < 100_000) return 3;
   return 4 + Math.floor((pop - 100_000) / 100_000);
 }
+/** The population a skin tier starts at. */
+export const tierStart = (t: number) => t <= 0 ? 0 : t <= 4 ? [0, 100, 1_000, 10_000, 100_000][t] : (t - 3) * 100_000;
 export const tierOfFlag = (v: Village) => v.founded ? skinTier(population(v)) : 0;
 export function nextMilestone(pop: number) { return pop < 100 ? 100 : pop < 1_000 ? 1_000 : pop < 10_000 ? 10_000 : pop < 100_000 ? 100_000 : (Math.floor(pop / 100_000) + 1) * 100_000; }
 export const skinName = (t: number) => t < SKIN.NAMES.length ? SKIN.NAMES[t] : `Empire ${"★".repeat(Math.min(5, t - 3))}`;

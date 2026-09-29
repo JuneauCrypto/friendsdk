@@ -1,8 +1,10 @@
 /* The simulated Docks — SIMULATED in this preview, so there's a living world to play in before
  * other players arrive. Built the same every time (a seeded random), it adds:
  *  - six founded flags with nods crypto natives will recognise (no tickers, no logos): each a
- *    block of islands with war islands around the edge and peace islands in the middle, its own
- *    flag Friend, loot vault, ships and market;
+ *    block of islands with war islands on three sides and a peace harbor front on the fourth
+ *    (its open slips are where visitors dock to trade), peace islands in the middle, its own
+ *    flag Friend, loot vault, ships and market. The bigger flags build up and down: upper
+ *    decks over their peace core (and a lower deck under one of them), joined by stairs;
  *  - fifty independent wanderers in no flag, drifting between them, some bridged to one island,
  *    some to several;
  *  - thousands of simulated residents. They are not real NFTs: their IDs start at SIM_BASE and
@@ -27,14 +29,18 @@ export function seeded(seed: number) {
   return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 }
 
-type FlagSpec = { name: string; color: string; x: number; y: number; cols: number; rows: number; words: [string[], string[]]; loot: number; ff: number; nod: string };
+type FlagSpec = { name: string; color: string; x: number; y: number; cols: number; rows: number; words: [string[], string[]]; loot: number; ff: number; nod: string;
+  decks?: { z: number; cells: [number, number][] }[] };     // islands on upper (z > 0) or lower (z < 0) levels, over (col, row) of the block
 /** Nods, not names: the flags people will recognise without a ticker in sight. */
 export const SIM_FLAGS: FlagSpec[] = [
   { name: "Cashcat Cove", color: "#00c805", x: 7, y: -9, cols: 6, rows: 6, loot: 420_000, ff: 200_000, nod: "the Robinhood Chain cat that ran",
+    decks: [{ z: 1, cells: [[2, 2], [3, 2], [2, 3]] }],
     words: [["Whisker", "Purr", "Tabby", "Catnip", "Kitten", "Pounce", "Meow", "Paw"], ["Wharf", "Point", "Nook", "Den", "Jetty", "Perch", "Loft", "Yard"]] },
   { name: "The Orange Citadel", color: "#f7931a", x: -15, y: -12, cols: 8, rows: 8, loot: 900_000, ff: 600_000, nod: "21 million, not one more",
+    decks: [{ z: 1, cells: [[2, 2], [3, 2], [4, 2], [5, 2], [2, 3], [5, 3], [2, 4], [3, 4], [4, 4], [5, 4]] }, { z: 2, cells: [[3, 3], [4, 3], [3, 4], [4, 4]] }, { z: 3, cells: [[3, 3]] }],
     words: [["Genesis", "Halving", "Cold", "Block", "Hash", "Sat", "Whitepaper", "Hodl"], ["Keep", "Vault", "Bastion", "Rampart", "Mint", "Tower", "Hold", "Gate"]] },
   { name: "Ultrasound Bay", color: "#8c8cff", x: 7, y: 6, cols: 6, rows: 6, loot: 650_000, ff: 350_000, nod: "the merge, gwei and burned fees",
+    decks: [{ z: 1, cells: [[2, 2], [3, 2]] }, { z: -1, cells: [[2, 3], [3, 3], [4, 3]] }],
     words: [["Gwei", "Merge", "Beacon", "Blob", "Validator", "Gas", "Rollup", "Shard"], ["Harbor", "Quay", "Dock", "Landing", "Pier", "Basin", "Slip", "Mole"]] },
   { name: "Solstice Atoll", color: "#14f195", x: -13, y: 6, cols: 6, rows: 5, loot: 380_000, ff: 150_000, nod: "a summer that never ended, and very fast blocks",
     words: [["Summer", "Sunrise", "Turbine", "Slot", "Leader", "Epoch", "Firedancer", "Degen"], ["Atoll", "Lagoon", "Reef", "Sands", "Cay", "Shore", "Spit", "Beach"]] },
@@ -64,20 +70,26 @@ export function buildSimulation(w: World, ff: FF.FlagFriends, book: WR.WarBook, 
     const r = rnd(), gen = heavy ? (r < 0.3 ? 3 : r < 0.6 ? 4 : r < 0.85 ? 5 : 6) : (r < 0.15 ? 3 : r < 0.4 ? 4 : r < 0.7 ? 5 : 6);
     return member(next++, gen, Math.floor(rnd() * 5));
   }));
-  const island = (id: string, name: string, x: number, y: number, count: number, heavy: boolean): Plot => {
-    const p: Plot = { id, name, mine: false, access: "open", friends: residents(count, heavy), berth: { x, y } };
-    used.add(`${x},${y}`); w.plots.push(p); return p;
+  const island = (id: string, name: string, x: number, y: number, count: number, heavy: boolean, z = 0): Plot => {
+    const p: Plot = { id, name, mine: false, access: "open", friends: residents(count, heavy), berth: z ? { x, y, z } : { x, y } };
+    if (!z) used.add(`${x},${y}`); w.plots.push(p); return p;
   };
+  // every flag's harbor: the free slips along its peace front, kept open for visitors
+  const slips = new Set<string>();
+  for (const f of SIM_FLAGS) for (let c = 0; c < f.cols; c++) slips.add(`${f.x + c},${f.y + f.rows}`);
 
   const flags: Village[] = [];
   for (const [fi, f] of SIM_FLAGS.entries()) {
     const isles: { p: Plot; edge: boolean }[] = [];
+    const big = fi === 1;   // the Orange Citadel: the oldest and most crowded, past 1,000 Friends
     for (let r = 0; r < f.rows; r++) for (let c = 0; c < f.cols; c++) {
       const x = f.x + c, y = f.y + r; if (used.has(`${x},${y}`)) continue;
-      const edge = r === 0 || c === 0 || r === f.rows - 1 || c === f.cols - 1;       // war islands on the border, peace inside
-      const big = fi === 1;   // the Orange Citadel: the oldest and most crowded, past 1,000 Friends
+      // war islands on three sides; the last row is the peace harbor front, facing the slips
+      const edge = r === 0 || ((c === 0 || c === f.cols - 1) && r < f.rows - 1);
       isles.push({ p: island(`sim-f${fi}-${r}-${c}`, nameFrom(f.words), x, y, big ? (edge ? 12 + Math.floor(rnd() * 12) : 12 + Math.floor(rnd() * 10)) : edge ? 6 + Math.floor(rnd() * 11) : 3 + Math.floor(rnd() * 8), edge), edge });
     }
+    for (const d of f.decks ?? []) for (const [c, r] of d.cells)     // upper and lower decks: peace, joined by stairs
+      isles.push({ p: island(`sim-f${fi}-z${d.z}-${r}-${c}`, nameFrom(f.words), f.x + c, f.y + r, big ? 10 + Math.floor(rnd() * 10) : 3 + Math.floor(rnd() * 7), false, d.z), edge: false });
     rebuild(w);
     const seat = isles.find(i => !i.edge)!.p, pl = seat.friends[0];
     const v = newVillage(w, seat, f.name, { x: (pl.x + pl.m.cw / 2) * CELL, y: (pl.y + pl.m.ch / 2) * CELL }, VX.FLAG_TARGET, Date.now() - VX.DAY);
@@ -102,7 +114,7 @@ export function buildSimulation(w: World, ff: FF.FlagFriends, book: WR.WarBook, 
 
   // fifty wanderers in no flag, in open water between the flags, never against a war island
   const wanderers: Plot[] = [];
-  const border = new Set<string>();
+  const border = new Set<string>(slips);
   for (const v of flags) for (const p of v.members) if (v.stance.get(p) === "war")
     for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) border.add(`${p.berth!.x + dx},${p.berth!.y + dy}`);
   // The docks are a table: every island in a row or column widens it. Near the start (the sample
@@ -122,7 +134,7 @@ export function buildSimulation(w: World, ff: FF.FlagFriends, book: WR.WarBook, 
   const dist = (a: Plot, b: Plot) => Math.abs(a.berth!.x - b.berth!.x) + Math.abs(a.berth!.y - b.berth!.y);
   wanderers.forEach((p, i) => {
     let want = i % 5 === 0 ? 2 + Math.floor(rnd() * 2) : i % 2 === 0 ? 1 : 0;
-    const near = peaceful.filter(q => q !== p && dist(p, q) > 1 && dist(p, q) <= 5).sort((a, b) => dist(p, a) - dist(p, b));
+    const near = peaceful.filter(q => q !== p && !q.berth!.z && dist(p, q) > 1 && dist(p, q) <= 3).sort((a, b) => dist(p, a) - dist(p, b));
     for (const q of near.slice(0, 6)) { if (want <= 0) break; if (addBridge(w, p, q)) want--; }
   });
   rebuild(w);

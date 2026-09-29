@@ -459,6 +459,39 @@ contract DocksTest is Test {
         assertEq(reg.dockedCount(), 3);
     }
 
+    function testLevelsStackAndJoinByStairs() public {
+        _place(alice, 1, 0, 0);
+        _place(bob, 10, 0, 0);
+        _place(carol, 20, 0, 0);
+        _dock(alice, 0, 0);
+        // straight above an island is a loading zone; two levels up (nothing below) is not
+        assertTrue(reg.isLoadingZoneAt(0, 0, 1));
+        assertFalse(reg.isLoadingZoneAt(0, 0, 2));
+        assertFalse(reg.isLoadingZoneAt(0, 0, 4), "above the top level");
+        vm.prank(bob);
+        vm.expectRevert(DocksIslands.BadLevel.selector);
+        reg.dockAt(plotOf[bob], 0, 0, 4);
+        vm.prank(bob);
+        reg.dockAt(plotOf[bob], 0, 0, 1);
+        assertEq(reg.levelOf(plotOf[bob]), 1);
+        assertEq(reg.islandAtBerthAt(0, 0, 1), plotOf[bob]);
+        assertTrue(reg.connected(plotOf[alice], plotOf[bob]), "stacked islands are joined by stairs");
+        // beside the upper deck, on its level: connected to it, not to the island below
+        vm.prank(carol);
+        reg.dockAt(plotOf[carol], 1, 0, 1);
+        assertTrue(reg.connected(plotOf[bob], plotOf[carol]));
+        assertFalse(reg.connected(plotOf[alice], plotOf[carol]));
+        // bridges stay on one level
+        _dock(carol, 1, 0);
+        vm.prank(carol);
+        vm.expectRevert(DocksIslands.DifferentLevels.selector);
+        reg.buildBridge(plotOf[carol], plotOf[bob]);
+        // leaving the level frees its berth
+        _dock(bob, 2, 0);
+        assertEq(reg.levelOf(plotOf[bob]), 0);
+        assertEq(reg.islandAtBerthAt(0, 0, 1), 0);
+    }
+
     function testEmptyIslandCannotDock() public {
         vm.prank(alice);
         vm.expectRevert(DocksIslands.EmptyIsland.selector);

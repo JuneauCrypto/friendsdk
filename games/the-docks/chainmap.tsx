@@ -1,7 +1,12 @@
 /* The berth map: one square per island, whatever its size. Glowing squares are loading
  * zones where the chosen island can dock. Tap an island to build a bridge to it. */
 import { useState } from "react";
-import { connected, DOCKING_FEE, hostileBorder, type Berth, type Plot, type World } from "./world.js";
+import { connected, DOCKING_FEE, hostileBorder, levelName, zOf, type Berth, type Plot, type World } from "./world.js";
+
+/** Where a berth's square goes: the water level fills the cell; decks above sit small in its
+ *  top-right corner, decks below in its bottom-left, stepping further out per level. */
+const sq = (b: Berth, big: number) => { const z = zOf(b); if (!z) return { x: b.x + (1 - big) / 2, y: b.y + (1 - big) / 2, s: big };
+  const s = 0.3, o = Math.min(3, Math.abs(z)) * 0.1; return z > 0 ? { x: b.x + 1 - s - 0.02 - (o - 0.1), y: b.y + 0.02 + (o - 0.1), s } : { x: b.x + 0.02 + (o - 0.1), y: b.y + 1 - s - 0.02 - (o - 0.1), s }; };
 
 export function ChainMap({ world, island, zones, onDock, onBridge }: {
   world: World; island: Plot; zones: Berth[];
@@ -18,19 +23,19 @@ export function ChainMap({ world, island, zones, onDock, onBridge }: {
       {world.bridges.map((b, i) => <line key={i} x1={b.a.berth!.x + 0.5} y1={b.a.berth!.y + 0.5} x2={b.b.berth!.x + 0.5} y2={b.b.berth!.y + 0.5} className="bridge-line" />)}
       {docked.map(p => <g key={p.id} className={`isle ${p === island ? "mine" : p.mine ? "mine-other" : p.access === "open" ? "open" : "invite"} ${bridgeable(p) ? "can-bridge" : ""}`}
         onClick={() => bridgeable(p) && onBridge(p)}>
-        <rect x={p.berth!.x + 0.08} y={p.berth!.y + 0.08} width={0.84} height={0.84} rx={0.18} />
-        <text x={p.berth!.x + 0.5} y={p.berth!.y + 0.56} textAnchor="middle" dominantBaseline="middle">{p.friends.length > 999 ? `${Math.round(p.friends.length / 1000)}k` : p.friends.length}</text>
+        {(() => { const q = sq(p.berth!, 0.84); return <rect x={q.x} y={q.y} width={q.s} height={q.s} rx={q.s * 0.2} className={zOf(p.berth) ? "deck" : ""} />; })()}
+        {!zOf(p.berth) && <text x={p.berth!.x + 0.5} y={p.berth!.y + 0.56} textAnchor="middle" dominantBaseline="middle">{p.friends.length > 999 ? `${Math.round(p.friends.length / 1000)}k` : p.friends.length}</text>}
       </g>)}
       {zones.map((b, i) => <g key={`z${i}`} className={`slot ${hover === i ? "hot" : ""}`} onPointerEnter={() => setHover(i)} onPointerLeave={() => setHover(null)} onClick={() => onDock(b)}>
-        <rect x={b.x + 0.15} y={b.y + 0.15} width={0.7} height={0.7} rx={0.14} />
-        <text x={b.x + 0.5} y={b.y + 0.56} textAnchor="middle" dominantBaseline="middle" className="slot-num">{i + 1}</text>
+        {(() => { const q = sq(b, 0.7); return <rect x={q.x} y={q.y} width={q.s} height={q.s} rx={q.s * 0.2} />; })()}
+        {!zOf(b) && <text x={b.x + 0.5} y={b.y + 0.56} textAnchor="middle" dominantBaseline="middle" className="slot-num">{i + 1}</text>}
       </g>)}
     </svg>
-    <p className="docks-note">Each square is an island (number = Friends on it). Green: {island.name} · white: open · grey: invite only · glowing: loading zones. Tap an island you're not next to for a bridge.</p>
+    <p className="docks-note">Each square is an island (number = Friends on it). Green: {island.name} · white: open · grey: invite only · glowing: loading zones. Small squares in a corner are decks: top-right above the water level, bottom-left below it. Tap an island you're not next to for a bridge.</p>
     {zones.length > 0 && <div className="docks-slots">
-      {zones.map((b, i) => [b, i] as const).sort(([a], [b]) => { const c = island.berth ?? { x: 0, y: 0 }; return Math.abs(a.x - c.x) + Math.abs(a.y - c.y) - Math.abs(b.x - c.x) - Math.abs(b.y - c.y); }).slice(0, 24).map(([b, i]) => { const next = docked.filter(p => p !== island && Math.abs(p.berth!.x - b.x) + Math.abs(p.berth!.y - b.y) === 1);
+      {zones.map((b, i) => [b, i] as const).sort(([a], [b]) => { const c = island.berth ?? { x: 0, y: 0 }; return Math.abs(zOf(a)) - Math.abs(zOf(b)) || Math.abs(a.x - c.x) + Math.abs(a.y - c.y) - Math.abs(b.x - c.x) - Math.abs(b.y - c.y); }).slice(0, 24).map(([b, i]) => { const next = docked.filter(p => p !== island && Math.abs(p.berth!.x - b.x) + Math.abs(p.berth!.y - b.y) + Math.abs(zOf(p.berth) - zOf(b)) === 1);
         return <button type="button" key={i} onPointerEnter={() => setHover(i)} onPointerLeave={() => setHover(null)} onFocus={() => setHover(i)} onClick={() => onDock(b)}>
-          Zone {i + 1}<small>next to {next.map(p => p.name).join(", ") || "open water"}</small></button>; })}
+          Zone {i + 1}{zOf(b) ? ` · ${levelName(zOf(b))}` : ""}<small>{next.map(p => `${zOf(p.berth) > zOf(b) ? "under" : zOf(p.berth) < zOf(b) ? "over" : "next to"} ${p.name}`).join(", ") || "open water"}</small></button>; })}
     </div>}
     {island.berth && <div className="docks-slots">{docked.filter(bridgeable).sort((a, b) => Math.abs(a.berth!.x - island.berth!.x) + Math.abs(a.berth!.y - island.berth!.y) - Math.abs(b.berth!.x - island.berth!.x) - Math.abs(b.berth!.y - island.berth!.y)).slice(0, 12).map(p => <button type="button" key={p.id} onClick={() => onBridge(p)}>
       Bridge to {p.name}<small>{DOCKING_FEE} RF</small></button>)}</div>}

@@ -16,8 +16,17 @@ is a saved layout that belongs to the wallet that built it, and it can't be sold
   Friend **of the same generation** (normal arrange fee).
 - **Docking.** Islands float on one shared berth grid: **one island per berth whatever its
   size**, so the docks grow with the number of islands, not their size. Dock at a free
-  **loading zone** next to another island; neighbours are joined by a **gangway**. Docking
-  and moving an island cost only gas.
+  **loading zone** next to another island; neighbours are joined by a **boardwalk** a couple
+  of steps long. Islands docked together are packed tight as one block, so a flag walks like
+  one big island (boardwalks and bridges are quick to cross).
+- **Levels.** The docks stack: from 2 decks below the water line to 3 above it. A berth
+  straight above or below a docked island is a loading zone too (**⬆ / ⬇ Dock**), and stacked
+  islands are joined by **stairs** on little piers off their sides. Your level is drawn solid,
+  the others faded. On chain: `DocksIslands.dockAt(island, x, y, z)`, `levelOf`, `isLoadingZoneAt`;
+  bridges stay on one level.
+- **Harbors.** Every flag keeps a harbor: free slips along its peace side (and the decks over
+  its peace islands). **⚓ Dock at harbor** from its card in ⚓ Docks puts you there, and docking
+  at any of its peace islands opens the flag's **whole market** to you (🧺 its market).
 - **Tap to dock.** Tap any island on the map for its options: **⚓ Dock** next to it, **🌉 Bridge**
   or **💬 Chat**. Docking and bridges each cost a **2 RF docking fee**, into The Docks fund (the
   Docks rewards reserve). Once connected, your Friends can walk onto that island (free for now;
@@ -77,7 +86,7 @@ app's built-in browser (the SDK has no WalletConnect).
 | **Footprint** | Parsed from the same SVG: the land outline (`fill="url(#rf-floor)"`) and objects (`data-prop`), unprojected with the renderer's projection (a = 0.866, b = 0.28) onto a tile grid at true size (2 renderer units per tile). Solid objects block walking. |
 | **Holes** | When the minute check finds a saved Friend gone from the wallet (or deactivated), its spot turns into a hole (drawn dark with a red dashed edge). 🏝 Islands lists holes with a **Fill with…** picker (same generation only; the Friend that left fills its own hole for free). It heals by itself if that Friend returns. ⚙️ More → *Preview: a Friend leaves your wallet* shows the flow without sending anything. |
 | **Islands** | Each island has its own grid of 4 × 4-tile cells; Friends cover whole cells at true size (Gen 1 = 30 tiles … Gen 6 = 4), and rounding becomes boardwalk. 🏝 Islands → switch islands, **＋ New island**, and deploy any Friend to another island from its row. |
-| **Docking** | ⚓ Docks → the berth map: one square per island, glowing loading zones next to docked islands. Pick one to dock or move (gas only). Islands are drawn centred in their berth with water between; neighbours are joined by a gangway you can walk. |
+| **Docking** | ⚓ Docks → the berth map: one square per island, glowing loading zones next to docked islands (small corner squares are decks above or below). Pick one to dock or move. Docked islands are packed tight into blocks, joined by boardwalks; levels by stairs. |
 | **Bridges** | On the berth map, tap an island you aren't next to (or **Bridge to …**): a 2 RF docking fee, to The Docks fund. The bridge is a walkway over the water and lasts until either island moves. |
 | **Access** | For now only islands under a flag can be walked onto: every island of your flag, plus, as a visitor who can only explore, a flag's islands once your island is docked next to or bridged to one of them. Islands with no flag are closed to visitors. |
 | **Your whole wallet** | `roster.ts` reads the wallet that holds your Friend (`ownerOf`), its owner-filtered `Transfer` history (the same account-filtered method the SDK runtime's picker uses; no collection scan) and then generation + activation tier for every held Friend through Multicall3, 250 per call. Inactive Friends are left out. Re-run every minute, so bought, sold, activated or upgraded Friends join, leave or update. Adding by number stays as a fallback. |
@@ -96,8 +105,11 @@ Controls: WASD / arrow keys or tap to walk; zoom with ＋/－, the mouse wheel, 
 So there's a living world before other players arrive, the preview builds the same simulated
 Docks every time (a seeded random, `sim.ts`):
 
-- **Six founded flags**, each a block of islands with ⚔️ war islands around the edge and 🕊 peace
-  islands inside, its own flag Friend, loot vault, ships and market. Nods, not tickers:
+- **Six founded flags**, each a block of islands with ⚔️ war islands on three sides, a 🕊 peace
+  harbor front on the fourth (its free slips are where visitors dock) and peace islands inside,
+  its own flag Friend, loot vault, ships and market. The bigger flags build up and down: The
+  Orange Citadel has three upper decks over its core, Cashcat Cove one, Ultrasound Bay an upper
+  and a lower deck. Nods, not tickers:
   - **Cashcat Cove**: the Robinhood Chain cat that ran;
   - **The Orange Citadel**: 21 million, not one more;
   - **Ultrasound Bay**: the merge, gwei and burned fees;
@@ -113,8 +125,12 @@ Docks every time (a seeded random, `sim.ts`):
   tax, which feeds their flag Friends), flags raid each other now and then (your flag too, once
   its shield is down), wanderers enroll in your flag, and the 🧺 Market shows prices and recent
   trades while ⚔️ War shows recent battles.
-- The first neighbours stay close: only small rafts drift in the rows and columns near where you
-  start, since every island in a row or column of the docks widens it.
+- **Flags read as cities.** On the map every flag has walls by its population level (palisade,
+  stone walls, a citadel with towers, a golden fortress city) and a banner you can read from far
+  out: level, population, islands, the next level, and whether founding is open (rising flags:
+  lock RF to be a founder, an OG) or closed (and what joining costs). The ⚓ Docks flag cards show
+  the same with a progress bar, top-down maps of its islands, and **⚓ Dock at harbor**,
+  **🧺 Market** and **👁 Look**.
 
 ## Flag skins and OGs (simulated; views on chain)
 
@@ -332,7 +348,7 @@ needs backing.
   no ETH is needed up front; buyers fill it with ETH over time. The position NFT stays in the
   contract, which has no remove-liquidity function; `collect` takes fees only. `buyRf` is the
   buyback swap. There is no RF/WETH v3 pool on chain yet, so one must be created first.
-- Tests: `forge test --match-contract DocksTest` (53 unit tests, including the on-chain captain, mayor and Friend names, flags, soulbound marks, refunds, founding into liquidity and allowances, one island per wallet with nobody joining free, removal only at the next epoch with the allowance forfeited, a departed Friend burning a spot and staying bound (blocked from another village, then free after the epoch), cooldown on the island a moved Friend lands on, a Friend reclaiming its spot only while the population cap allows, power = Friends × founder share, enrollment votes, harvest half back into the pool and half shared by Friend count, the pool share vote, the platform fee (0 to start, capped at 5%), the Docks pool rewards reserve (RF and WETH kept as earned), nothing ever burned, village items from allowances with build times and boosts, own items, raffles of items left behind (members who stayed, Dice draw, winner keeps it; nobody entered → runs again), the village launch scope, islands are not tokens, per-generation fees into the Docks pool, only moved Friends charged, deploying between islands, holes (reserved, healed on return, burned in when placed elsewhere, filled by same-size Friends), loading zones, size-independent berths, free bridges that expire when an island moves, launch scopes over gangways and bridges, 300 Friends arranged and claimed in one transaction each) and
+- Tests: `forge test --match-contract DocksTest` (56 unit tests, including levels (docking above and below, stairs, bridges on one level), the on-chain captain, mayor and Friend names, flags, soulbound marks, refunds, founding into liquidity and allowances, one island per wallet with nobody joining free, removal only at the next epoch with the allowance forfeited, a departed Friend burning a spot and staying bound (blocked from another village, then free after the epoch), cooldown on the island a moved Friend lands on, a Friend reclaiming its spot only while the population cap allows, power = Friends × founder share, enrollment votes, harvest half back into the pool and half shared by Friend count, the pool share vote, the platform fee (0 to start, capped at 5%), the Docks pool rewards reserve (RF and WETH kept as earned), nothing ever burned, village items from allowances with build times and boosts, own items, raffles of items left behind (members who stayed, Dice draw, winner keeps it; nobody entered → runs again), the village launch scope, islands are not tokens, per-generation fees into the Docks pool, only moved Friends charged, deploying between islands, holes (reserved, healed on return, burned in when placed elsewhere, filled by same-size Friends), loading zones, size-independent berths, free bridges that expire when an island moves, launch scopes over gangways and bridges, 300 Friends arranged and claimed in one transaction each) and
   `FRIENDSDK_FORK_RPC=https://rpc.mainnet.chain.robinhood.com forge test --match-contract DocksForkTest`
   (real Generations, activation manager and RF on a local fork: creates two islands, arranges
   #67111 (50 RF into the Docks pool) and #7153, docks them side by side, launches, claims; and a village on the

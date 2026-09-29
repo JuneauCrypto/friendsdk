@@ -8,8 +8,13 @@
  *   until the Friend returns, or filled with another activated Friend of the same size.
  * - Islands float on one shared berth grid: one island per berth, whatever its size, so the
  *   world grows with the number of plots, not their size. An island docks at a free berth
- *   next to another island (a loading zone). Neighbouring islands are joined by a gangway.
- * - Bridges (a 2 RF docking fee) join islands that aren't neighbours.
+ *   next to another island (a loading zone): beside it, or on the level right above or below
+ *   it. Neighbouring islands are joined by a boardwalk a couple of steps long, levels by
+ *   stairs, so a block of docked islands (a flag) walks like one big island.
+ * - Levels: berths stack from LEVELS.MIN (below the waterline) to LEVELS.MAX (up in the air).
+ *   Every level is its own berth grid; an island on a level joins the islands beside it on
+ *   that level and the ones straight above and below it.
+ * - Bridges (a 2 RF docking fee) join islands on the same level that aren't neighbours.
  * - A flag's islands are each war or peace. Islands outside a flag dock next to its peace
  *   islands only, never directly against a war island (its border).
  * - Crossing onto someone else's island needs their approval unless they keep it open.
@@ -18,8 +23,12 @@
 import { REWARD_WEIGHT, type Friend } from "./land.js";
 
 export const CELL = 4;                                             // tiles per cell side
-export const GAP = 6;                                              // tiles of water between neighbouring berths
-const MIN_BERTH = 12;                                              // tiles: the smallest berth drawn
+export const GAP = 2;                                              // tiles of boardwalk between neighbouring islands
+export const SEA = 10;                                             // tiles of open water between blocks of islands
+const MIN_BERTH = 6;                                               // tiles: an empty berth column or row
+/** Levels: 0 is the water line; islands dock straight above (+1…) or below (−1…) another. */
+export const LEVELS = { MIN: -2, MAX: 3 } as const;
+export const levelName = (z: number) => z === 0 ? "Water level" : z > 0 ? `Upper deck ${z}` : `Lower deck ${-z}`;
 /** Footprint in cells by generation: lands are 30, 20, 18×16, 12, 8 and 4 tiles across. */
 export const FOOTPRINT: Readonly<Record<number, readonly [number, number]>> = { 1: [8, 8], 2: [5, 5], 3: [5, 4], 4: [3, 3], 5: [2, 2], 6: [1, 1] };
 /** RF paid per Friend moved on its island when saved on chain (DocksIslands.FEE_GEN1…6), into a pool. */
@@ -41,7 +50,8 @@ export const memberOf = (f: Friend) => member(f.tokenId, Number(f.traits.Generat
 
 export type Access = "open" | "invite";
 export type Placed = { m: Member; x: number; y: number };        // cell position on its island's own grid
-export type Berth = { x: number; y: number };
+export type Berth = { x: number; y: number; z?: number };             // z: level (0 when missing)
+export const zOf = (b: Berth | null | undefined) => b?.z ?? 0;
 /** A spot left by a saved Friend that left the wallet or was deactivated. */
 export type Hole = { id: bigint; gen: number; cw: number; ch: number; x: number; y: number };
 export type Plot = {
@@ -53,6 +63,8 @@ export type Plot = {
 };
 export type Bridge = { a: Plot; b: Plot; at: [Berth, Berth] };   // breaks if either island moves
 export type Visit = "none" | "pending" | "approved" | "declined";
+/** Stairs: step on them to go to level `to`, arriving at (x, y). */
+export type Lift = { to: number; x: number; y: number };
 export type Box = { x0: number; y0: number; x1: number; y1: number };
 export type World = {
   plots: Plot[]; visits: Map<string, Visit>; version: number; bridges: Bridge[];
@@ -62,7 +74,10 @@ export type World = {
   origin: Map<Plot, { x: number; y: number }>;                     // world tile of the island's cell (0, 0)
   box: Map<Plot, Box>;                                             // island bounds, world tiles
   cols: { b: number; x0: number; x1: number }[]; rows: { b: number; y0: number; y1: number }[];
-  walk: Map<number, "gangway" | "bridge">;                         // walkway tiles over the water
+  walk: Map<number, "gangway" | "bridge">;                         // walkway tiles over the water, keyed tk(x, y, z)
+  lifts: Map<number, Lift>;                                        // stairs between levels, keyed tk(x, y, z)
+  grid: Map<number, Plot[]>;                                       // islands by 32-tile bucket (for tileAt)
+  blocks: { plots: Plot[]; box: Box }[];                           // islands joined by neighbouring berths
   villages: Village[];
   items: Item[];
   bonds: Map<bigint, { village: Village; until: number }>;       // a Friend that left a flagged island
@@ -101,6 +116,11 @@ export const walletOf = (p: Plot) => (p.mine ? "you" : p.name);
 // Numeric keys (fast for large islands). Coordinates stay well inside ±2^20.
 const K = 1 << 21, HALF = 1 << 20;
 export const ck = (x: number, y: number) => (x + HALF) * K + (y + HALF);
+const LV = 2 ** 42;
+/** Key of a tile or berth on a level. */
+export const tk = (x: number, y: number, z = 0) => ck(x, y) + (z + 8) * LV;
+export const bk = (b: Berth) => tk(b.x, b.y, zOf(b));
+export const untk = (k: number) => { const z = Math.floor(k / LV) - 8, r = k - (z + 8) * LV; return { x: Math.floor(r / K) - HALF, y: (r % K) - HALF, z }; };
 const T = (c: number) => c * CELL;
 export const myPlots = (w: World) => w.plots.filter(p => p.mine);
 export const plotOf = (w: World, id: bigint) => w.plots.find(p => p.friends.some(pl => pl.m.id === id)) ?? null;
@@ -108,7 +128,7 @@ export const plotOf = (w: World, id: bigint) => w.plots.find(p => p.friends.some
 /* ── building the world ── */
 
 export function emptyWorld(): World {
-  return { plots: [], visits: new Map(), version: 0, bridges: [], occ: new Map(), holeOcc: new Map(), berths: new Map(), origin: new Map(), box: new Map(), cols: [], rows: [], walk: new Map(), villages: [], items: [], bonds: new Map(), cooldown: new Map(), genesis: Date.now() };
+  return { plots: [], visits: new Map(), version: 0, bridges: [], occ: new Map(), holeOcc: new Map(), berths: new Map(), origin: new Map(), box: new Map(), cols: [], rows: [], walk: new Map(), lifts: new Map(), grid: new Map(), blocks: [], villages: [], items: [], bonds: new Map(), cooldown: new Map(), genesis: Date.now() };
 }
 
 export function rebuild(w: World) {
@@ -119,30 +139,97 @@ export function rebuild(w: World) {
     for (const h of p.holes ?? []) for (let j = 0; j < h.ch; j++) for (let i = 0; i < h.cw; i++) hm.set(ck(h.x + i, h.y + j), h);
     w.occ.set(p, m); w.holeOcc.set(p, hm);
     const hasShape = p.friends.length > 0 || (p.holes?.length ?? 0) > 0;
-    if (p.berth && hasShape) w.berths.set(ck(p.berth.x, p.berth.y), p);
+    if (p.berth && hasShape) w.berths.set(bk(p.berth), p);
     else if (p.berth) p.berth = null;
   }
   w.bridges = w.bridges.filter(b => b.a.berth && b.b.berth && same(b.a.berth, b.at[0]) && same(b.b.berth, b.at[1]));
   layout(w);
   w.version++;
 }
-const same = (a: Berth, b: Berth) => a.x === b.x && a.y === b.y;
+const same = (a: Berth, b: Berth) => a.x === b.x && a.y === b.y && zOf(a) === zOf(b);
 
-/** Berths become a table: each column as wide as its widest island, each row as tall as its
- *  tallest, with water between. Islands sit centred in their berth. */
+/** Where everything goes, in world tiles.
+ *  - Blocks: islands joined by neighbouring berths (beside, above or below) are one block, and
+ *    blocks whose berth rectangles overlap are merged. A block is laid out tight, as one big
+ *    island: each berth column as wide as its widest island, each row as tall as its tallest,
+ *    with only a GAP-tile boardwalk between them. Every level of a berth shares its spot (the
+ *    upper decks are drawn raised over it).
+ *  - Blocks sit in a coarse table of all berth columns and rows with SEA tiles of water between;
+ *    a column only grows as far as the blocks spanning it need. */
 function layout(w: World) {
   const docked = w.plots.filter(p => p.berth && (p.friends.length || p.holes?.length));
-  const colW = new Map<number, number>(), rowH = new Map<number, number>();
+  const size = new Map<Plot, { w: number; h: number }>();
+  for (const p of docked) { const b = plotBounds(p); size.set(p, { w: T(b.x1 - b.x0), h: T(b.y1 - b.y0) }); }
+  // 1. blocks
+  const at = new Map(docked.map((p, i) => [p, i])), parent = docked.map((_, i) => i);
+  const root = (i: number): number => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+  for (const p of docked) for (const n of around(p.berth!)) { const q = w.berths.get(bk(n)), j = q ? at.get(q) : undefined; if (j !== undefined) parent[root(j)] = root(at.get(p)!); }
+  type Blk = { plots: Plot[]; bx0: number; bx1: number; by0: number; by1: number };
+  const byRoot = new Map<number, Blk>();
   for (const p of docked) {
-    const b = plotBounds(p), bx = p.berth!.x, by = p.berth!.y;
-    colW.set(bx, Math.max(colW.get(bx) ?? MIN_BERTH, T(b.x1 - b.x0)));
-    rowH.set(by, Math.max(rowH.get(by) ?? MIN_BERTH, T(b.y1 - b.y0)));
+    const r = root(at.get(p)!), b = p.berth!; let k = byRoot.get(r);
+    if (!k) byRoot.set(r, k = { plots: [], bx0: b.x, bx1: b.x, by0: b.y, by1: b.y });
+    k.plots.push(p); k.bx0 = Math.min(k.bx0, b.x); k.bx1 = Math.max(k.bx1, b.x); k.by0 = Math.min(k.by0, b.y); k.by1 = Math.max(k.by1, b.y);
   }
-  const span = (m: Map<number, number>) => { const k = [...m.keys()]; return k.length ? [Math.min(...k), Math.max(...k)] : [0, -1]; };
-  const [cx0, cx1] = span(colW), [ry0, ry1] = span(rowH);
+  let blocks = [...byRoot.values()];
+  for (let merged = true; merged;) {
+    merged = false;
+    for (let i = 0; i < blocks.length; i++) for (let j = i + 1; j < blocks.length; j++) {
+      const A = blocks[i], B = blocks[j];
+      if (A.bx0 <= B.bx1 && B.bx0 <= A.bx1 && A.by0 <= B.by1 && B.by0 <= A.by1) {
+        A.plots.push(...B.plots); A.bx0 = Math.min(A.bx0, B.bx0); A.bx1 = Math.max(A.bx1, B.bx1); A.by0 = Math.min(A.by0, B.by0); A.by1 = Math.max(A.by1, B.by1);
+        blocks[j] = blocks[blocks.length - 1]; blocks.pop(); j--; merged = true;
+      }
+    }
+  }
+  blocks.sort((a, b) => a.by0 - b.by0 || a.bx0 - b.bx0);
+  // 2. each block packed tight: every berth (with all its levels) is one unit, as big as the
+  //    biggest island stacked on it. Start from a table of the block's columns and rows, then
+  //    compact: slide every unit left, then up, until it's GAP tiles from whatever is in the way.
+  //    Rows stay in order left to right and columns top to bottom, so neighbours stay neighbours.
+  const local = blocks.map(k => {
+    type U = { bx: number; by: number; w: number; h: number; x: number; y: number };
+    const units = new Map<string, U>();
+    for (const p of k.plots) {
+      const s = size.get(p)!, key = `${p.berth!.x},${p.berth!.y}`, u = units.get(key);
+      if (u) { u.w = Math.max(u.w, s.w); u.h = Math.max(u.h, s.h); } else units.set(key, { bx: p.berth!.x, by: p.berth!.y, w: s.w, h: s.h, x: 0, y: 0 });
+    }
+    const colW = new Map<number, number>(), rowH = new Map<number, number>();
+    for (const u of units.values()) { colW.set(u.bx, Math.max(colW.get(u.bx) ?? 4, u.w)); rowH.set(u.by, Math.max(rowH.get(u.by) ?? 4, u.h)); }
+    const lx = new Map<number, number>(), ly = new Map<number, number>();
+    let x = 0; for (let b = k.bx0; b <= k.bx1; b++) { lx.set(b, x); x += (colW.get(b) ?? 4) + GAP; }
+    let y = 0; for (let b = k.by0; b <= k.by1; b++) { ly.set(b, y); y += (rowH.get(b) ?? 4) + GAP; }
+    const list = [...units.values()];
+    for (const u of list) { u.x = lx.get(u.bx)! + Math.floor((colW.get(u.bx)! - u.w) / 2); u.y = ly.get(u.by)! + Math.floor((rowH.get(u.by)! - u.h) / 2); }
+    const near = (a0: number, a1: number, b0: number, b1: number) => a0 < b1 + GAP && b0 < a1 + GAP;
+    const done: U[] = [];
+    for (const u of [...list].sort((a, b) => a.x - b.x || a.y - b.y)) {
+      let nx = 0; for (const q of done) if (near(u.y, u.y + u.h, q.y, q.y + q.h)) nx = Math.max(nx, q.x + q.w + GAP);
+      u.x = nx; done.push(u);
+    }
+    done.length = 0;
+    for (const u of [...list].sort((a, b) => a.y - b.y || a.x - b.x)) {
+      let ny = 0; for (const q of done) if (near(u.x, u.x + u.w, q.x, q.x + q.w)) ny = Math.max(ny, q.y + q.h + GAP);
+      u.y = ny; done.push(u);
+    }
+    return { units, w: Math.max(...list.map(u => u.x + u.w)), h: Math.max(...list.map(u => u.y + u.h)) };
+  });
+  // 3. the coarse table
+  const W = new Map<number, number>(), H = new Map<number, number>();
   w.cols = []; w.rows = [];
-  for (let b = cx0, x = 0; b <= cx1; b++) { const wd = colW.get(b) ?? MIN_BERTH; w.cols.push({ b, x0: x, x1: x + wd }); x += wd + GAP; }
-  for (let b = ry0, y = 0; b <= ry1; b++) { const ht = rowH.get(b) ?? MIN_BERTH; w.rows.push({ b, y0: y, y1: y + ht }); y += ht + GAP; }
+  const colX = new Map<number, number>(), rowY = new Map<number, number>();
+  const span = (m: Map<number, number>, a: number, b: number) => { let s = (b - a) * SEA; for (let i = a; i <= b; i++) s += m.get(i)!; return s; };
+  if (blocks.length) {
+    const gx0 = Math.min(...blocks.map(k => k.bx0)), gx1 = Math.max(...blocks.map(k => k.bx1));
+    const gy0 = Math.min(...blocks.map(k => k.by0)), gy1 = Math.max(...blocks.map(k => k.by1));
+    for (let b = gx0; b <= gx1; b++) W.set(b, MIN_BERTH);
+    for (let b = gy0; b <= gy1; b++) H.set(b, MIN_BERTH);
+    const grow = (m: Map<number, number>, a: number, b: number, need: number) => { const d = need - span(m, a, b); if (d > 0) { const add = Math.ceil(d / (b - a + 1)); for (let i = a; i <= b; i++) m.set(i, m.get(i)! + add); } };
+    [...blocks.keys()].sort((i, j) => (blocks[i].bx1 - blocks[i].bx0) - (blocks[j].bx1 - blocks[j].bx0)).forEach(i => grow(W, blocks[i].bx0, blocks[i].bx1, local[i].w));
+    [...blocks.keys()].sort((i, j) => (blocks[i].by1 - blocks[i].by0) - (blocks[j].by1 - blocks[j].by0)).forEach(i => grow(H, blocks[i].by0, blocks[i].by1, local[i].h));
+    for (let b = gx0, x = 0; b <= gx1; b++) { colX.set(b, x); w.cols.push({ b, x0: x, x1: x + W.get(b)! }); x += W.get(b)! + SEA; }
+    for (let b = gy0, y = 0; b <= gy1; b++) { rowY.set(b, y); w.rows.push({ b, y0: y, y1: y + H.get(b)! }); y += H.get(b)! + SEA; }
+  }
   w.origin = new Map(); w.box = new Map();
   const place = (p: Plot, left: number, top: number, width: number, height: number) => {
     const b = plotBounds(p), wT = T(b.x1 - b.x0), hT = T(b.y1 - b.y0);
@@ -150,37 +237,68 @@ function layout(w: World) {
     w.origin.set(p, { x: ox, y: oy });
     w.box.set(p, { x0: ox + T(b.x0), y0: oy + T(b.y0), x1: ox + T(b.x1), y1: oy + T(b.y1) });
   };
-  for (const p of docked) {
-    const c = w.cols.find(c => c.b === p.berth!.x)!, r = w.rows.find(r => r.b === p.berth!.y)!;
-    place(p, c.x0, r.y0, c.x1 - c.x0, r.y1 - r.y0);
-  }
+  w.blocks = blocks.map((k, i) => {
+    const L = local[i];
+    const left = colX.get(k.bx0)! + Math.floor((span(W, k.bx0, k.bx1) - L.w) / 2);
+    const top = rowY.get(k.by0)! + Math.floor((span(H, k.by0, k.by1) - L.h) / 2);
+    for (const p of k.plots) { const u = L.units.get(`${p.berth!.x},${p.berth!.y}`)!; place(p, left + u.x, top + u.y, u.w, u.h); }
+    return { plots: k.plots, box: { x0: left, y0: top, x1: left + L.w, y1: top + L.h } };
+  });
   // islands floating free (mine, not docked yet) drift just below the docks
-  let fx = 0; const fy = (w.rows.at(-1)?.y1 ?? 0) + GAP * 2;
+  let fx = 0; const fy = (w.rows.at(-1)?.y1 ?? 0) + SEA * 2;
   for (const p of w.plots) if (!p.berth && (p.friends.length || p.holes?.length)) {
     const b = plotBounds(p), wT = T(b.x1 - b.x0), hT = T(b.y1 - b.y0);
-    place(p, fx, fy, wT, hT); fx += wT + GAP * 2;
+    place(p, fx, fy, wT, hT); fx += wT + SEA;
   }
-  // walkways: gangways between neighbouring berths, bridges wherever built
-  w.walk = new Map();
+  // bucket index for tileAt
+  w.grid = new Map();
+  for (const [p, b] of w.box) for (let gx = Math.floor(b.x0 / BUCKET); gx <= Math.floor((b.x1 - 1) / BUCKET); gx++) for (let gy = Math.floor(b.y0 / BUCKET); gy <= Math.floor((b.y1 - 1) / BUCKET); gy++) {
+    const k = ck(gx, gy), l = w.grid.get(k); if (l) l.push(p); else w.grid.set(k, [p]);
+  }
+  // walkways: a boardwalk between neighbours on a level (across their whole shared side),
+  // stairs between levels, bridges wherever built
+  w.walk = new Map(); w.lifts = new Map();
   const centre = (p: Plot) => { const b = w.box.get(p)!; return { x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2 }; };
-  for (const p of docked) for (const [dx, dy] of [[1, 0], [0, 1]]) {
-    const q = w.berths.get(ck(p.berth!.x + dx, p.berth!.y + dy)); if (!q) continue;
-    const a = centre(p), b = centre(q);
-    if (dx) { const y = Math.floor(w.rows.find(r => r.b === p.berth!.y)!.y0 + (w.rows.find(r => r.b === p.berth!.y)!.y1 - w.rows.find(r => r.b === p.berth!.y)!.y0) / 2);
-      for (let x = Math.floor(a.x); x <= Math.ceil(b.x); x++) for (const yy of [y - 1, y]) w.walk.set(ck(x, yy), "gangway"); }
-    else { const col = w.cols.find(c => c.b === p.berth!.x)!, x = Math.floor(col.x0 + (col.x1 - col.x0) / 2);
-      for (let y = Math.floor(a.y); y <= Math.ceil(b.y); y++) for (const xx of [x - 1, x]) w.walk.set(ck(xx, y), "gangway"); }
+  for (const p of docked) {
+    const z = zOf(p.berth), a = w.box.get(p)!, ca = centre(p);
+    for (const [dx, dy] of [[1, 0], [0, 1]]) {
+      const q = w.berths.get(bk({ x: p.berth!.x + dx, y: p.berth!.y + dy, z })); if (!q) continue;
+      const b = w.box.get(q)!, cb = centre(q), len = Math.hypot(cb.x - ca.x, cb.y - ca.y);
+      for (let t = 0; t <= len; t += 0.5) {                          // a two-tile walk, centre to centre
+        const x = ca.x + (cb.x - ca.x) * t / len, y = ca.y + (cb.y - ca.y) * t / len;
+        for (const [ox, oy] of [[-1, -1], [0, -1], [-1, 0], [0, 0]]) w.walk.set(tk(Math.floor(x + ox), Math.floor(y + oy), z), "gangway");
+      }
+      // close neighbours: the boardwalk spans their whole facing sides, like one island
+      if (dx && b.x0 - a.x1 <= 8) { const y0 = Math.max(a.y0, b.y0), y1 = Math.min(a.y1, b.y1); for (let x = a.x1 - 1; x <= b.x0; x++) for (let y = y0; y < y1; y++) w.walk.set(tk(x, y, z), "gangway"); }
+      if (dy && b.y0 - a.y1 <= 8) { const x0 = Math.max(a.x0, b.x0), x1 = Math.min(a.x1, b.x1); for (let y = a.y1 - 1; y <= b.y0; y++) for (let x = x0; x < x1; x++) w.walk.set(tk(x, y, z), "gangway"); }
+    }
+    const up = w.berths.get(bk({ x: p.berth!.x, y: p.berth!.y, z: z + 1 }));
+    if (up) {
+      // Stairs sit on little piers just off the islands' sides (never blocked by buildings):
+      // up from the lower island's left side, down from the upper island's right side. Each
+      // arrives on a pier beside the other island, a step below its own stairs.
+      const b = w.box.get(up)!, am = Math.floor((a.y0 + a.y1) / 2), bm = Math.floor((b.y0 + b.y1) / 2);
+      const pier = (x0: number, x1: number, y: number, lv: number) => { for (let x = x0; x <= x1; x++) for (const yy of [y, y + 1]) w.walk.set(tk(x, yy, lv), "gangway"); };
+      pier(a.x0 - 3, a.x0 + 3, am - 1, z); pier(a.x0 - 3, a.x0 + 3, am + 1, z);            // lower: up-stairs + arrival from above
+      pier(b.x1 - 4, b.x1 + 2, bm - 1, z + 1); pier(b.x1 - 4, b.x1 + 2, bm + 1, z + 1);   // upper: down-stairs + arrival from below
+      pier(b.x0 - 3, b.x0 + 3, bm + 1, z + 1); pier(a.x1 - 4, a.x1 + 2, am + 1, z);
+      for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) {
+        w.lifts.set(tk(a.x0 - 3 + i, am - 1 + j, z), { to: z + 1, x: b.x0 - 2, y: bm + 2 });
+        w.lifts.set(tk(b.x1 + 1 + i, bm - 1 + j, z + 1), { to: z, x: a.x1 + 1.5, y: am + 2 });
+      }
+    }
   }
   for (const br of w.bridges) {
-    const a = centre(br.a), b = centre(br.b), len = Math.hypot(b.x - a.x, b.y - a.y);
+    const a = centre(br.a), b = centre(br.b), len = Math.hypot(b.x - a.x, b.y - a.y), z = zOf(br.a.berth);
     for (let t = 0; t <= len; t += 0.5) {
       const x = a.x + (b.x - a.x) * t / len, y = a.y + (b.y - a.y) * t / len;
       for (const [ox, oy] of [[-0.7, -0.7], [0.7, -0.7], [-0.7, 0.7], [0.7, 0.7]]) {
-        const k = ck(Math.floor(x + ox), Math.floor(y + oy)); if (!w.walk.has(k)) w.walk.set(k, "bridge");
+        const k = tk(Math.floor(x + ox), Math.floor(y + oy), z); if (!w.walk.has(k)) w.walk.set(k, "bridge");
       }
     }
   }
 }
+const BUCKET = 32;
 
 /** Sample neighbours float at their berths; my islands start floating free until docked. */
 export function createWorld(neighbours: Plot[], mineToo: Plot[]): World {
@@ -303,19 +421,26 @@ export function refreshMember(w: World, fresh: Friend) {
 
 /* ── docking (gas only) and bridges (RF) ── */
 
-const around = (b: Berth) => [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) => ({ x: b.x + dx, y: b.y + dy }));
-/** Free berths next to a docked island, where `p` can dock. The first island docks anywhere. */
+/** The berths touching `b`: beside it on its level, and straight above and below it. */
+function around(b: Berth): Berth[] {
+  const z = zOf(b), out: Berth[] = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) => ({ x: b.x + dx, y: b.y + dy, z }));
+  if (z < LEVELS.MAX) out.push({ x: b.x, y: b.y, z: z + 1 });
+  if (z > LEVELS.MIN) out.push({ x: b.x, y: b.y, z: z - 1 });
+  return out;
+}
+/** Free berths next to a docked island (beside it, above or below), where `p` can dock. The
+ *  first island docks anywhere. */
 export function loadingZones(w: World, p: Plot): Berth[] {
   const out = new Map<number, Berth>();
   for (const q of w.plots) if (q !== p && q.berth && q.friends.length && !hostileBorder(w, p, q))
-    for (const b of around(q.berth)) { const o = w.berths.get(ck(b.x, b.y)); if (!o || o === p) out.set(ck(b.x, b.y), b); }
-  // never directly against someone else's war island
-  for (const [k, b] of out) if (around(b).some(n => { const q = w.berths.get(ck(n.x, n.y)); return q && q !== p && q.friends.length && hostileBorder(w, p, q); })) out.delete(k);
-  if (!out.size && ![...w.berths.values()].some(q => q !== p)) out.set(ck(0, 0), { x: 0, y: 0 });
+    for (const b of around(q.berth)) { const o = w.berths.get(bk(b)); if (!o || o === p) out.set(bk(b), b); }
+  // never directly against (or over, or under) someone else's war island
+  for (const [k, b] of out) if (around(b).some(n => { const q = w.berths.get(bk(n)); return q && q !== p && q.friends.length && hostileBorder(w, p, q); })) out.delete(k);
+  if (!out.size && ![...w.berths.values()].some(q => q !== p)) out.set(tk(0, 0), { x: 0, y: 0 });
   return [...out.values()];
 }
 export function dockAt(w: World, p: Plot, b: Berth) {
-  const o = w.berths.get(ck(b.x, b.y));
+  const o = w.berths.get(bk(b));
   if (o && o !== p) return false;
   if (!loadingZones(w, p).some(z => same(z, b))) return false;
   p.berth = { ...b }; rebuild(w); return true;
@@ -326,7 +451,11 @@ export function zonesNextTo(w: World, p: Plot, target: Plot): Berth[] {
   return loadingZones(w, p).filter(z => dist(z, target.berth!) === 1);
 }
 export function undock(w: World, p: Plot) { p.berth = null; rebuild(w); }
-const dist = (a: Berth, b: Berth) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+const dist = (a: Berth, b: Berth) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + Math.abs(zOf(a) - zOf(b));
+/** Berth steps between two islands (levels count as steps). */
+export const berthDist = dist;
+/** Straight above or below each other. */
+export const stacked = (a: Plot, b: Plot) => Boolean(a.berth && b.berth && a.berth.x === b.berth.x && a.berth.y === b.berth.y && zOf(a.berth) !== zOf(b.berth));
 export const hasBridge = (w: World, a: Plot, b: Plot) => w.bridges.some(x => (x.a === a && x.b === b) || (x.a === b && x.b === a));
 export function connected(w: World, a: Plot, b: Plot) {
   if (!a.berth || !b.berth || a === b) return false;
@@ -334,7 +463,7 @@ export function connected(w: World, a: Plot, b: Plot) {
 }
 export function neighboursOf(w: World, p: Plot) { return w.plots.filter(q => q.friends.length && connected(w, p, q)); }
 export function addBridge(w: World, a: Plot, b: Plot) {
-  if (!a.berth || !b.berth || connected(w, a, b) || hostileBorder(w, a, b)) return false;
+  if (!a.berth || !b.berth || zOf(a.berth) !== zOf(b.berth) || connected(w, a, b) || hostileBorder(w, a, b)) return false;
   w.bridges.push({ a, b, at: [{ ...a.berth }, { ...b.berth }] }); rebuild(w); return true;
 }
 
@@ -383,12 +512,7 @@ export function flagTile(w: World, v: Village) {
 
 /* ── walking & access (world tiles) ── */
 
-export type TileInfo = { plot: Plot | null; placed: Placed | null; blocked: boolean; walkway?: "gangway" | "bridge" };
-const find = <T extends { x0?: number; x1?: number; y0?: number; y1?: number }>(list: T[], v: number, lo: keyof T, hi: keyof T) => {
-  let a = 0, b = list.length - 1;
-  while (a <= b) { const m = (a + b) >> 1, it = list[m]; if (v < (it[lo] as number)) b = m - 1; else if (v >= (it[hi] as number)) a = m + 1; else return it; }
-  return null;
-};
+export type TileInfo = { plot: Plot | null; placed: Placed | null; blocked: boolean; walkway?: "gangway" | "bridge"; lift?: Lift };
 function islandTile(w: World, p: Plot, x: number, y: number): TileInfo | null {
   const o = w.origin.get(p); if (!o) return null;
   const lx = x - o.x, ly = y - o.y, pl = w.occ.get(p)?.get(ck(Math.floor(lx / CELL), Math.floor(ly / CELL)));
@@ -398,13 +522,16 @@ function islandTile(w: World, p: Plot, x: number, y: number): TileInfo | null {
   const land = i < f.w && j < f.h && f.tiles[j * f.w + i];
   return { plot: p, placed: pl, blocked: land ? f.blocked[j * f.w + i] : false };
 }
-export function tileAt(w: World, x: number, y: number): TileInfo | undefined {
-  const tx = Math.floor(x), ty = Math.floor(y);
-  const c = find(w.cols, tx, "x0", "x1"), r = find(w.rows, ty, "y0", "y1");
-  if (c && r) { const p = w.berths.get(ck(c.b, r.b)); const t = p && islandTile(w, p, tx, ty); if (t) return t; }
-  for (const p of w.plots) if (!p.berth && p.friends.length) { const t = islandTile(w, p, tx, ty); if (t) return t; }
-  const k = w.walk.get(ck(tx, ty));
-  return k ? { plot: null, placed: null, blocked: false, walkway: k } : undefined;
+/** What's at a world tile on level `z` (islands floating free are on level 0). */
+export function tileAt(w: World, x: number, y: number, z = 0): TileInfo | undefined {
+  const tx = Math.floor(x), ty = Math.floor(y), lift = w.lifts.get(tk(tx, ty, z));
+  for (const p of w.grid.get(ck(Math.floor(tx / BUCKET), Math.floor(ty / BUCKET))) ?? []) {
+    if (zOf(p.berth) !== z) continue;
+    const b = w.box.get(p)!; if (tx < b.x0 || tx >= b.x1 || ty < b.y0 || ty >= b.y1) continue;
+    const t = islandTile(w, p, tx, ty); if (t) return lift ? { ...t, blocked: false, lift } : t;
+  }
+  const k = w.walk.get(tk(tx, ty, z));
+  return lift ? { plot: null, placed: null, blocked: false, walkway: "gangway", lift } : k ? { plot: null, placed: null, blocked: false, walkway: k } : undefined;
 }
 /** Walking onto an island: your own; any island docked next to or bridged to one of yours (for
  *  now free; a toll to its owner and the Docks may come later); every island of a flag you're in;

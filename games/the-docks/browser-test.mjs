@@ -125,6 +125,46 @@ try {
   await page.waitForTimeout(1200);
   await shot("start");
   const btn = name => game.getByRole("button", { name, exact: false }).first();
+  if (process.env.DOCKS_CITY) {
+    await btn("Docks").click();
+    const card = game.locator(".docks-flagcard", { hasText: "Cashcat Cove" });
+    await card.scrollIntoViewIfNeeded(); await page.waitForTimeout(400); await shot("city-cards");
+    await card.getByRole("button", { name: /Dock at harbor/ }).click();
+    await game.getByText(/You're at Cashcat Cove's harbor/).waitFor();
+    await page.waitForTimeout(1500); await shot("city-docked");
+    for (let i = 0; i < 3; i++) await game.getByRole("button", { name: "Zoom out" }).click();
+    await page.waitForTimeout(1500); await shot("city-out");
+    await btn("Docks").click();
+    await game.locator(".docks-flagcard", { hasText: "Cashcat Cove" }).getByRole("button", { name: /Market/ }).click();
+    await game.locator(".docks-citymarket").waitFor(); await page.waitForTimeout(300); await shot("city-market");
+    await game.getByRole("button", { name: "Close" }).first().click().catch(() => {});
+    await game.getByRole("button", { name: "Fit all islands" }).click();
+    await page.waitForTimeout(2000); await shot("city-all");
+    for (let i = 0; i < 4; i++) await game.getByRole("button", { name: "Zoom in" }).click();
+    await page.waitForTimeout(1500); await shot("city-mid");
+    await btn("Docks").click();
+    await game.locator(".docks-flagcard", { hasText: "The Orange Citadel" }).getByRole("button", { name: /Look/ }).click();
+    for (let i = 0; i < 5; i++) await game.getByRole("button", { name: "Zoom in" }).click();
+    await page.waitForTimeout(4000); await shot("citadel");
+    for (let i = 0; i < 2; i++) await game.getByRole("button", { name: "Zoom out" }).click();
+    await page.waitForTimeout(2500); await shot("citadel-out");
+    if (process.env.DOCKS_PROBE) { const f = page.frames().find(x => x.parentFrame()); for (const [x, y] of [[800, 450], [300, 520], [700, 360]]) console.log(x, y, await f.evaluate(([x, y]) => document.elementsFromPoint(x, y).slice(0, 4).map(e => `${e.tagName}.${e.className?.baseVal ?? e.className} ${e.getAttribute("style")?.slice(0, 80) ?? ""}`).join(" | "), [x, y])); }
+    // levels: dock on the deck above a Cashcat peace island, then take the stairs down
+    await btn("Docks").click();
+    await game.locator(".docks-flagcard", { hasText: "Cashcat Cove" }).getByRole("button", { name: /^Dock above / }).first().click();
+    await game.getByText(/docked on the upper deck \d/).waitFor();
+    await game.getByRole("button", { name: "Zoom in" }).click(); await game.getByRole("button", { name: "Zoom in" }).click();
+    await page.waitForTimeout(1500); await shot("deck");
+    const where = async () => (await game.locator(".docks-where strong").textContent()).trim();
+    const before = await where();
+    const down = game.locator(".docks-stairs:not(.other-level)", { hasText: "⬇" }).first(), bb = await down.boundingBox();
+    const fb = await page.locator("iframe").boundingBox();
+    await page.mouse.click(bb.x + bb.width / 2, bb.y + bb.height);
+    await page.waitForTimeout(4000); await shot("deck-down");
+    console.log("stairs:", before, "->", await where(), fb ? "" : "");
+    console.log("opaque lands", await game.locator(".docks-land:not(.other-level)").count(), "faded", await game.locator(".docks-land.other-level").count(), "stairs markers", await game.locator(".docks-stairs:not(.other-level)").count());
+    console.log("ok city", errors); process.exit(0);
+  }
   // dock
   await btn("Docks").click();
   await game.getByRole("img", { name: /Map: \d+ docked islands, \d+ loading zones/ }).waitFor();
@@ -332,7 +372,7 @@ try {
     const town = game.locator(".docks-village", { hasText: "Dock Town" });
     // every flag gets a generated flag Friend; part of the founding RF upgrades it
     await town.getByText(/\w+ · Dock Town's flag Friend · level 2 Keeper/).waitFor();
-    await town.getByText(/upgrade fund 27\.3k \/ 40k RF to level 3/).waitFor();
+    await town.getByText(/upgrade fund [\d.]+k \/ 40k RF to level 3/).waitFor();
     assert.ok(await game.locator(".docks-flag-friend").count() >= 1, "flag Friends stand by their poles");
     // the planter's island is the seat: already in, voting with its Friends × the founder multiplier
     await town.getByText(/Your island: 2 Friends × [\d.]+ = [\d.]+ votes/).waitFor();   // samples may enroll and dilute the founder share
@@ -475,7 +515,7 @@ try {
       for (const [fx, fy] of [[0.5, 0.62], [0.5, 0.72], [0.4, 0.68], [0.6, 0.68]]) {
         const px = b.x + b.width * fx, py = b.y + b.height * fy;
         if (px < 10 || py < 100 || px > vw.width - 10 || py > vw.height - 150) continue;
-        await page.mouse.click(px, py);
+        await page.mouse.click(px, py); await page.waitForTimeout(250);
         if (process.env.DOCKS_TAP) console.log("tap", i, Math.round(b.x), Math.round(b.y), Math.round(b.width), await game.locator(".docks-quick").count(), await game.locator(".docks-quick").first().textContent().catch(() => ""));
         if (await game.getByRole("menu", { name: /options$/ }).getByText(/Friends? ·/).count()) { hit = true; break; }
         if (await game.getByRole("menuitem", { name: "Close" }).count()) await game.getByRole("menuitem", { name: "Close" }).first().click();

@@ -149,9 +149,9 @@
 .docks-flag-isle .crop.small{width:72px;height:48px}
 .docks-flag-isle .crop.small img{width:150px;height:150px}
 .docks-flags{display:grid;gap:8px;margin-bottom:10px}
-.docks-flagcard{display:grid;grid-template-columns:36px 1fr;gap:6px 8px;align-items:center;padding:6px;border:1px solid #000;background:#fff;color:#000}
+.docks-flagcard{display:flex;flex-direction:column;gap:4px;padding:6px;border:1px solid #000;border-top:5px solid var(--flag,#000);background:#fff;color:#000}
 .docks-flag-emblem{display:grid;place-items:center;width:36px;height:36px;border:1px solid #000;font-size:18px}
-.docks-flag-isles{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:8px}
+.docks-flag-isles{display:flex;flex-wrap:wrap;gap:8px}
 .docks-flag-isle{display:grid;justify-items:start;gap:2px;max-width:96px}
 .docks-chat{max-height:220px;overflow:auto;border:1px solid #000;padding:6px;margin-bottom:8px;background:#fff;color:#000}
 .docks-chat p{margin:2px 0}
@@ -177,3 +177,34 @@
 .docks-skin{margin:6px 0;padding:6px;border:2px solid var(--flag);background:#fff;color:#000}
 .docks-skin strong,.docks-skin small{display:block}
 .docks-skin button{margin-top:4px}
+/* flags as cities: walls by population level, banners readable from far out */
+.docks-city .yard{fill:color-mix(in srgb,var(--flag) 14%,transparent);stroke:var(--flag);stroke-width:.8;stroke-dasharray:3 2}
+.docks-city .wall{stroke:#000;stroke-width:.5}
+.docks-city.t1 .wall{fill:#8b5a2b}.docks-city.t1 .yard{stroke-dasharray:none;stroke:#8b5a2b;stroke-width:1.4}
+.docks-city.t2 .wall{fill:#9aa0a6}.docks-city.t2 .yard{stroke-dasharray:none;stroke:#9aa0a6;stroke-width:1.8}
+.docks-city.t3 .wall{fill:#e6e6e6}.docks-city.t3 .yard{stroke-dasharray:none;stroke:var(--flag);stroke-width:2.2}
+.docks-city.t4 .wall,.docks-city.t5 .wall{fill:#ffd400}.docks-city.t4 .yard,.docks-city.t5 .yard{stroke-dasharray:none;stroke:#ffd400;stroke-width:2.6}
+.docks-city .wall.front{fill-opacity:.92}
+.docks-city .tower{fill:var(--flag);stroke:#000;stroke-width:.6}
+.docks-banner{position:absolute;transform-origin:50% 100%;display:flex;flex-direction:column;align-items:center;gap:1px;padding:3px 7px;background:#000d;border:1.5px solid var(--flag);color:#fff;white-space:nowrap;pointer-events:none;font-size:7px;line-height:1.25}
+.docks-banner strong{font-size:10px;color:var(--flag)}
+.docks-banner em{font-style:normal;color:#cfcfcf}
+.docks-banner.rising em{color:var(--flag)}
+.docks-banner.t3,.docks-banner.t4,.docks-banner.t5{border-width:2.5px;box-shadow:0 0 0 1px #000,0 0 8px var(--flag)}
+.docks .other-level{opacity:.45}
+.docks-stairs{position:absolute;transform:translate(-50%,-80%);font-size:9px;line-height:1;padding:1px 2px;background:#ffd400;color:#000;border:.6px solid #000;pointer-events:none}
+.docks-level-tag{font-style:normal;margin-right:2px;padding:0 2px;background:#ffd400;color:#000}
+.docks-chainmap .isle rect.deck{stroke-width:.03}
+.docks-thumb{width:100%;height:100%;display:block;background:#0b2a3a}
+.docks-flaghead{display:flex;align-items:center;gap:8px}
+.docks-flaghead>span:nth-child(2){flex:1;display:flex;flex-direction:column}
+.docks-flag-level{font-weight:700;color:var(--flag)}
+.docks-flag-pop{display:flex;flex-direction:column;align-items:flex-end;line-height:1.1}.docks-flag-pop b{font-size:18px}
+.docks-meter{position:relative;height:16px;border:1px solid #000;background:#eee;margin:4px 0}
+.docks-meter i{position:absolute;inset:0 auto 0 0;background:var(--flag)}
+.docks-meter small{position:relative;display:block;padding:0 5px;font-size:10px;line-height:14px;color:#000;mix-blend-mode:normal;text-shadow:0 0 2px #fff}
+.docks-founding{display:block;padding:2px 5px;border-left:3px solid var(--flag)}
+.docks-founding.open{background:#fff6cc}
+.docks-citymarket{border:2px solid var(--flag);padding:6px 8px;margin:6px 0;display:flex;flex-direction:column;gap:4px}
+.docks-citymarket h4{margin:0;display:flex;flex-direction:column}
+.docks-flag-isle .docks-row{flex-wrap:nowrap;gap:3px}.docks-flag-isle .docks-row button{padding:2px 7px;font-size:11px;min-height:0}
