@@ -32,7 +32,7 @@ type FlagSpec = { name: string; color: string; x: number; y: number; cols: numbe
 export const SIM_FLAGS: FlagSpec[] = [
   { name: "Cashcat Cove", color: "#00c805", x: 7, y: -9, cols: 6, rows: 6, loot: 420_000, ff: 200_000, nod: "the Robinhood Chain cat that ran",
     words: [["Whisker", "Purr", "Tabby", "Catnip", "Kitten", "Pounce", "Meow", "Paw"], ["Wharf", "Point", "Nook", "Den", "Jetty", "Perch", "Loft", "Yard"]] },
-  { name: "The Orange Citadel", color: "#f7931a", x: -14, y: -11, cols: 7, rows: 7, loot: 900_000, ff: 600_000, nod: "21 million, not one more",
+  { name: "The Orange Citadel", color: "#f7931a", x: -15, y: -12, cols: 8, rows: 8, loot: 900_000, ff: 600_000, nod: "21 million, not one more",
     words: [["Genesis", "Halving", "Cold", "Block", "Hash", "Sat", "Whitepaper", "Hodl"], ["Keep", "Vault", "Bastion", "Rampart", "Mint", "Tower", "Hold", "Gate"]] },
   { name: "Ultrasound Bay", color: "#8c8cff", x: 7, y: 6, cols: 6, rows: 6, loot: 650_000, ff: 350_000, nod: "the merge, gwei and burned fees",
     words: [["Gwei", "Merge", "Beacon", "Blob", "Validator", "Gas", "Rollup", "Shard"], ["Harbor", "Quay", "Dock", "Landing", "Pier", "Basin", "Slip", "Mole"]] },
@@ -75,7 +75,8 @@ export function buildSimulation(w: World, ff: FF.FlagFriends, book: WR.WarBook, 
     for (let r = 0; r < f.rows; r++) for (let c = 0; c < f.cols; c++) {
       const x = f.x + c, y = f.y + r; if (used.has(`${x},${y}`)) continue;
       const edge = r === 0 || c === 0 || r === f.rows - 1 || c === f.cols - 1;       // war islands on the border, peace inside
-      isles.push({ p: island(`sim-f${fi}-${r}-${c}`, nameFrom(f.words), x, y, edge ? 6 + Math.floor(rnd() * 11) : 3 + Math.floor(rnd() * 8), edge), edge });
+      const big = fi === 1;   // the Orange Citadel: the oldest and most crowded, past 1,000 Friends
+      isles.push({ p: island(`sim-f${fi}-${r}-${c}`, nameFrom(f.words), x, y, big ? (edge ? 12 + Math.floor(rnd() * 12) : 12 + Math.floor(rnd() * 10)) : edge ? 6 + Math.floor(rnd() * 11) : 3 + Math.floor(rnd() * 8), edge), edge });
     }
     rebuild(w);
     const seat = isles.find(i => !i.edge)!.p, pl = seat.friends[0];

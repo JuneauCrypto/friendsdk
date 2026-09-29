@@ -49,6 +49,11 @@ interface IDocksVillageItems {
 /// `requestRemoval`, carried out at the next epoch boundary (every EPOCH, about three weeks),
 /// with no vote and no RF back; the village's items on it go to a raffle (DocksItems).
 ///
+/// OGs and skins. Founders are the flag's OGs (royalty): up to OG_CAP of its Friends carry an
+/// OG mark, shared by what each founder locked (`ogAllotment`). Population milestones (100,
+/// 1,000, 10,000, 100,000, then every 100,000) raise its skin tier (`skinTier`): bigger walls
+/// and better defenses for everyone in the flag.
+///
 /// Votes. Every Friend on a member's island is one vote, and founders multiply theirs by
 /// (1 + their share of the pool): power = Friends × (1 + locked / pool). Enrollment fees grow
 /// the pool, so every newcomer dilutes founder shares a little while adding their own Friends.
@@ -119,6 +124,9 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
 
     /// @notice Peace islands make and trade; war islands fight and form the border.
     enum Stance { Peace, War }
+
+    /// @notice Most Friends in a flag that carry an OG mark.
+    uint256 public constant OG_CAP = 1_000;
 
     error NotIslandOwner();
     error NotDocked();
@@ -490,6 +498,26 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
     /// @notice Friends on the village's islands.
     function population(uint256 villageId) public view returns (uint256) {
         return _villages[villageId].population;
+    }
+
+    /// @notice Population milestones unlock the flag's skins and walls: 100, 1,000, 10,000,
+    /// 100,000, then one more tier for every further 100,000 Friends. 0 below 100.
+    function skinTier(uint256 villageId) public view returns (uint256) {
+        uint256 pop = _villages[villageId].population;
+        if (pop < 100) return 0;
+        if (pop < 1_000) return 1;
+        if (pop < 10_000) return 2;
+        if (pop < 100_000) return 3;
+        return 4 + (pop - 100_000) / 100_000;
+    }
+
+    /// @notice Founders are the flag's OGs: up to OG_CAP of its Friends carry an OG mark, shared
+    /// between founders by what each locked into the flag.
+    function ogAllotment(uint256 villageId, address wallet) external view returns (uint256) {
+        Village storage v = _villages[villageId];
+        if (!v.founded || v.locked == 0) return 0;
+        uint256 slots = v.population < OG_CAP ? v.population : OG_CAP;
+        return slots * marks.weightOf(villageId, wallet) / v.locked;
     }
 
     /// @notice When the current epoch ends (removals and released Friends take effect).

@@ -19,6 +19,7 @@ import * as WR from "./war.js";
 import * as PC from "./peace.js";
 import * as FF from "./flagfriend.js";
 import * as SIM from "./sim.js";
+import * as SK from "./flagskin.js";
 import { LAUNCH_FEE, PLATFORM_FEE_BPS, SCOPES, poolName, toPool, claimAll, createEconomy, eligibleFriends, fmt, launch, seedLaunch, type Economy, type Launch, type Scope } from "./launch.js";
 import * as VX from "./villages.js";
 import type { Item, Proposal } from "./world.js";
@@ -165,7 +166,9 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   }, [client, friendId, retry]); // eslint-disable-line react-hooks/exhaustive-deps
 
   PC.setPeaceBoost((w, p) => { const v = villageOf(w, p); return FF.peaceBoost(v ? flagFriends.current.get(v) : undefined); });
-  WR.setDefenseBoost((w, p) => { const v = villageOf(w, p); return FF.defenseBoost(v ? flagFriends.current.get(v) : undefined); });
+  WR.setDefenseBoost((w, p) => { const v = villageOf(w, p); return v ? FF.defenseBoost(flagFriends.current.get(v)) * SK.defenseBoost(SK.tierOfFlag(v)) : 1; });
+  /** Is this Friend one of its flag's OGs? */
+  const isOg = (id: bigint) => { const w = world.current; if (!w) return false; const p = plotOf(w, id), v = p && villageOf(w, p); return Boolean(v && SK.ogFriends(v).has(id)); };
   /** RF into a flag Friend's fund; past its top level the overflow goes to the flag's loot vault. */
   function feedFlagFriend(v: Village, rf: number, revenue: boolean) {
     const f = FF.spawn(flagFriends.current, v), r = FF.fundIt(f, rf, revenue);
@@ -205,8 +208,9 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         const members = [...held.values()].map(l => have.get(l.id)?.m ?? member(l.id, l.gen, l.tier));
         const h = home(); h.friends = autoArrange(members); rebuild(w);
         const sp = spawnOn(w, h.friends.find(p => p.m.id === friendId)!); api.current?.teleport(sp.x, sp.y);
-        say(members.length > 1 ? `All ${members.length.toLocaleString()} of your activated Friends joined into one floating island. Open Docks to find a loading zone.`
-          : "Your Friend is a floating island. Open Docks to find a loading zone next to the others.");
+        const sc = sim.current, welcome = sc ? ` 🌊 Welcome to the simulated Docks: ${sc.flags.length} flags (${sc.flags.map(x => x.name).join(", ")}), ${sc.wanderers.length} wanderers, ${sc.islands} islands, ${sc.friends.toLocaleString()} residents; you start with 50,000 RF. Tap ⤢ to see it all.` : "";
+        say((members.length > 1 ? `All ${members.length.toLocaleString()} of your activated Friends joined into one floating island. Open Docks to find a loading zone.`
+          : "Your Friend is a floating island. Open Docks to find a loading zone next to the others.") + welcome);
       } else {
         for (const id of have.keys()) if (!held.has(id)) changes.push(friendLeft(id));
         for (const l of held.values()) {
@@ -981,7 +985,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       const r = (document.querySelector(".docks") as HTMLElement | null)?.getBoundingClientRect();
       const left = Math.max(8, Math.min((quick.x - (r?.left ?? 0)), (r?.width ?? 400) - 230)), top = Math.max(8, Math.min(quick.y - (r?.top ?? 0) + 12, (r?.height ?? 400) - 250));
       return <div className="docks-quick" role="menu" aria-label={`#${id} options`} style={{ left, top }}>
-        <strong>{who(id)}{fr ? ` · Gen ${fr.m.gen}` : ""}{quickPlot && defaultOf(quickPlot) === id ? " · ⭐ captain" : ""}{quickPlot && mayorOf(quickPlot) === id ? " · 🏛 mayor" : ""}</strong>
+        <strong>{who(id)}{fr ? ` · Gen ${fr.m.gen}` : ""}{quickPlot && defaultOf(quickPlot) === id ? " · ⭐ captain" : ""}{quickPlot && mayorOf(quickPlot) === id ? " · 🏛 mayor" : ""}{isOg(id) ? " · 👑 OG" : ""}</strong>
         <small>{mode === "home" ? `on its land${quickPlot ? ` · ${quickPlot.name}` : ""}` : mode === "follow" ? `in #${quickLeader}'s line` : mode === "park" ? "waiting around" : "you control it"}</small>
         {id !== lead && <button type="button" role="menuitem" className="rf-frame-primary" onClick={() => control(id)}>🎮 Control #{String(id)}</button>}
         {mode === "follow" && lineOf(quickLeader!).indexOf(id) < lineOf(quickLeader!).length - 1 && <button type="button" role="menuitem" onClick={() => breakOffCrew(id)}>✂ Break off crew from #{String(id)}</button>}
@@ -1035,7 +1039,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <div className="docks-list">{[lead, ...[...crewModes.keys()], ...allMine.map(x => x.m.id).filter(id => id !== lead && !crewModes.has(id))].slice(0, 150).map(id => { const pl = allMine.find(x => x.m.id === id), m = id === lead ? "you" : crewModes.get(id) ?? "home";
           return <div className="docks-friend" key={String(id)}>
             <div className="crop">{pl?.m.friend ? <img src={pl.m.friend.art} alt={`Friend #${id} on-chain artwork`} loading="lazy" /> : <span className="docks-note">#{String(id)}</span>}</div>
-            <span><strong>{who(id)}{id === primary ? " · primary" : ""}{pl && defaultOf(plotOf(w, id)!) === id ? " · captain" : ""}{pl && mayorOf(plotOf(w, id)!) === id ? " · mayor" : ""}</strong>
+            <span><strong>{who(id)}{id === primary ? " · primary" : ""}{pl && defaultOf(plotOf(w, id)!) === id ? " · captain" : ""}{pl && mayorOf(plotOf(w, id)!) === id ? " · mayor" : ""}{isOg(id) ? " · 👑 OG" : ""}</strong>
               <small>{m === "you" ? "you control it" : m === "follow" ? `in #${leaderOf(id)}'s line` : m === "park" ? "waiting around" : `on its land${pl ? ` · Gen ${pl.m.gen}` : ""}`}</small></span>
             <button type="button" aria-label={`Name #${id}`} onClick={() => { setMenu(null); setNameDraft(nameOf(id)); setNaming(id); }}>✏️</button>
             {id !== lead && <button type="button" onClick={() => { setMenu(null); control(id); }}>Control</button>}</div>; })}</div>
@@ -1133,7 +1137,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           </div>; })}</div> : <p className="docks-note">No flags yet. Plant one in 🚩 Flags.</p>}
         <p className="docks-note">Rank follows the official Rare Friends reward weight (Generation × Activation tier), summed over an island's Friends. Neighbours are other people's public Friends shown as samples; their answers to visit requests are simulated.</p>
       </> : menu === "village" ? <>
-        <p>Plant a flag and raise it together. Anyone can lock RF into it until it reaches its target; then it's founded. Targets follow a bonding curve: the next flag needs {fmt(VX.flagPrice(w))} RF ({fmt(VX.FLAG_BASE)} RF × {VX.FLAG_CURVE} per flag already up, at most {fmt(VX.FLAG_TARGET)}), so early flags are cheap and joining makes more sense later. Locked RF never comes back once it's founded (no rug): half becomes permanent RF/ETH liquidity whose trading fees buy RF (half back into the pool, half shared as allowances), half each founder's allowance to build flag items on their island. Everyone who locked holds a soulbound founder mark. Not full in {VX.FLAG_DAYS} days? Everyone takes their RF back. Once founded, each wallet brings up to two islands, one at war and one at peace: a founder's first is free, the other enrolls ({fmt(VX.ENROLL_PRICE)} RF: half liquidity, half the owner's allowance). Each island joins at ⚔️ war (fights, boards ships, forms the border: outsiders can't dock straight against it) or at 🕊 peace (makes goods, trades; outsiders dock next to it). Best layout: war islands around the edge, peace in the middle. Every Friend votes; founders' votes are multiplied. Every flag gets its own generated flag Friend when it's planted: it levels up from part of the founding RF, part of every enrollment and its own revenue (half the flag's trade tax), and boosts the flag's peace output and war defense.</p>
+        <p>Plant a flag and raise it together. Anyone can lock RF into it until it reaches its target; then it's founded. Targets follow a bonding curve: the next flag needs {fmt(VX.flagPrice(w))} RF ({fmt(VX.FLAG_BASE)} RF × {VX.FLAG_CURVE} per flag already up, at most {fmt(VX.FLAG_TARGET)}), so early flags are cheap and joining makes more sense later. Locked RF never comes back once it's founded (no rug): half becomes permanent RF/ETH liquidity whose trading fees buy RF (half back into the pool, half shared as allowances), half each founder's allowance to build flag items on their island. Everyone who locked holds a soulbound founder mark. Not full in {VX.FLAG_DAYS} days? Everyone takes their RF back. Once founded, each wallet brings up to two islands, one at war and one at peace: a founder's first is free, the other enrolls ({fmt(VX.ENROLL_PRICE)} RF: half liquidity, half the owner's allowance). Each island joins at ⚔️ war (fights, boards ships, forms the border: outsiders can't dock straight against it) or at 🕊 peace (makes goods, trades; outsiders dock next to it). Best layout: war islands around the edge, peace in the middle. Every Friend votes; founders' votes are multiplied. Population unlocks skins (100, 1,000, 10,000, 100,000 Friends, then every 100,000 more): bigger walls and better defenses for every island in the flag. Founders are the flag's 👑 OGs: up to 1,000 of its Friends carry an OG mark, shared by what each founder locked. Every flag gets its own generated flag Friend when it's planted: it levels up from part of the founding RF, part of every enrollment and its own revenue (half the flag's trade tax), and boosts the flag's peace output and war defense.</p>
         <div className="docks-rf"><span>Your RF <b>{fmt(econ.current.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Into pools <b>{fmt(econ.current.pooled)}</b></span>
           <button type="button" onClick={() => { econ.current.rf += 250_000; bump(); }}>＋250k preview RF</button></div>
         {(() => { const mv = mine.map(p => villageOf(w, p) ?? risingFlagOf(w, p)).find(Boolean);
@@ -1161,6 +1165,13 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
                   <small>{next !== null ? `upgrade fund ${fmt(f.fund)} / ${fmt(next)} RF to level ${f.level + 1}` : `top level: its fund overflows into the loot vault`} · earned {fmt(f.earned)} RF running the market</small>
                   <small>peace output +{Math.round((FF.peaceBoost(f) - 1) * 100)}% · war defense +{Math.round((FF.defenseBoost(f) - 1) * 100)}% · fed by {FF.FLAG_FRIEND.FROM_FOUNDING_BPS / 100}% of the founding RF, {FF.FLAG_FRIEND.FROM_ENROLL_BPS / 100}% of each enrollment and {FF.FLAG_FRIEND.TAX_SHARE_BPS / 100}% of the flag's trade tax</small>
                   {next !== null && <div className="docks-meter" role="progressbar" aria-label={`${f.name} upgrade`} aria-valuenow={Math.floor(f.fund / next * 100)} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${Math.min(100, f.fund / next * 100)}%`, background: v.color }} /></div>}</span></div>; })()}
+            {v.founded && (() => { const pop = VX.population(v), t = SK.skinTier(pop), next = SK.nextMilestone(pop), allot = SK.ogAllotment(v), mineOg = allot.get(VX.YOU) ?? 0, ogs = [...allot.values()].reduce((a, b) => a + b, 0);
+              return <div className={`docks-skin skin-${Math.min(5, t)}`} style={{ ["--flag" as string]: v.color }}>
+                <strong>{SK.skinIcon(t)} Skin: {SK.skinName(t)} · tier {t}</strong>
+                <small>{pop.toLocaleString()} Friends · next skin at {next.toLocaleString()} · walls and defenses give every island in {v.name} +{Math.round((SK.defenseBoost(t) - 1) * 100)}% defense</small>
+                <small>👑 OGs: {v.lockers.size} founder{v.lockers.size === 1 ? "" : "s"} · {ogs.toLocaleString()} of up to {SK.SKIN.OG_CAP.toLocaleString()} Friends carry an OG mark, shared by what each locked{mineOg ? ` · yours: ${mineOg.toLocaleString()}` : ""}</small>
+                {VX.weightOf(v, VX.YOU) > 0 && <button type="button" disabled title="Coming later">👑 OG council: peace deals, mergers, large trades (coming)</button>}
+              </div>; })()}
             {open && <div className="docks-row tight"><input aria-label={`Lock RF into ${v.name}`} inputMode="numeric" value={lockAmt[v.id] ?? "10000"} onChange={e => setLockAmt({ ...lockAmt, [v.id]: e.target.value })} />
               <button type="button" className="rf-frame-primary" onClick={() => doLock(v)}>Lock RF</button>
               <button type="button" title="Preview only" onClick={() => act(() => { const who = w.plots.find(p => !p.mine && p !== v.seat && p.friends.length)?.name ?? "A sample"; VX.lock(w, null, v, v.target - v.locked, who); })}>⏩ Samples fill it</button>

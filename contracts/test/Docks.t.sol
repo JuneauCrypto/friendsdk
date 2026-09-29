@@ -887,6 +887,16 @@ contract DocksTest is Test {
         vil.refund(v);
     }
 
+    function testFoundersAreOgsAndPopulationRaisesTheSkin() public {
+        uint256 v = _village(); // alice locked 400k, bob 600k
+        assertEq(vil.skinTier(v), 0, "2 Friends: no skin yet");
+        assertEq(vil.ogAllotment(v, alice), 0, "2 Friends, 40%: 0 OG Friends yet");
+        _bring(bob, v);
+        assertEq(vil.population(v), 3);
+        assertEq(vil.ogAllotment(v, bob), 1, "60% of 3 slots");
+        assertEq(vil.ogAllotment(v, carol), 0, "not a founder");
+    }
+
     function testTwoIslandsPerWalletOneAtPeaceOneAtWar() public {
         uint256 v = _village();
         _bring(bob, v); // bob's first island: free, at peace

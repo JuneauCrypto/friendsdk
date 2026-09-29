@@ -116,6 +116,22 @@ Docks every time (a seeded random, `sim.ts`):
 - The first neighbours stay close: only small rafts drift in the rows and columns near where you
   start, since every island in a row or column of the docks widens it.
 
+## Flag skins and OGs (simulated; views on chain)
+
+- **Skins from population.** A flag's population unlocks its skin: 100 Friends (Palisade), 1,000
+  (Stone walls), 10,000 (Citadel), 100,000 (Fortress city), then another tier for every further
+  100,000 (Empire ★…). Each tier gives every island in the flag +4% defense (bigger walls,
+  better defenses for everyone in it), and the flag on the map gets bolder with walls at its
+  pole. On chain: `DocksVillages.skinTier`.
+- **Founders are OGs.** Up to 1,000 of a flag's Friends carry an 👑 OG mark, shared between the
+  founders by what each locked into the flag; each founder marks their own Friends first, then
+  flag-mates' (picking by hand comes later). On chain: `DocksVillages.ogAllotment`, `OG_CAP`.
+  OGs will get more later: an OG council to talk between flags about peace deals, mergers and
+  large trades.
+- In the simulation, The Orange Citadel is past 1,000 Friends (Stone walls, 1,000 OG marks); the
+  other flags are at Palisade.
+- **Next: a 3D Docks for big flags,** with islands bridging above and below (see below).
+
 ## War and peace islands, and the peace economy (simulated)
 
 - **Two islands per wallet per flag: one at war, one at peace.** A founder's first island is
