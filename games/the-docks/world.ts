@@ -340,7 +340,7 @@ export function addBridge(w: World, a: Plot, b: Plot) {
 
 /* ── villages (membership; the flag's RF economy is in villages.ts) ── */
 
-const FLAG_COLORS = ["#ff4d6d", "#4dabf7", "#ffd43b", "#69db7c", "#b197fc", "#ff922b"];
+const FLAG_COLORS = ["#ff4d6d", "#4dabf7", "#ffd43b", "#69db7c", "#b197fc", "#ff922b", "#f7931a", "#8c8cff", "#14f195", "#f4b728", "#23c2f5", "#ff66c4"];
 /** The founded village an island is in (a rising flag isn't a flag yet). */
 export const villageOf = (w: World, p: Plot) => w.villages.find(v => v.founded && v.members.includes(p)) ?? null;
 /** War or peace for an island in a founded flag; null outside one. */

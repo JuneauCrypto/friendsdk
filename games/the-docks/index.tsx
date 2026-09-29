@@ -18,6 +18,7 @@ import { ChainMap } from "./chainmap.js";
 import * as WR from "./war.js";
 import * as PC from "./peace.js";
 import * as FF from "./flagfriend.js";
+import * as SIM from "./sim.js";
 import { LAUNCH_FEE, PLATFORM_FEE_BPS, SCOPES, poolName, toPool, claimAll, createEconomy, eligibleFriends, fmt, launch, seedLaunch, type Economy, type Launch, type Scope } from "./launch.js";
 import * as VX from "./villages.js";
 import type { Item, Proposal } from "./world.js";
@@ -101,7 +102,9 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const econ = useRef<Economy>(createEconomy());
   const book = useRef<WR.WarBook>(WR.newWarBook());
   const market = useRef<PC.Market>(PC.newMarket());
-  const flagFriends = useRef<FF.FlagFriends>(new Map());                           // each flag's generated Friend (simulated)                               // peace economy: goods, listings (simulated)
+  const flagFriends = useRef<FF.FlagFriends>(new Map());
+  const sim = useRef<SIM.SimWorld | null>(null);                                  // the simulated Docks
+  const templates = useRef<Map<bigint, Promise<Friend>>>(new Map());              // borrowed on-chain art for simulated residents                           // each flag's generated Friend (simulated)                               // peace economy: goods, listings (simulated)
   const [sellWhat, setSellWhat] = useState("g0"), [sellQty, setSellQty] = useState("10"), [sellPrice, setSellPrice] = useState("10");                               // war: loot vaults, ships, battles (simulated)
   const [tourShip, setTourShip] = useState<number | null>(null), [autoSail, setAutoSail] = useState(true);   // deploying a ship on a tour
   const [shipKind, setShipKind] = useState(1), [vaultAdd, setVaultAdd] = useState("10000");
@@ -146,6 +149,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         if (mkt) seedLaunch(econ.current, { name: "Market Coin", symbol: "MKT", supply: 1_000_000, creator: mkt, creatorFriend: mkt.friends[0].m.id,
           scope: "anyDocked", claimEach: 500, claimPrice: 5, claimRemaining: 50_000 });
         seedVillages(world.current);
+        sim.current = SIM.buildSimulation(world.current, flagFriends.current, book.current);
         PC.sampleListings(world.current, market.current);
         asked.current = new Set();
         setReady(true); setLastCheck(new Date());
@@ -291,9 +295,11 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       const m = a.queue.shift()!;
       if (m.friend) continue;
       a.inflight.add(m.id);
-      readFriend(m.id).then(f => {
+      const sim1 = SIM.isSim(m.id), tid = sim1 ? SIM.templateOf(m) : m.id;
+      if (sim1 && !templates.current.has(tid)) templates.current.set(tid, withRetry(() => readFriend(tid), [500, 1_500]));
+      (sim1 ? templates.current.get(tid)! : readFriend(m.id)).then(f => {
         if (v !== epoch.current) return;
-        m.friend = f; m.tier = Number(f.traits["Activation tier"] ?? m.tier); a.loaded.set(m.id, m);
+        m.friend = f; if (!sim1) m.tier = Number(f.traits["Activation tier"] ?? m.tier); a.loaded.set(m.id, m);
         if (a.loaded.size > ART_CACHE) {                  // forget art for Friends far from the camera
           const old = [...a.loaded.values()].filter(x => x.id !== friendId).sort((x, y) => (a.seen.get(x.id) ?? 0) - (a.seen.get(y.id) ?? 0));
           for (const x of old.slice(0, a.loaded.size - ART_CACHE)) { x.friend = null; a.loaded.delete(x.id); }
@@ -301,6 +307,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         if (world.current) world.current.version++;
         bump();
       }).catch(e => {
+        if (sim1) { templates.current.delete(tid); return; }
         if ((e as { inactive?: boolean }).inactive && world.current) {
           const mineToo = myPlots(world.current).some(q => q.friends.some(x => x.m === m));
           if (mineToo) say(friendLeft(m.id).replace("left your wallet", "was deactivated"));
@@ -319,6 +326,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     try {
       changes.push(...await loadRoster(epoch.current, false));
       for (const m of [...art.current.loaded.values()]) {
+        if (SIM.isSim(m.id)) continue;   // simulated residents aren't NFTs
         try {
           const fresh = await readFriend(m.id);
           if (m.friend && fresh.signature !== m.friend.signature) {
@@ -797,6 +805,29 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           msg = `🧺 ${buyer.name} (sample) bought ${l.good !== null ? PC.GOODS[l.good].name : VX.CATALOG[l.item!.kind].name} from you for ${fmt(r.total)} RF${r.tax ? ` (${fmt(r.tax)} RF tax to ${r.flag})` : ""}.`; }
       }
       if (Math.random() < 0.2) PC.sampleListings(w, market.current);
+      // the simulated Docks keep moving: residents trade, flags raid now and then
+      const others = w.plots.filter(p => !p.mine && p.friends.length && PC.peaceful(w, p));
+      for (let k = 0; k < 3; k++) {
+        const ls = market.current.listings.filter(l => l.seller !== VX.YOU); if (!ls.length || !others.length) break;
+        const l = ls[Math.floor(Math.random() * ls.length)];
+        const fl = villageOf(w, l.from), pool = fl ? fl.members.filter(p => p !== l.from && PC.peaceful(w, p)) : others;
+        const buyer = [0, 1, 2, 3, 4].map(() => pool[Math.floor(Math.random() * pool.length)]).find(q => q && !PC.tradeProblem(w, q, l.from));
+        if (buyer) { try { const r = PC.buy(w, market.current, null, l, 1 + Math.floor(Math.random() * Math.min(5, l.qty)), buyer, walletOf(buyer)); afterSale(r.village, r.tax); } catch { /* sold out */ } }
+      }
+      if (Math.random() < 0.06 && sim.current) {
+        const fs = w.villages.filter(v => v.founded && !WR.shielded(v));
+        const a = sim.current.flags[Math.floor(Math.random() * sim.current.flags.length)], d = fs.filter(x => x !== a)[Math.floor(Math.random() * (fs.length - 1))];
+        const ship = a && WR.readyShips(book.current, a)[0], warIsl = a?.members.filter(p => WR.atWarStance(a, p) && WR.islandTier(w, p) <= WR.SHIPS[ship?.kind ?? 0].maxTier) ?? [];
+        if (a && d && ship && warIsl.length) {
+          try {
+            const t = WR.deployTour(w, book.current, a, d, ship.id, warIsl[0], false);
+            for (const p of warIsl.slice(1)) { if (WR.full(t)) break; if (!WR.boardProblem(w, book.current, t, p)) WR.board(w, book.current, t, p); }
+            const b = WR.sail(w, book.current, econ.current, t, WR.autoDefenders(d));
+            const line = `⚔️ ${a.name} raided ${d.name}: ${b.attackerWon === null ? "a draw" : b.attackerWon ? `won, ${fmt(b.loot + b.bounty)} RF of loot` : `beaten off, ${fmt(b.loot + b.bounty)} RF to ${d.name}`}.`;
+            if (d.members.some(p => p.mine)) { setLastBattle(b); msg = ""; say(`${line} Your flag was hit: check ⚔️ War.`); } else msg = line;
+          } catch { /* not this time */ }
+        }
+      }
       if (msg) sayAmbient(msg);
       bump();
     }, 4000);
@@ -1070,8 +1101,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <ChainMap world={w} island={isl} zones={zones} onDock={dockIsland} onBridge={buildBridge} />
         {isl.berth && <div className="docks-row"><button type="button" onClick={() => { undock(w, isl); setMenu(null); goTo(isl); bump(); say(`${isl.name} is floating free.`); }}>Undock</button>
           <span className="docks-note">Bridges cost a {DOCKING_FEE} RF docking fee (to The Docks fund) and last until either island moves.</span></div>}
+        {sim.current && <p className="docks-note">🌊 The simulated Docks: {sim.current.flags.length} flags ({sim.current.flags.map(v => v.name).join(", ")}), {sim.current.wanderers.length} independent wanderers, {sim.current.islands.toLocaleString()} islands and {sim.current.friends.toLocaleString()} simulated residents. Residents aren't NFTs: they borrow real Friends' on-chain artwork so every land looks real. They trade and raid on their own.</p>}
         <h3>🏝 Islands</h3>
-        <div className="docks-isles">{[...w.plots].filter(p => p.friends.length && p !== isl).sort((a, b) => rankOf(b).weight - rankOf(a).weight).map(p => { const r = rankOf(p), fl = villageOf(w, p) ?? risingFlagOf(w, p), art = p.friends.find(x => x.m.friend)?.m.friend?.art;
+        {(() => { const others = w.plots.filter(p => p.friends.length && p !== isl); return others.length > 30 ? <p className="docks-note">{others.length.toLocaleString()} islands on the docks: the 30 closest to {isl.name} are here; the rest are on the map.</p> : null; })()}
+        <div className="docks-isles">{[...w.plots].filter(p => p.friends.length && p !== isl).sort((a, b) => { const d = (q: Plot) => isl.berth && q.berth ? Math.abs(q.berth.x - isl.berth.x) + Math.abs(q.berth.y - isl.berth.y) : q.berth ? Math.abs(q.berth.x) + Math.abs(q.berth.y) : 99; return d(a) - d(b) || rankOf(b).weight - rankOf(a).weight; }).slice(0, 30).map(p => { const r = rankOf(p), fl = villageOf(w, p) ?? risingFlagOf(w, p), art = p.friends.find(x => x.m.friend)?.m.friend?.art;
           const conn = connected(w, isl, p), next = !p.mine && !conn ? zonesNextTo(w, isl, p) : [];
           return <div className="docks-isle" key={p.id}>
             <div className="crop">{art ? <img src={art} alt={`${p.name} on-chain artwork`} loading="lazy" /> : <span className="docks-note">{p.name}</span>}</div>
@@ -1249,7 +1282,9 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         {lastBattle && <div className="docks-item docks-battle"><span><strong>{lastBattle.attackerWon === null ? "🤝" : lastBattle.attackerWon ? "🏆" : "💥"} {lastBattle.attacker.name} → {lastBattle.defender.name}: {lastBattle.attackerWon === null ? "a draw" : lastBattle.attackerWon ? "raid won" : "raid beaten off"}</strong>
           {lastBattle.duels.map((x, i) => <small key={i}>{x.attacker.name} ({WR.islandTierName(WR.islandTier(w, x.attacker))}) vs {x.defender ? `${x.defender.name} (${WR.islandTierName(WR.islandTier(w, x.defender))}): ${["⛵ Broadside", "🤺 Boarding", "🏰 Siege"].slice(0, x.rounds.length).map((n, k) => `${n} ${x.rounds[k] ? "✓" : "✗"}`).join(" · ")} → ${x.won ? "won" : "lost"}` : "no match within one tier: sat it out"}</small>)}
           <small>loot {fmt(lastBattle.loot)} + bounty {fmt(lastBattle.bounty)} RF{lastBattle.war ? " (war: double bounty)" : ""}{lastBattle.shares.size ? ` · ${[...lastBattle.shares].map(([who, n]) => `${who === VX.YOU ? "you" : who} ${fmt(Math.floor(n))}`).join(" · ")}` : ""}</small></span></div>}
-        {book.current.battles.length > 1 && <small>{book.current.battles.length} battles fought on the docks so far.</small>}
+        {book.current.battles.length > 0 && <><h4>📜 Recent battles on the docks</h4>
+          {book.current.battles.slice(-6).reverse().map(b => <small key={b.id}>{b.attackerWon === null ? "🤝" : b.attackerWon ? "🏆" : "💥"} {b.attacker.name} → {b.defender.name}: {b.attackerWon === null ? "draw" : b.attackerWon ? "raid won" : "beaten off"} · duels {b.duels.map(x => x.won === null ? "–" : x.won ? "✓" : "✗").join("")} · {fmt(b.loot + b.bounty)} RF · {dur(Math.max(0, Date.now() - b.at))} ago</small>)}
+          <small>{book.current.battles.length} battles fought on the docks so far.</small></>}
         <details><summary>War rules (all settings, tunable)</summary>
           <p className="docks-note">Shield {WR.WAR.SHIELD_DAYS} days after founding · loot vault starts with {WR.WAR.LOOT_FROM_FOUNDING_BPS / 100}% of the flag's RF and gets {WR.WAR.LOOT_FROM_FEES_BPS / 100}% of every harvest of its AMM fees; anyone can add to it · bounty {WR.WAR.DOCKS_BOUNTY_BPS / 100}% of the Docks rewards reserve per win (double in a declared war) · {WR.WAR.TO_FIGHTERS_BPS / 100}% of loot to the fighters by level, the rest to the winner's vault · loss per battle {WR.WAR.TIER_NAMES.map((n, t) => `${n} ${WR.lossBps(t) / 100}%`).join(", ")} · home advantage {WR.WAR.HOME_ADVANTAGE * 100}% · every island aboard duels a defender within one island tier ({WR.WAR.ISLAND_TIERS.map((m, t) => `tier ${t + 1} ${fmt(m)}+`).join(", ")}); no match, it sits out · a sunk ship comes back after {WR.WAR.SHIP_REGEN_HOURS} h · raid cooldown {WR.WAR.RAID_COOLDOWN_HOURS} h per target outside a war · war lasts {WR.WAR.WAR_DAYS} days · {WR.WAR.INTRO_DINGHIES} free dinghies per new flag · flag tiers by battle power: {WR.WAR.TIERS.map((m, t) => `${WR.WAR.TIER_NAMES[t]} ${fmt(m)}+`).join(", ")} (tier skins later). Island level = rank (reward weight) + log₂(Friends); strength = level × √Friends. On chain, each round is one Dice roll.</p></details>
       </div>; })() : menu === "market" ? (() => { const mk = market.current, e = econ.current, inv = PC.invOf(mk, VX.YOU), mineP = myPlots(w);
@@ -1286,7 +1321,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
               {l.qty > 1 && <button type="button" onClick={() => act(() => { const r = PC.buy(w, mk, e, l, l.qty, buyer!); afterSale(r.village, r.tax); say(`🛒 Bought all from ${l.from.name} for ${fmt(r.total)} RF (simulated)${r.tax ? `, ${fmt(r.tax)} RF of it tax to ${r.flag}` : ""}.`); })}>Buy all · {fmt(l.qty * l.price)} RF</button>}</span></div>)
             : <p className="docks-note">Nothing you can reach: dock next to a peace island (or an island in no flag) to trade with it.</p>}
             {far > 0 && <small>{far} more listing{far === 1 ? "" : "s"} on islands you aren't docked or bridged to.</small>}</>; })()}
-        {mk.sales.length > 0 && <small>{mk.sales.length} sale{mk.sales.length === 1 ? "" : "s"} on the docks so far · {fmt(mk.sales.reduce((n, x) => n + x.tax, 0))} RF paid in tax to flags.</small>}
+        {mk.sales.length > 0 && <><h4>📈 The Docks market</h4>
+          <small>{PC.GOODS.map(g => { const ss = mk.sales.filter(x => x.good === g.name); const q = ss.reduce((n, x) => n + x.qty, 0); return `${g.icon} ${q ? `${(ss.reduce((n, x) => n + x.total, 0) / q).toFixed(1)} RF` : "–"}`; }).join(" · ")} (average price paid)</small>
+          {mk.sales.slice(-6).reverse().map((x, i) => <small key={i}>{x.buyer === VX.YOU ? "You" : x.buyer} bought {x.qty} {x.good} from {x.seller === VX.YOU ? "you" : x.seller} for {fmt(x.total)} RF{x.tax ? ` (${fmt(x.tax)} RF tax)` : ""}</small>)}
+          <small>{mk.sales.length.toLocaleString()} sale{mk.sales.length === 1 ? "" : "s"} · {fmt(mk.sales.reduce((n, x) => n + x.total, 0))} RF traded · {fmt(mk.sales.reduce((n, x) => n + x.tax, 0))} RF paid in tax to flags.</small></>}
       </div>; })() : menu === "tokens" ? <>
         <div className="docks-rf"><span>Your RF <b>{fmt(econ.current.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Into pools <b>{fmt(econ.current.pooled)}</b></span><span>Docks pool <b>{fmt(econ.current.docksPool)}</b></span><span>Platform fee <b>{PLATFORM_FEE_BPS / 100}%</b></span></div>
         <p className="docks-note">Launch a token from your island for {LAUNCH_FEE.toLocaleString()} RF. Airdrops and claims land in each Friend's own wallet; every claim costs RF. Launch fees and claim prices go into {poolName(w, h)} (the launching island's flag pool, or the shared Docks pool): nothing is burned. In this preview it's all simulated; the contracts are in the submission.</p>

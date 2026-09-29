@@ -91,6 +91,31 @@ app's built-in browser (the SDK has no WalletConnect).
 
 Controls: WASD / arrow keys or tap to walk; zoom with ＋/－, the mouse wheel, pinch, or the +/- keys; drag to pan; ⤢ fits every island on screen and ⌖ returns to your lead (zoomed far out, lands are drawn as outlines so 10,000 Friends stay fast); reduced-motion in More.
 
+## The simulated Docks
+
+So there's a living world before other players arrive, the preview builds the same simulated
+Docks every time (a seeded random, `sim.ts`):
+
+- **Six founded flags**, each a block of islands with ⚔️ war islands around the edge and 🕊 peace
+  islands inside, its own flag Friend, loot vault, ships and market. Nods, not tickers:
+  - **Cashcat Cove**: the Robinhood Chain cat that ran;
+  - **The Orange Citadel**: 21 million, not one more;
+  - **Ultrasound Bay**: the merge, gwei and burned fees;
+  - **Solstice Atoll**: a summer that never ended, and very fast blocks;
+  - **Shielded Reef**: what's shielded stays shielded;
+  - **Ripple Shoals**: settles in seconds, since the old days.
+- **Fifty independent wanderers** in no flag, drifting between them: some bridged to one island,
+  some to several.
+- **About 250 islands and 2,000+ simulated residents.** Residents aren't NFTs: their IDs start at
+  9,000,000 and they borrow the on-chain artwork of a few real, activated Friends of the same
+  generation (read live), so every land looks like a real Rare Friends land. Nobody owns them.
+- **It keeps moving:** residents buy and sell goods across the markets (paying the flags' trade
+  tax, which feeds their flag Friends), flags raid each other now and then (your flag too, once
+  its shield is down), wanderers enroll in your flag, and the 🧺 Market shows prices and recent
+  trades while ⚔️ War shows recent battles.
+- The first neighbours stay close: only small rafts drift in the rows and columns near where you
+  start, since every island in a row or column of the docks widens it.
+
 ## War and peace islands, and the peace economy (simulated)
 
 - **Two islands per wallet per flag: one at war, one at peace.** A founder's first island is
@@ -195,7 +220,7 @@ pushes changes to connected players instead of polling.
 
 ## Economy (RF integration)
 
-**Simulated in this preview** (starting balance 5,000 RF, labelled SIMULATED):
+**Simulated in this preview** (everyone who signs in starts with 50,000 RF to try it, labelled SIMULATED):
 
 | Action | Cost | Where the RF goes |
 | --- | --- | --- |

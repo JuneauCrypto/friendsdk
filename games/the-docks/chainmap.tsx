@@ -28,11 +28,11 @@ export function ChainMap({ world, island, zones, onDock, onBridge }: {
     </svg>
     <p className="docks-note">Each square is an island (number = Friends on it). Green: {island.name} · white: open · grey: invite only · glowing: loading zones. Tap an island you're not next to for a bridge.</p>
     {zones.length > 0 && <div className="docks-slots">
-      {zones.map((b, i) => { const next = docked.filter(p => p !== island && Math.abs(p.berth!.x - b.x) + Math.abs(p.berth!.y - b.y) === 1);
+      {zones.map((b, i) => [b, i] as const).sort(([a], [b]) => { const c = island.berth ?? { x: 0, y: 0 }; return Math.abs(a.x - c.x) + Math.abs(a.y - c.y) - Math.abs(b.x - c.x) - Math.abs(b.y - c.y); }).slice(0, 24).map(([b, i]) => { const next = docked.filter(p => p !== island && Math.abs(p.berth!.x - b.x) + Math.abs(p.berth!.y - b.y) === 1);
         return <button type="button" key={i} onPointerEnter={() => setHover(i)} onPointerLeave={() => setHover(null)} onFocus={() => setHover(i)} onClick={() => onDock(b)}>
           Zone {i + 1}<small>next to {next.map(p => p.name).join(", ") || "open water"}</small></button>; })}
     </div>}
-    {island.berth && <div className="docks-slots">{docked.filter(bridgeable).map(p => <button type="button" key={p.id} onClick={() => onBridge(p)}>
+    {island.berth && <div className="docks-slots">{docked.filter(bridgeable).sort((a, b) => Math.abs(a.berth!.x - island.berth!.x) + Math.abs(a.berth!.y - island.berth!.y) - Math.abs(b.berth!.x - island.berth!.x) - Math.abs(b.berth!.y - island.berth!.y)).slice(0, 12).map(p => <button type="button" key={p.id} onClick={() => onBridge(p)}>
       Bridge to {p.name}<small>{DOCKING_FEE} RF</small></button>)}</div>}
   </div>;
 }

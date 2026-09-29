@@ -6,7 +6,7 @@
 import { connected, villageOf, type Plot, type World } from "./world.js";
 
 export const LAUNCH_FEE = 1000;
-export const START_RF = 5000;                                   // simulated RF for the preview
+export const START_RF = 50_000;                                   // simulated RF for the preview
 export type Scope = "anyDocked" | "holderPlot" | "plotAndNeighbours" | "visitors" | "village";
 export const SCOPES: { id: Scope; label: string; hint: string }[] = [
   { id: "holderPlot", label: "My island", hint: "only Friends on the launching island" },
