@@ -21,6 +21,7 @@ import * as PC from "./peace.js";
 import * as FF from "./flagfriend.js";
 import * as SIM from "./sim.js";
 import * as SK from "./flagskin.js";
+import * as LK from "./looks.js";
 import { LAUNCH_FEE, PLATFORM_FEE_BPS, SCOPES, poolName, toPool, claimAll, createEconomy, eligibleFriends, fmt, launch, seedLaunch, type Economy, type Launch, type Scope } from "./launch.js";
 import * as VX from "./villages.js";
 import type { Item, Proposal } from "./world.js";
@@ -114,8 +115,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
   const market = useRef<PC.Market>(PC.newMarket());
   const flagFriends = useRef<FF.FlagFriends>(new Map());
   const sim = useRef<SIM.SimWorld | null>(null);                                  // the simulated Docks
+  const templateArt = useRef<Map<bigint, Friend>>(new Map());   // template art already read
   const templates = useRef<Map<bigint, Promise<Friend>>>(new Map());              // borrowed on-chain art for simulated residents                           // each flag's generated Friend (simulated)                               // peace economy: goods, listings (simulated)
-  const [marketAt, setMarketAt] = useState<string | null>(null);   // a flag's market to show first
+  const [marketAt, setMarketAt] = useState<string | null>(null);
+  const [lookOverride, setLookOverride] = useState<number | null>(null);   // preview flag looks at a level   // a flag's market to show first
   const [sellWhat, setSellWhat] = useState("g0"), [sellQty, setSellQty] = useState("10"), [sellPrice, setSellPrice] = useState("10");                               // war: loot vaults, ships, battles (simulated)
   const [tourShip, setTourShip] = useState<number | null>(null), [autoSail, setAutoSail] = useState(true);   // deploying a ship on a tour
   const [shipKind, setShipKind] = useState(1), [vaultAdd, setVaultAdd] = useState("10000");
@@ -296,11 +299,18 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
 
   /* ── lazy on-chain art for Friends near the camera ── */
   function onVisible(pls: Placed[]) {
-    const a = art.current, t = ++a.tick;
+    const a = art.current, t = ++a.tick; let lent = false;
+    const queued = new Set(a.queue);
     for (const pl of pls) {
       a.seen.set(pl.m.id, t);
-      if (!pl.m.friend && !a.inflight.has(pl.m.id) && !a.queue.includes(pl.m)) a.queue.push(pl.m);
+      if (pl.m.friend) continue;
+      // simulated residents borrow a template's art: once it's read, hand it straight over
+      const got = SIM.isSim(pl.m.id) ? templateArt.current.get(SIM.templateOf(pl.m)) : undefined;
+      if (got) { pl.m.friend = got; lent = true; continue; }
+      if (!a.inflight.has(pl.m.id) && !queued.has(pl.m)) { a.queue.push(pl.m); queued.add(pl.m); }
     }
+    a.queue = a.queue.filter(m => (a.seen.get(m.id) ?? 0) >= t - 1);   // only what's still on screen
+    if (lent && world.current) { world.current.version++; bump(); }
     pump();
   }
   function pump() {
@@ -313,7 +323,14 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       if (sim1 && !templates.current.has(tid)) templates.current.set(tid, withRetry(() => readFriend(tid), [500, 1_500]));
       (sim1 ? templates.current.get(tid)! : readFriend(m.id)).then(f => {
         if (v !== epoch.current) return;
-        m.friend = f; if (!sim1) m.tier = Number(f.traits["Activation tier"] ?? m.tier); a.loaded.set(m.id, m);
+        if (sim1) {                                     // every queued resident of this template at once
+          templateArt.current.set(tid, f); m.friend = f;
+          for (const q of a.queue) if (SIM.isSim(q.id) && SIM.templateOf(q) === tid) q.friend = f;
+          a.queue = a.queue.filter(q => !q.friend);
+          if (world.current) world.current.version++;
+          bump(); return;
+        }
+        m.friend = f; m.tier = Number(f.traits["Activation tier"] ?? m.tier); a.loaded.set(m.id, m);
         if (a.loaded.size > ART_CACHE) {                  // forget art for Friends far from the camera
           const old = [...a.loaded.values()].filter(x => x.id !== friendId).sort((x, y) => (a.seen.get(x.id) ?? 0) - (a.seen.get(y.id) ?? 0));
           for (const x of old.slice(0, a.loaded.size - ART_CACHE)) { x.friend = null; a.loaded.delete(x.id); }
@@ -922,7 +939,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
        {p.name} · {p.friends.length.toLocaleString()}{p.berth ? "" : " · floating"}</button>)}</div>;
 
   return <section className="docks" aria-label={definition.name}>
-    <DocksView flagFriendArt={v => { const f = flagFriends.current.get(v); return f ? FF.art(f, v.color) : null; }} world={w} version={w.version} sprites={leadSprites} walkerId={lead} offLand={offLand} zoom={zoom} paused={uiBlocked} reducedMotion={reducedMotion}
+    <DocksView lookOverride={lookOverride} flagFriendArt={v => { const f = flagFriends.current.get(v); return f ? FF.art(f, v.color) : null; }} world={w} version={w.version} sprites={leadSprites} walkerId={lead} offLand={offLand} zoom={zoom} paused={uiBlocked} reducedMotion={reducedMotion}
       arranging={arranging} selected={selected} crew={crew} crewSel={crewSel} onWalkerTap={onWalkerTap} onFriendTap={onFriendTap} onIslandTap={onIslandTap} apiRef={api} onVisible={onVisible} onZoom={z => setZoom(clampZoom(z))}
       onPick={pl => { const p = plotOf(w, pl.m.id); if (!p) return;
         if (pickMany && selected[0] && plotOf(w, selected[0].m.id) === p) setSelected(s => s.includes(pl) ? s.filter(x => x !== pl) : [...s, pl]);
@@ -934,6 +951,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <strong>{label}</strong>
         <small>{h.name}{nftOf(h) ? ` · Island #${nftOf(h)} on chain` : " · not on chain yet"}{dirty ? ` · ${pending.moved.length.toLocaleString()} unsaved move${pending.moved.length === 1 ? "" : "s"}` : nftOf(h) ? " · saved" : ""}</small>
         <small>{h.friends.length.toLocaleString()} Friend{h.friends.length === 1 ? "" : "s"} · {homeRank.rank} · weight {fmtW(homeRank.weight)}{mine.length > 1 ? ` · ${mine.length} islands` : ""}</small>
+        {(() => { const v = villageOf(w, h); if (!v) return <small className="docks-look-note">⚫ Black &amp; white: join a flag to add colour</small>;
+          const t = SK.tierOfFlag(v), pop = VX.population(v); return <small className="docks-look-note" style={{ ["--flag" as string]: v.color }}>🎨 {LK.LOOK_NAMES[Math.min(5, t)]} · {v.name} Lv {t} · {(SK.nextMilestone(pop) - pop).toLocaleString()} more Friends to Lv {t + 1}</small>; })()}
         <small>{h.berth ? `Docked · ${neighboursOf(w, h).length} connected` : "Floating free"} · {villageOf(w, h) ? `🚩 ${villageOf(w, h)!.name}` : "no flag yet"}{here && exploring(w, here) ? ` · exploring ${here.name} (visitor)` : ""}{rosterNote ? ` · ${rosterNote}` : ""}</small>
       </div>
       <div className="docks-card docks-where">
@@ -1188,6 +1207,13 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           </div>; })}</div> : <p className="docks-note">No flags yet. Plant one in 🚩 Flags.</p>}
         <p className="docks-note">Rank follows the official Rare Friends reward weight (Generation × Activation tier), summed over an island's Friends. Neighbours are other people's public Friends shown as samples; their answers to visit requests are simulated.</p>
       </> : menu === "village" ? <>
+        <div className="docks-ladder"><strong>🎨 How to get colour</strong>
+          <p className="docks-note">On your own, an island is black and white. Join a flag (or plant one) and its islands take the flag's colour; the more Friends in the flag, the richer the colour and the bigger the walls. Grow it with more islands and Friends.</p>
+          <ol>{[["Lv 0", "under 100", "a hint of colour"], ["Lv 1", "100+", "wooden palisade, first colour"], ["Lv 2", "1,000+", "stone walls, painted"], ["Lv 3", "10,000+", "medieval citadel: towers, banners, rich colour"], ["Lv 4", "100,000+", "sci-fi fortress: energy walls and a shield dome, full colour"], ["Lv 5+", "every 100,000 more", "neon"]].map(([a, b, c]) => <li key={a}><b>{a}</b> {b} Friends: {c}</li>)}</ol>
+          <label className="docks-row tight">Preview every flag at <select aria-label="Preview flag looks" value={lookOverride ?? ""} onChange={e => setLookOverride(e.target.value === "" ? null : Number(e.target.value))}>
+            <option value="">their real level</option>{[0, 1, 2, 3, 4, 5].map(n => <option key={n} value={n}>Lv {n} ({LK.LOOK_NAMES[n]})</option>)}</select></label>
+          {lookOverride !== null && <p className="docks-note">Previewing looks only: levels, walls' defense and everything else stay real.</p>}
+        </div>
         <p>Plant a flag and raise it together. Anyone can lock RF into it until it reaches its target; then it's founded. Targets follow a bonding curve: the next flag needs {fmt(VX.flagPrice(w))} RF ({fmt(VX.FLAG_BASE)} RF × {VX.FLAG_CURVE} per flag already up, at most {fmt(VX.FLAG_TARGET)}), so early flags are cheap and joining makes more sense later. Locked RF never comes back once it's founded (no rug): half becomes permanent RF/ETH liquidity whose trading fees buy RF (half back into the pool, half shared as allowances), half each founder's allowance to build flag items on their island. Everyone who locked holds a soulbound founder mark. Not full in {VX.FLAG_DAYS} days? Everyone takes their RF back. Once founded, each wallet brings up to two islands, one at war and one at peace: a founder's first is free, the other enrolls ({fmt(VX.ENROLL_PRICE)} RF: half liquidity, half the owner's allowance). Each island joins at ⚔️ war (fights, boards ships, forms the border: outsiders can't dock straight against it) or at 🕊 peace (makes goods, trades; outsiders dock next to it). Best layout: war islands around the edge, peace in the middle. Every Friend votes; founders' votes are multiplied. Population unlocks skins (100, 1,000, 10,000, 100,000 Friends, then every 100,000 more): bigger walls and better defenses for every island in the flag. Founders are the flag's 👑 OGs: up to 1,000 of its Friends carry an OG mark, shared by what each founder locked. Every flag gets its own generated flag Friend when it's planted: it levels up from part of the founding RF, part of every enrollment and its own revenue (half the flag's trade tax), and boosts the flag's peace output and war defense.</p>
         <div className="docks-rf"><span>Your RF <b>{fmt(econ.current.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Into pools <b>{fmt(econ.current.pooled)}</b></span>
           <button type="button" onClick={() => { econ.current.rf += 250_000; bump(); }}>＋250k preview RF</button></div>
@@ -1440,6 +1466,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <li><strong>Holes:</strong> if a saved Friend leaves your wallet (sending it clears its activation) or is deactivated, its spot becomes a hole in the island. The hole stays until that Friend comes back (it heals for free) or you fill it with another activated Friend of the same generation (normal arrange fee).</li>
         <li><strong>Arranging is the game:</strong> Arrange → tap a Friend and move it, or <em>Pick several</em> / <em>All</em> to move a group together; each Friend must touch another along part of a side. Save on chain pays RF for every Friend whose spot changed ({Object.entries(ARRANGE_FEE).map(([g, f]) => `Gen ${g}: ${f}`).join(", ")}), plus gas, into a pool (your flag's, or the shared Docks pool). Unmoved Friends are free; Undo returns to your last save.</li>
         <li><strong>No burning:</strong> every fee in The Docks goes into a permanent RF/ETH pool: your flag's, or the shared Docks pool. A flag pool's trading fees buy RF: half back into the pool, half shared as members' allowances. The shared Docks pool keeps everything from islands in no flag as liquidity; its trading fees are saved as earned, in ETH and RF, in the Docks rewards reserve for leaders and games later. The platform fee is {PLATFORM_FEE_BPS / 100}% for now (never above 5%).</li>
+        <li><strong>Which one is you:</strong> the Friend you control has a <b>YOU ▼</b> marker over it; Friends of yours walking with you have a small ▾.</li>
+        <li><strong>Colour:</strong> islands on their own are black and white. Join (or plant) a flag and its islands take the flag's colour, richer with every population level (100, 1,000, 10,000, 100,000 Friends…), with bigger walls: palisade, stone, a medieval citadel, then a sci-fi fortress. Gardens and gardeners grow with it too. 🚩 Flags shows the ladder and can preview every level.</li>
         <li><strong>Dock:</strong> tap any island on the map and hit ⚓ Dock ({DOCKING_FEE} RF docking fee, to The Docks fund), or Docks → pick a loading zone next to another island. Docked (or bridged) to someone? 💬 Chat with them. Every island takes one berth whatever its size, so how far you can roam depends on how many islands there are. Docking and moving cost only gas. Neighbours are joined by a gangway.</li>
         <li><strong>Bridges:</strong> can't dock next to an island? Build a bridge to it: a {DOCKING_FEE} RF docking fee, like docking. It lasts until either island moves. Connected islands can be walked onto (a toll to the owner may come later).</li>
         <li><strong>Visit:</strong> for now only islands under a flag can be walked onto: every island of your flag, and, just to explore, a flag's islands your island is docked next to or bridged to.</li>

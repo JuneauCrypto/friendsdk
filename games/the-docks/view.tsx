@@ -6,6 +6,7 @@ import { spriteFrame, type GenerationSprites, type SpriteFacing } from "@rarefri
 import { fromScreen, toScreen as groundScreen } from "./land.js";
 import { CATALOG, population } from "./villages.js";
 import * as SK from "./flagskin.js";
+import { flowerColors, gardenOdds, hash, landFilter } from "./looks.js";
 import { CELL, LEVELS, canEnter, neighboursOf, plotOf, rankOf, stacked, tileAt, untk, villageOf, flagTile, zOf, type Placed, type Plot, type World, type Village } from "./world.js";
 
 /** Screen pixels one level up (upper decks are drawn raised by this much, lower decks sunk). */
@@ -38,6 +39,7 @@ type Props = {
   onFriendTap: (id: bigint, at: { x: number; y: number }) => void;   // tapped one of your Friends at home
   onIslandTap?: (plotId: string | null, at: { x: number; y: number }) => void; // tapped someone else's island (null: anywhere else)
   flagFriendArt?: (v: Village) => string | null;                   // the flag's generated Friend, drawn by its pole
+  lookOverride?: number | null;                                    // preview every flag at this level (looks only)
   onBlocked: (plot: Plot) => void; onEnterPlot: (plot: Plot | null) => void;
   onPick: (pl: Placed) => void;                  // arrange mode: tap one of your Friends
   onVisible: (pls: Placed[]) => void;            // Friends near the camera (for lazy art loading)
@@ -67,6 +69,23 @@ export function spawnOn(w: World, pl: Placed) {
   return best;
 }
 
+/** A little garden bed (2 × 2 tiles, in screen px around its centre) with flowers, and a
+ *  gardener at work beside it. */
+function Garden({ colors, seed, gardener, motion }: { colors: string[]; seed: number; gardener: boolean; motion: boolean }) {
+  const c = groundScreen(0, 0), P = (x: number, y: number) => { const s = groundScreen(x, y); return `${(s.x - c.x).toFixed(1)} ${(s.y - c.y).toFixed(1)}`; };
+  const bed = `M${P(-1, -1)}L${P(1, -1)}L${P(1, 1)}L${P(-1, 1)}Z`;
+  const dots: { x: number; y: number; c: string }[] = [];
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) { const s = groundScreen(-0.6 + i * 0.6, -0.6 + j * 0.6); dots.push({ x: s.x - c.x, y: s.y - c.y - 1.2, c: colors[(seed >> (i * 3 + j)) % colors.length] }); }
+  return <svg className="docks-garden-art" viewBox="-24 -12 48 24" width={48} height={24} aria-hidden="true">
+    <path d={bed} className="bed" />
+    {dots.map((d, k) => <g key={k}><rect x={d.x - 0.5} y={d.y} width={1} height={1.6} className="stem" /><rect x={d.x - 1.1} y={d.y - 1.4} width={2.2} height={1.8} fill={d.c} /></g>)}
+    {gardener && <g className={`gardener${motion ? " moving" : ""}`} transform={`translate(${seed % 2 ? 13 : -15} -6)`}>
+      <rect x={-1.5} y={-7} width={3} height={1.2} fill={colors[0]} /><rect x={-1} y={-5.8} width={2} height={2} className="skin" />
+      <rect x={-1.5} y={-3.8} width={3} height={4} className="body" /><rect x={-1.5} y={0.2} width={1} height={2} className="body" /><rect x={0.5} y={0.2} width={1} height={2} className="body" />
+      <g className="hoe"><rect x={1.5} y={-5} width={0.7} height={7} className="handle" /><rect x={0.2} y={1.6} width={2.4} height={0.8} className="handle" /></g></g>}
+  </svg>;
+}
+
 const diamond = (x0: number, y0: number, x1: number, y1: number, z = 0) => {
   const a = toScreen(x0, y0, z), b = toScreen(x1, y0, z), c = toScreen(x1, y1, z), d = toScreen(x0, y1, z);
   return `M${a.x.toFixed(1)} ${a.y.toFixed(1)}L${b.x.toFixed(1)} ${b.y.toFixed(1)}L${c.x.toFixed(1)} ${c.y.toFixed(1)}L${d.x.toFixed(1)} ${d.y.toFixed(1)}Z`;
@@ -86,8 +105,9 @@ function drawSprite(cv: HTMLCanvasElement, s: GenerationSprites | null, facing: 
 
 export function DocksView(props: Props) {
   const { world, version, walkerId, arranging, selected, crew, crewSel, offLand, apiRef } = props;
-  const viewport = useRef<HTMLDivElement>(null), layer = useRef<HTMLDivElement>(null), avatar = useRef<HTMLCanvasElement>(null);
+  const viewport = useRef<HTMLDivElement>(null), layer = useRef<HTMLDivElement>(null), avatar = useRef<HTMLCanvasElement>(null), youTag = useRef<HTMLSpanElement>(null);
   const crewCanvases = useRef(new Map<string, HTMLCanvasElement>());
+  const crewMarks = useRef(new Map<string, HTMLSpanElement>());
   const followers = useRef(new Map<string, Follower>());
   const trail = useRef<{ x: number; y: number; z: number }[]>([]);
   const visRef = useRef<{ plot: Plot; pl: Placed; x: number; y: number }[]>([]);
@@ -293,6 +313,7 @@ export function DocksView(props: Props) {
         const kk = `${m.sprites?.cacheKey}:${f.facing}:${f.walking}:${ff}`;
         if (c.dataset.k !== kk) { c.dataset.k = kk; drawSprite(c, m.sprites, f.facing, f.walking, ff); }
         const sc = toScreen(f.x, f.y, f.z); c.style.left = `${(sc.x - 13.5).toFixed(2)}px`; c.style.top = `${(sc.y - 25.5).toFixed(2)}px`;
+        const mk = crewMarks.current.get(String(m.id)); if (mk) { mk.style.left = `${sc.x.toFixed(2)}px`; mk.style.top = `${(sc.y - 26).toFixed(2)}px`; }
       }
     };
     const tick = (now: number) => {
@@ -346,6 +367,8 @@ export function DocksView(props: Props) {
         if (key !== st.visKey) { st.visKey = key; setVis(box); }
       }
       const a = avatar.current;
+      const yt = youTag.current;
+      if (yt) { const s = toScreen(p.x, p.y, p.z); yt.style.left = `${s.x.toFixed(2)}px`; yt.style.top = `${(s.y - 27).toFixed(2)}px`; yt.style.transform = `translate(-50%, -100%) scale(${Math.max(1, 0.85 / st.zoom).toFixed(3)})`; }
       if (a) { const s = toScreen(p.x, p.y, p.z); a.style.left = `${(s.x - 13.5).toFixed(2)}px`; a.style.top = `${(s.y - 25.5 - (p.walking && !st.reducedMotion ? Math.abs(Math.sin(t * 12)) * 1.2 : 0)).toFixed(2)}px`; }
       draw();
       raf = requestAnimationFrame(tick);
@@ -368,6 +391,14 @@ export function DocksView(props: Props) {
     }
     return out.sort((a, b) => a.z - b.z || (a.x + a.y + T(a.pl.m.cw + a.pl.m.ch) / 2) - (b.x + b.y + T(b.pl.m.cw + b.pl.m.ch) / 2));
   }, [world, version, vis]); // eslint-disable-line react-hooks/exhaustive-deps
+  // looks: an island in no flag stays black and white; a flag's islands take its colour by level
+  const looks = useMemo(() => {
+    const m = new Map<Plot, { level: number; color: string }>();
+    for (const v of world.villages) { if (v.failed) continue;
+      const lv = props.lookOverride ?? (v.founded ? SK.tierOfFlag(v) : 0);
+      for (const p of v.founded ? v.members : [v.seat]) m.set(p, { level: lv, color: v.color }); }
+    return m;
+  }, [world, version, props.lookOverride]); // eslint-disable-line react-hooks/exhaustive-deps
   // Zoomed far out: draw the islands' outlines only and don't fetch art for thousands of lands.
   const simple = visible.length > 600 || props.zoom < 0.2;
   visRef.current = simple ? [] : visible;
@@ -394,6 +425,10 @@ export function DocksView(props: Props) {
       if (x + sh < vis.x0 || x + sh > vis.x1 || y + sh < vis.y0 || y + sh > vis.y1) continue;
       if (tileAt(world, x + 0.5, y + 0.5, z)?.plot) continue;         // island ground takes precedence
       (kind === "bridge" ? br : g).push(diamond(x, y, x + 1, y + 1, z));
+    }
+    for (const r of world.decks) {                                  // boardwalk rectangles
+      const sh = LEVEL_TILES * r.z; if (r.x1 + sh < vis.x0 || r.x0 + sh > vis.x1 || r.y1 + sh < vis.y0 || r.y0 + sh > vis.y1) continue;
+      g.push(diamond(r.x0, r.y0, r.x1, r.y1, r.z));
     }
     return { gangway: g.join(""), bridge: br.join("") };
   }, [world, version, vis]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -428,14 +463,29 @@ export function DocksView(props: Props) {
     const z = Math.min(...isles.map(plotZ)), ground = isles.filter(p => plotZ(p) === z);
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const p of ground) { const b = world.box.get(p)!; x0 = Math.min(x0, b.x0); y0 = Math.min(y0, b.y0); x1 = Math.max(x1, b.x1); y1 = Math.max(y1, b.y1); }
-    const tier = SK.tierOfFlag(v), m = 3; x0 -= m; y0 -= m; x1 += m; y1 += m;
+    const tier = props.lookOverride ?? SK.tierOfFlag(v), m = 3 + Math.min(5, tier); x0 -= m; y0 -= m; x1 += m; y1 += m;
     const P = (x: number, y: number) => toScreen(x, y, z), top = P(x0, y0), right = P(x1, y0), bottom = P(x1, y1), left = P(x0, y1);
-    const h = [0, 5, 9, 14, 20][Math.min(4, tier)] + Math.max(0, tier - 4) * 3;
-    const face = (a: { x: number; y: number }, b: { x: number; y: number }) => `M${a.x.toFixed(1)} ${a.y.toFixed(1)}L${b.x.toFixed(1)} ${b.y.toFixed(1)}L${b.x.toFixed(1)} ${(b.y - h).toFixed(1)}L${a.x.toFixed(1)} ${(a.y - h).toFixed(1)}Z`;
-    const pop = population(v), next = SK.nextMilestone(pop);
-    return [{ v, tier, h, z, pop, next, ground: diamond(x0, y0, x1, y1, z), back: tier ? face(left, top) + face(top, right) : "", front: tier ? face(left, bottom) + face(bottom, right) : "",
-      corners: [top, right, bottom, left], banner: toScreen((x0 + x1) / 2, y0 + 2, z) }];
-  }), [world, version]); // eslint-disable-line react-hooks/exhaustive-deps
+    const h = [0, 6, 10, 16, 22, 26][Math.min(5, tier)];
+    type Pt = { x: number; y: number };
+    const f = (n: number) => n.toFixed(1);
+    const face = (a: Pt, b: Pt) => `M${f(a.x)} ${f(a.y)}L${f(b.x)} ${f(b.y)}L${f(b.x)} ${f(b.y - h)}L${f(a.x)} ${f(a.y - h)}Z`;
+    // the top of a wall: pointed stakes (palisade) or square merlons (stone), every `step` px
+    const crest = (a: Pt, b: Pt, kind: "stakes" | "merlons") => {
+      const len = Math.hypot(b.x - a.x, b.y - a.y), step = kind === "stakes" ? 3 : 5, n = Math.max(1, Math.floor(len / step)), out: string[] = [];
+      for (let i = 0; i < n; i++) {
+        const t0 = i / n, t1 = (i + (kind === "stakes" ? 1 : 0.55)) / n, p0 = { x: a.x + (b.x - a.x) * t0, y: a.y + (b.y - a.y) * t0 - h }, p1 = { x: a.x + (b.x - a.x) * t1, y: a.y + (b.y - a.y) * t1 - h };
+        out.push(kind === "stakes" ? `M${f(p0.x)} ${f(p0.y)}L${f((p0.x + p1.x) / 2)} ${f((p0.y + p1.y) / 2 - 2.2)}L${f(p1.x)} ${f(p1.y)}Z` : `M${f(p0.x)} ${f(p0.y)}L${f(p1.x)} ${f(p1.y)}L${f(p1.x)} ${f(p1.y - 2.5)}L${f(p0.x)} ${f(p0.y - 2.5)}Z`);
+      }
+      return out.join("");
+    };
+    const kind = tier >= 2 ? "merlons" as const : "stakes" as const;
+    const pop = population(v), next = SK.nextMilestone(pop), cx = (left.x + right.x) / 2, cy = (top.y + bottom.y) / 2, rx = (right.x - left.x) / 2;
+    return [{ v, tier, h, z, pop, next, ground: diamond(x0, y0, x1, y1, z),
+      back: tier ? face(left, top) + face(top, right) : "", front: tier ? face(left, bottom) + face(bottom, right) : "",
+      backCrest: tier && tier < 4 ? crest(left, top, kind) + crest(top, right, kind) : "", frontCrest: tier && tier < 4 ? crest(left, bottom, kind) + crest(bottom, right, kind) : "",
+      dome: tier >= 4 ? `M${f(left.x)} ${f(cy)}A${f(rx)} ${f(rx * 0.62)} 0 0 1 ${f(right.x)} ${f(cy)}` : "",
+      corners: [top, right, bottom, left], banner: toScreen((x0 + x1) / 2, y0 + 2, z), cx, cy }];
+  }), [world, version, props.lookOverride]); // eslint-disable-line react-hooks/exhaustive-deps
   const bannerScale = Math.max(1, 1.3 / props.zoom);             // about the same size on screen at any zoom
   // stairs between levels
   const stairs = useMemo(() => {
@@ -454,7 +504,8 @@ export function DocksView(props: Props) {
     <div className="docks-layer" ref={layer}>
       <svg className="docks-seams" width="1" height="1" style={{ zIndex: 4 }}>
         {cities.map(c => <g key={c.v.id} className={`docks-city t${Math.min(5, c.tier)}${c.z !== pz ? " other-level" : ""}`} style={{ ["--flag" as string]: c.v.color }}>
-          <path d={c.ground} className="yard" /><path d={c.back} className="wall back" /></g>)}
+          <path d={c.ground} className="yard" /><path d={c.back} className="wall back" /><path d={c.backCrest} className="crest" />
+          {c.dome && <path d={c.dome} className="dome" />}</g>)}
       </svg>
       <svg className="docks-seams" width="1" height="1" style={{ zIndex: 5 }}>
         <path d={walkways.gangway} className="gangway" /><path d={walkways.bridge} className="bridge" /><path d={boards} className="pier" />
@@ -465,8 +516,14 @@ export function DocksView(props: Props) {
         if (!f) { const c = toScreen(x + T(pl.m.cw) / 2, y + T(pl.m.ch) / 2, z);
           return <span key={`${plot.id}-${pl.m.id}`} className="docks-pending" style={{ left: c.x, top: c.y, zIndex: 10 + i }}>#{String(pl.m.id)}</span>; }
         const src = plot.mine && (pl.m.id === walkerId || offLand.has(pl.m.id)) ? f.artWithoutPortrait : f.art;
-        return <img key={`${plot.id}-${pl.m.id}`} className={`docks-land ${plot.berth ? "" : "adrift"}${z !== pz ? " other-level" : ""}`} src={src} alt="" draggable={false}
-          style={{ left: o.x - f.anchor.x, top: o.y - f.anchor.y, zIndex: 10 + i }} />;
+        const lk = looks.get(plot), level = lk?.level ?? -1, color = lk?.color ?? "#ffffff", seed = hash(`${plot.id}|${pl.m.id}`);
+        const garden = pl.m.gen <= 5 && (seed % 1000) / 1000 < gardenOdds(level) ? toScreen(x + T(pl.m.cw) - 2.5, y + T(pl.m.ch) - 2.5, z) : null;
+        return <span key={`${plot.id}-${pl.m.id}`} className="docks-landwrap">
+          <img className={`docks-land ${plot.berth ? "" : "adrift"}${z !== pz ? " other-level" : ""}`} src={src} alt="" draggable={false}
+            style={{ left: o.x - f.anchor.x, top: o.y - f.anchor.y, zIndex: 10 + i, filter: landFilter(level, color) }} />
+          {garden && <span className={`docks-garden${z !== pz ? " other-level" : ""}`} style={{ left: garden.x, top: garden.y, zIndex: 10 + i }}>
+            <Garden colors={flowerColors(level, color)} seed={seed} gardener={(seed >> 10) % 3 !== 0} motion={!props.reducedMotion} /></span>}
+        </span>;
       })}
       <svg className="docks-seams" width="1" height="1" style={{ zIndex: 500 }}>
         {myVisible.map(({ pl, x, y, z }) => <path key={String(pl.m.id)} d={diamond(x, y, x + T(pl.m.cw), y + T(pl.m.ch), z)}
@@ -474,8 +531,14 @@ export function DocksView(props: Props) {
       </svg>
       <svg className="docks-seams" width="1" height="1" style={{ zIndex: 630 }}>
         {cities.filter(c => c.tier).map(c => <g key={c.v.id} className={`docks-city t${Math.min(5, c.tier)}${c.z !== pz ? " other-level" : ""}`} style={{ ["--flag" as string]: c.v.color }}>
-          <path d={c.front} className="wall front" />
-          {c.tier >= 3 && c.corners.map((k, i) => <path key={i} className="tower" d={`M${(k.x - 4).toFixed(1)} ${k.y.toFixed(1)}h8v${-(c.h + 8)}h-8Z`} />)}</g>)}
+          <path d={c.front} className="wall front" /><path d={c.frontCrest} className="crest" />
+          {c.tier === 3 && c.corners.map((k, i) => { const th = c.h + 12; return <g key={i} className="tower">
+            <path d={`M${(k.x - 5).toFixed(1)} ${k.y.toFixed(1)}h10v${-th}h-10Z`} className="keep" />
+            <path d={`M${(k.x - 6.5).toFixed(1)} ${(k.y - th).toFixed(1)}l6.5 -10l6.5 10Z`} className="roof" />
+            <path d={`M${k.x.toFixed(1)} ${(k.y - th - 10).toFixed(1)}v-6l6 1.5l-6 1.5`} className="pennant" /></g>; })}
+          {c.tier >= 4 && c.corners.map((k, i) => <g key={i} className="pylon">
+            <path d={`M${(k.x - 1.5).toFixed(1)} ${k.y.toFixed(1)}h3v${-(c.h + 16)}h-3Z`} className="mast" />
+            <circle cx={k.x} cy={k.y - c.h - 18} r={3.2} className="orb" /></g>)}</g>)}
       </svg>
       {cities.map(c => <div key={c.v.id} className={`docks-banner t${Math.min(5, c.tier)}${c.v.founded ? "" : " rising"}`} style={{ left: c.banner.x, top: c.banner.y, zIndex: 660, ["--flag" as string]: c.v.color, transform: `translate(-50%, -100%) scale(${bannerScale})` }}>
         <strong>🚩 {c.v.name}</strong>
@@ -494,7 +557,9 @@ export function DocksView(props: Props) {
         return <span key={String(pl.m.id)} className={`docks-friend-tag ${selSet.has(pl) ? "sel" : ""}`} style={{ left: c.x, top: c.y, zIndex: 800 }}>#{String(pl.m.id)}</span>; })}
       {crew.map(m => <canvas key={String(m.id)} ref={el => { if (el) crewCanvases.current.set(String(m.id), el); else crewCanvases.current.delete(String(m.id)); }}
         className={`docks-avatar crew${m.mode === "park" ? " parked" : ""}${crewSel.has(m.id) ? " picked" : ""}`} width={36} height={36} style={{ zIndex: 890 }} />)}
+      {crew.map(m => <span key={`mk${m.id}`} ref={el => { if (el) crewMarks.current.set(String(m.id), el); else crewMarks.current.delete(String(m.id)); }} className="docks-mine-mark" style={{ zIndex: 895 }} aria-hidden="true">▾</span>)}
       <canvas ref={avatar} className="docks-avatar" width={36} height={36} style={{ zIndex: 900 }} />
+      <span ref={youTag} className="docks-you" style={{ zIndex: 910 }} aria-hidden="true">YOU<i>▼</i></span>
     </div>
   </div>;
 }

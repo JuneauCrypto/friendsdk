@@ -149,6 +149,20 @@ try {
     for (let i = 0; i < 2; i++) await game.getByRole("button", { name: "Zoom out" }).click();
     await page.waitForTimeout(2500); await shot("citadel-out");
     if (process.env.DOCKS_PROBE) { const f = page.frames().find(x => x.parentFrame()); for (const [x, y] of [[800, 450], [300, 520], [700, 360]]) console.log(x, y, await f.evaluate(([x, y]) => document.elementsFromPoint(x, y).slice(0, 4).map(e => `${e.tagName}.${e.className?.baseVal ?? e.className} ${e.getAttribute("style")?.slice(0, 80) ?? ""}`).join(" | "), [x, y])); }
+    // looks: preview every flag at level 3 and 4
+    for (const lv of ["3", "4"]) {
+      await btn("Flags").click();
+      await game.getByRole("combobox", { name: "Preview flag looks" }).selectOption(lv);
+      await game.getByRole("button", { name: "Close" }).first().click();
+      await btn("Docks").click();
+      await game.locator(".docks-flagcard", { hasText: "Cashcat Cove" }).getByRole("button", { name: /Look/ }).click();
+      for (let i = 0; i < 3; i++) await game.getByRole("button", { name: "Zoom in" }).click();
+      await page.waitForTimeout(6000); await shot(`look-lv${lv}`);
+      for (let i = 0; i < 3; i++) await game.getByRole("button", { name: "Zoom out" }).click();
+    }
+    await btn("Flags").click();
+    await game.getByRole("combobox", { name: "Preview flag looks" }).selectOption("");
+    await game.getByRole("button", { name: "Close" }).first().click();
     // levels: dock on the deck above a Cashcat peace island, then take the stairs down
     await btn("Docks").click();
     await game.locator(".docks-flagcard", { hasText: "Cashcat Cove" }).getByRole("button", { name: /^Dock above / }).first().click();

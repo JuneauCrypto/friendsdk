@@ -81,15 +81,15 @@ export function buildSimulation(w: World, ff: FF.FlagFriends, book: WR.WarBook, 
   const flags: Village[] = [];
   for (const [fi, f] of SIM_FLAGS.entries()) {
     const isles: { p: Plot; edge: boolean }[] = [];
-    const big = fi === 1;   // the Orange Citadel: the oldest and most crowded, past 1,000 Friends
+    const big = fi === 1;   // the Orange Citadel: the oldest and most crowded, past 10,000 Friends (a level 3 citadel)
     for (let r = 0; r < f.rows; r++) for (let c = 0; c < f.cols; c++) {
       const x = f.x + c, y = f.y + r; if (used.has(`${x},${y}`)) continue;
       // war islands on three sides; the last row is the peace harbor front, facing the slips
       const edge = r === 0 || ((c === 0 || c === f.cols - 1) && r < f.rows - 1);
-      isles.push({ p: island(`sim-f${fi}-${r}-${c}`, nameFrom(f.words), x, y, big ? (edge ? 12 + Math.floor(rnd() * 12) : 12 + Math.floor(rnd() * 10)) : edge ? 6 + Math.floor(rnd() * 11) : 3 + Math.floor(rnd() * 8), edge), edge });
+      isles.push({ p: island(`sim-f${fi}-${r}-${c}`, nameFrom(f.words), x, y, big ? (edge ? 100 + Math.floor(rnd() * 60) : 120 + Math.floor(rnd() * 80)) : edge ? 6 + Math.floor(rnd() * 11) : 3 + Math.floor(rnd() * 8), edge), edge });
     }
     for (const d of f.decks ?? []) for (const [c, r] of d.cells)     // upper and lower decks: peace, joined by stairs
-      isles.push({ p: island(`sim-f${fi}-z${d.z}-${r}-${c}`, nameFrom(f.words), f.x + c, f.y + r, big ? 10 + Math.floor(rnd() * 10) : 3 + Math.floor(rnd() * 7), false, d.z), edge: false });
+      isles.push({ p: island(`sim-f${fi}-z${d.z}-${r}-${c}`, nameFrom(f.words), f.x + c, f.y + r, big ? 60 + Math.floor(rnd() * 60) : 3 + Math.floor(rnd() * 7), false, d.z), edge: false });
     rebuild(w);
     const seat = isles.find(i => !i.edge)!.p, pl = seat.friends[0];
     const v = newVillage(w, seat, f.name, { x: (pl.x + pl.m.cw / 2) * CELL, y: (pl.y + pl.m.ch / 2) * CELL }, VX.FLAG_TARGET, Date.now() - VX.DAY);

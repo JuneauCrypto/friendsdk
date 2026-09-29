@@ -118,13 +118,21 @@ Docks every time (a seeded random, `sim.ts`):
   - **Ripple Shoals**: settles in seconds, since the old days.
 - **Fifty independent wanderers** in no flag, drifting between them: some bridged to one island,
   some to several.
-- **About 250 islands and 2,000+ simulated residents.** Residents aren't NFTs: their IDs start at
+- **About 290 islands and 12,000+ simulated residents** (The Orange Citadel alone is past 10,000). Residents aren't NFTs: their IDs start at
   9,000,000 and they borrow the on-chain artwork of a few real, activated Friends of the same
   generation (read live), so every land looks like a real Rare Friends land. Nobody owns them.
 - **It keeps moving:** residents buy and sell goods across the markets (paying the flags' trade
   tax, which feeds their flag Friends), flags raid each other now and then (your flag too, once
   its shield is down), wanderers enroll in your flag, and the 🧺 Market shows prices and recent
   trades while ⚔️ War shows recent battles.
+- **Colour is the reward for community.** An island on its own is black and white. A flag's
+  islands take the flag's colour, faint under 100 Friends and richer at every level; walls go
+  from a wooden palisade (Lv 1) to stone (Lv 2), a medieval citadel with towers and banners
+  (Lv 3, like The Orange Citadel at 10,000+ Friends) and a glowing sci-fi fortress with a
+  shield dome (Lv 4+). Gardens (with gardeners at work) grow more and more colourful with the
+  level. 🚩 Flags shows the ladder and can preview every flag at any level (looks only).
+- **YOU marker.** The Friend you control always has a YOU ▼ over it; your Friends walking with
+  you have a small ▾.
 - **Flags read as cities.** On the map every flag has walls by its population level (palisade,
   stone walls, a citadel with towers, a golden fortress city) and a banner you can read from far
   out: level, population, islands, the next level, and whether founding is open (rising flags:

@@ -208,3 +208,39 @@
 .docks-citymarket{border:2px solid var(--flag);padding:6px 8px;margin:6px 0;display:flex;flex-direction:column;gap:4px}
 .docks-citymarket h4{margin:0;display:flex;flex-direction:column}
 .docks-flag-isle .docks-row{flex-wrap:nowrap;gap:3px}.docks-flag-isle .docks-row button{padding:2px 7px;font-size:11px;min-height:0}
+/* looks by level: walls, gardens, the YOU marker */
+.docks-landwrap{display:contents}
+.docks-city .crest{stroke:#000;stroke-width:.35}
+.docks-city.t1 .crest{fill:#a0522d}
+.docks-city.t2 .crest,.docks-city.t3 .crest{fill:#b9bec4}
+.docks-city.t0 .yard{fill:color-mix(in srgb,var(--flag) 8%,transparent)}
+.docks-city.t1 .yard{fill:color-mix(in srgb,var(--flag) 16%,transparent)}
+.docks-city.t2 .yard{fill:color-mix(in srgb,var(--flag) 24%,transparent)}
+.docks-city.t3 .yard{fill:color-mix(in srgb,var(--flag) 32%,transparent)}
+.docks-city.t3 .wall{fill:#cfd3d8}
+.docks-city.t3 .wall.front{fill:#b7bcc3}
+.docks-city .tower .keep{fill:#d8dce1;stroke:#000;stroke-width:.5}
+.docks-city .tower .roof{fill:var(--flag);stroke:#000;stroke-width:.5}
+.docks-city .tower .pennant{fill:var(--flag);stroke:#000;stroke-width:.4}
+.docks-city.t4 .yard,.docks-city.t5 .yard{fill:color-mix(in srgb,var(--flag) 30%,#001a2a);stroke:var(--flag);stroke-width:1.5;stroke-dasharray:none}
+.docks-city.t4 .wall,.docks-city.t5 .wall{fill:color-mix(in srgb,var(--flag) 35%,transparent);stroke:var(--flag);stroke-width:.8;filter:drop-shadow(0 0 3px var(--flag))}
+.docks-city .dome{fill:color-mix(in srgb,var(--flag) 7%,transparent);stroke:var(--flag);stroke-width:1.2;stroke-dasharray:6 4;opacity:.8;animation:docks-shield 4s linear infinite}
+@keyframes docks-shield{to{stroke-dashoffset:-40}}
+.docks-city .pylon .mast{fill:#1b1f24;stroke:var(--flag);stroke-width:.6}
+.docks-city .pylon .orb{fill:#fff;stroke:var(--flag);stroke-width:1.2;filter:drop-shadow(0 0 4px var(--flag));animation:docks-orb 1.8s ease-in-out infinite}
+@keyframes docks-orb{50%{opacity:.55}}
+.docks-garden{position:absolute;width:0;height:0;pointer-events:none}
+.docks-garden-art{position:absolute;left:-24px;top:-12px;overflow:visible;transform:scale(1.5);transform-origin:50% 50%}
+.docks-garden-art .bed{fill:#3b2a1e;stroke:#000;stroke-width:.5}
+.docks-garden-art .stem{fill:#2e7d32}
+.docks-garden-art .skin{fill:#fff;stroke:#000;stroke-width:.3}
+.docks-garden-art .body,.docks-garden-art .handle{fill:#000}
+.docks-garden-art .gardener.moving .hoe{transform-origin:1.8px -5px;animation:docks-hoe 1.2s ease-in-out infinite}
+@keyframes docks-hoe{50%{transform:rotate(-28deg)}}
+.docks-you{position:absolute;display:flex;flex-direction:column;align-items:center;transform-origin:50% 100%;pointer-events:none;font:700 8px/1 ui-monospace,monospace;color:#000;background:var(--signal,#ccff00);border:1px solid #000;padding:1.5px 3px 0;letter-spacing:.5px}
+.docks-you i{font-style:normal;position:absolute;top:100%;left:50%;transform:translateX(-50%);color:var(--signal,#ccff00);font-size:9px;line-height:1;text-shadow:0 0 1px #000,0 1px 0 #000}
+.docks-mine-mark{position:absolute;transform:translate(-50%,-100%);pointer-events:none;color:var(--signal,#ccff00);font-size:9px;line-height:1;text-shadow:0 0 1px #000,0 0 1px #000}
+@media (prefers-reduced-motion:reduce){.docks-city .dome,.docks-city .pylon .orb{animation:none}}
+.docks-look-note{border-left:3px solid var(--flag,#fff);padding-left:4px}
+.docks-ladder{border:1px solid #000;padding:6px 8px;margin-bottom:8px;background:linear-gradient(90deg,#fff,#f3f3f3)}
+.docks-ladder ol{margin:4px 0 6px;padding-left:18px;font-size:12px}

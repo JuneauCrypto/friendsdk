@@ -63,6 +63,8 @@ export type Plot = {
 };
 export type Bridge = { a: Plot; b: Plot; at: [Berth, Berth] };   // breaks if either island moves
 export type Visit = "none" | "pending" | "approved" | "declined";
+/** A walkable rectangle of boardwalk on a level (x1, y1 exclusive). */
+export type WalkRect = { x0: number; y0: number; x1: number; y1: number; z: number };
 /** Stairs: step on them to go to level `to`, arriving at (x, y). */
 export type Lift = { to: number; x: number; y: number };
 export type Box = { x0: number; y0: number; x1: number; y1: number };
@@ -75,6 +77,8 @@ export type World = {
   box: Map<Plot, Box>;                                             // island bounds, world tiles
   cols: { b: number; x0: number; x1: number }[]; rows: { b: number; y0: number; y1: number }[];
   walk: Map<number, "gangway" | "bridge">;                         // walkway tiles over the water, keyed tk(x, y, z)
+  decks: WalkRect[];                                               // boardwalk rectangles (between close neighbours, piers)
+  deckGrid: Map<number, WalkRect[]>;                               // the same by 32-tile bucket
   lifts: Map<number, Lift>;                                        // stairs between levels, keyed tk(x, y, z)
   grid: Map<number, Plot[]>;                                       // islands by 32-tile bucket (for tileAt)
   blocks: { plots: Plot[]; box: Box }[];                           // islands joined by neighbouring berths
@@ -128,7 +132,7 @@ export const plotOf = (w: World, id: bigint) => w.plots.find(p => p.friends.some
 /* ── building the world ── */
 
 export function emptyWorld(): World {
-  return { plots: [], visits: new Map(), version: 0, bridges: [], occ: new Map(), holeOcc: new Map(), berths: new Map(), origin: new Map(), box: new Map(), cols: [], rows: [], walk: new Map(), lifts: new Map(), grid: new Map(), blocks: [], villages: [], items: [], bonds: new Map(), cooldown: new Map(), genesis: Date.now() };
+  return { plots: [], visits: new Map(), version: 0, bridges: [], occ: new Map(), holeOcc: new Map(), berths: new Map(), origin: new Map(), box: new Map(), cols: [], rows: [], walk: new Map(), decks: [], deckGrid: new Map(), lifts: new Map(), grid: new Map(), blocks: [], villages: [], items: [], bonds: new Map(), cooldown: new Map(), genesis: Date.now() };
 }
 
 export function rebuild(w: World) {
@@ -257,20 +261,27 @@ function layout(w: World) {
   }
   // walkways: a boardwalk between neighbours on a level (across their whole shared side),
   // stairs between levels, bridges wherever built
-  w.walk = new Map(); w.lifts = new Map();
+  w.walk = new Map(); w.lifts = new Map(); w.decks = []; w.deckGrid = new Map();
+  const deck = (x0: number, y0: number, x1: number, y1: number, z: number) => {
+    if (x1 <= x0 || y1 <= y0) return;
+    const r: WalkRect = { x0, y0, x1, y1, z }; w.decks.push(r);
+    for (let gx = Math.floor(x0 / BUCKET); gx <= Math.floor((x1 - 1) / BUCKET); gx++) for (let gy = Math.floor(y0 / BUCKET); gy <= Math.floor((y1 - 1) / BUCKET); gy++) {
+      const k = ck(gx, gy), l = w.deckGrid.get(k); if (l) l.push(r); else w.deckGrid.set(k, [r]);
+    }
+  };
   const centre = (p: Plot) => { const b = w.box.get(p)!; return { x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2 }; };
   for (const p of docked) {
     const z = zOf(p.berth), a = w.box.get(p)!, ca = centre(p);
     for (const [dx, dy] of [[1, 0], [0, 1]]) {
       const q = w.berths.get(bk({ x: p.berth!.x + dx, y: p.berth!.y + dy, z })); if (!q) continue;
-      const b = w.box.get(q)!, cb = centre(q), len = Math.hypot(cb.x - ca.x, cb.y - ca.y);
-      for (let t = 0; t <= len; t += 0.5) {                          // a two-tile walk, centre to centre
-        const x = ca.x + (cb.x - ca.x) * t / len, y = ca.y + (cb.y - ca.y) * t / len;
-        for (const [ox, oy] of [[-1, -1], [0, -1], [-1, 0], [0, 0]]) w.walk.set(tk(Math.floor(x + ox), Math.floor(y + oy), z), "gangway");
-      }
+      const b = w.box.get(q)!, cb = centre(q);
+      // a two-tile walk, centre to centre: along the first axis, then the other
+      const ax = Math.floor(ca.x), ay = Math.floor(ca.y), bx = Math.floor(cb.x), by = Math.floor(cb.y);
+      if (dx) { deck(Math.min(ax, bx) - 1, ay - 1, Math.max(ax, bx) + 1, ay + 1, z); deck(bx - 1, Math.min(ay, by) - 1, bx + 1, Math.max(ay, by) + 1, z); }
+      else { deck(ax - 1, Math.min(ay, by) - 1, ax + 1, Math.max(ay, by) + 1, z); deck(Math.min(ax, bx) - 1, by - 1, Math.max(ax, bx) + 1, by + 1, z); }
       // close neighbours: the boardwalk spans their whole facing sides, like one island
-      if (dx && b.x0 - a.x1 <= 8) { const y0 = Math.max(a.y0, b.y0), y1 = Math.min(a.y1, b.y1); for (let x = a.x1 - 1; x <= b.x0; x++) for (let y = y0; y < y1; y++) w.walk.set(tk(x, y, z), "gangway"); }
-      if (dy && b.y0 - a.y1 <= 8) { const x0 = Math.max(a.x0, b.x0), x1 = Math.min(a.x1, b.x1); for (let y = a.y1 - 1; y <= b.y0; y++) for (let x = x0; x < x1; x++) w.walk.set(tk(x, y, z), "gangway"); }
+      if (dx && b.x0 - a.x1 <= 8) deck(a.x1 - 1, Math.max(a.y0, b.y0), b.x0 + 1, Math.min(a.y1, b.y1), z);
+      if (dy && b.y0 - a.y1 <= 8) deck(Math.max(a.x0, b.x0), a.y1 - 1, Math.min(a.x1, b.x1), b.y0 + 1, z);
     }
     const up = w.berths.get(bk({ x: p.berth!.x, y: p.berth!.y, z: z + 1 }));
     if (up) {
@@ -278,7 +289,7 @@ function layout(w: World) {
       // up from the lower island's left side, down from the upper island's right side. Each
       // arrives on a pier beside the other island, a step below its own stairs.
       const b = w.box.get(up)!, am = Math.floor((a.y0 + a.y1) / 2), bm = Math.floor((b.y0 + b.y1) / 2);
-      const pier = (x0: number, x1: number, y: number, lv: number) => { for (let x = x0; x <= x1; x++) for (const yy of [y, y + 1]) w.walk.set(tk(x, yy, lv), "gangway"); };
+      const pier = (x0: number, x1: number, y: number, lv: number) => deck(x0, y, x1 + 1, y + 2, lv);
       pier(a.x0 - 3, a.x0 + 3, am - 1, z); pier(a.x0 - 3, a.x0 + 3, am + 1, z);            // lower: up-stairs + arrival from above
       pier(b.x1 - 4, b.x1 + 2, bm - 1, z + 1); pier(b.x1 - 4, b.x1 + 2, bm + 1, z + 1);   // upper: down-stairs + arrival from below
       pier(b.x0 - 3, b.x0 + 3, bm + 1, z + 1); pier(a.x1 - 4, a.x1 + 2, am + 1, z);
@@ -530,7 +541,7 @@ export function tileAt(w: World, x: number, y: number, z = 0): TileInfo | undefi
     const b = w.box.get(p)!; if (tx < b.x0 || tx >= b.x1 || ty < b.y0 || ty >= b.y1) continue;
     const t = islandTile(w, p, tx, ty); if (t) return lift ? { ...t, blocked: false, lift } : t;
   }
-  const k = w.walk.get(tk(tx, ty, z));
+  const k = w.walk.get(tk(tx, ty, z)) ?? ((w.deckGrid.get(ck(Math.floor(tx / BUCKET), Math.floor(ty / BUCKET))) ?? []).some(r => r.z === z && tx >= r.x0 && tx < r.x1 && ty >= r.y0 && ty < r.y1) ? "gangway" as const : undefined);
   return lift ? { plot: null, placed: null, blocked: false, walkway: "gangway", lift } : k ? { plot: null, placed: null, blocked: false, walkway: k } : undefined;
 }
 /** Walking onto an island: your own; any island docked next to or bridged to one of yours (for
