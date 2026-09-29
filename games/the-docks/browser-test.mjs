@@ -296,7 +296,14 @@ try {
     await game.getByRole("button", { name: "Center on lead" }).click();
     // villages: plant a flag, lock RF until it's full, found it, harvest, vote
     assert.equal(await game.locator(".docks-flag").count(), 3, "Market Town, Reed Harbor and Crystal Hollow's rising flag");
+    // an island in no flag never goes to war: no raids, no war items; it trades, chats, docks
+    await btn("War").click();
+    await game.getByText(/Your islands fly no flag, so they can't go to war or raid/).waitFor();
+    await game.getByRole("button", { name: "Close War" }).click();
     await game.locator(".docks-nav").getByRole("button", { name: /Flags/ }).click();
+    await game.getByLabel("Own item to build").selectOption("4");   // 💣 Cannon
+    await game.getByRole("button", { name: /Buy where #\d+ stands · my RF/ }).click();
+    await game.getByText(/Cannons are war items: only islands in a flag go to war/).waitFor();
     await game.getByText(/founded · 2 islands/).first().waitFor();
     for (let i = 0; i < 4; i++) await game.getByRole("button", { name: /250k preview RF/ }).click();
     await game.getByLabel("Flag name").fill("Dock Town");

@@ -116,6 +116,9 @@ Controls: WASD / arrow keys or tap to walk; zoom with ＋/－, the mouse wheel, 
 - **Tax.** A sale from a flag's peace island pays 5% to that flag's treasury (its pool). Sales
   between islands in no flag pay no tax.
 - **Chat** works between any connected islands, flag or no flag.
+- **No flag, no war.** An island in no flag can't go to war or raid, can't carry war items
+  (Cannon, Sea wall, Armory, Fort) and can never be raided. It docks, chats, trades, buys and
+  sells.
 
 - **The flag Friend.** Every flag gets its own generated Friend when it's planted (its look
   comes from the flag's name and colour). It belongs to the flag and levels up (1–5: Sprout,

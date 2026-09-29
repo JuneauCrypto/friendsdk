@@ -326,6 +326,13 @@ export function cellProblem(w: World, p: Plot, cx: number, cy: number): string |
   if (itemsOn(w, p).length >= 64) return "This island has 64 items.";
   return null;
 }
+/** War items only go on islands in a flag: an island in no flag trades, chats, docks, buys and
+ *  sells, but never goes to war (and is never raided). */
+export const WAR_ITEMS = ["Cannon", "Sea wall", "Armory", "Fort"];
+export function warItemProblem(w: World, p: Plot, kind: number): string | null {
+  return WAR_ITEMS.includes(CATALOG[kind].name) && !villageOf(w, p)
+    ? `${CATALOG[kind].name}s are war items: only islands in a flag go to war. ${p.name} is in no flag, so it trades, chats, docks, buys and sells.` : null;
+}
 export const cellAt = (at: { x: number; y: number }) => ({ cx: Math.floor(at.x / CELL), cy: Math.floor(at.y / CELL) });
 function newItem(w: World, kind: number, village: Village | null, owner: string | null, p: Plot, cx: number, cy: number): Item {
   const it: Item = { id: w.items.length, kind, village, owner, plot: p, cx, cy, readyAt: Date.now() + CATALOG[kind].build };
@@ -347,7 +354,7 @@ function payRf(w: World, e: Economy, p: Plot | null, amount: number) {
 }
 /** An item of your own, paid with your RF: always yours. */
 export function buyOwn(w: World, e: Economy, who: string, kind: number, p: Plot, cx: number, cy: number) {
-  const why = cellProblem(w, p, cx, cy); if (why) throw new Error(why);
+  const why = warItemProblem(w, p, kind) ?? cellProblem(w, p, cx, cy); if (why) throw new Error(why);
   payRf(w, e, p, CATALOG[kind].price);
   return newItem(w, kind, null, who, p, cx, cy);
 }
@@ -363,7 +370,7 @@ export function takeOff(w: World, it: Item, who: string) {
 }
 export function placeOwn(w: World, it: Item, who: string, p: Plot, cx: number, cy: number) {
   if (it.owner !== who) throw new Error("Not yours.");
-  const why = cellProblem(w, p, cx, cy); if (why) throw new Error(why);
+  const why = warItemProblem(w, p, it.kind) ?? cellProblem(w, p, cx, cy); if (why) throw new Error(why);
   it.plot = p; it.cx = cx; it.cy = cy; w.version++;
 }
 

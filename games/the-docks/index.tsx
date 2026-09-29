@@ -969,7 +969,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       const left = Math.max(8, Math.min((islandPop.x - (rc?.left ?? 0)), (rc?.width ?? 400) - 240)), top = Math.max(8, Math.min(islandPop.y - (rc?.top ?? 0) + 12, (rc?.height ?? 400) - 220));
       return <div className="docks-quick" role="menu" aria-label={`${p.name} options`} style={{ left, top }}>
         <strong>{p.name}</strong>
-        <small>{p.friends.length.toLocaleString()} Friend{p.friends.length === 1 ? "" : "s"} · {r.rank} · {fl ? `🚩 ${fl.name}${fl.founded ? "" : " (rising)"}${stanceOf(w, p) ? ` · ${stanceOf(w, p) === "war" ? "⚔️ war" : "🕊 peace"}` : ""}` : "no flag"}{conn ? ` · docked with ${me.name}` : ""}</small>
+        <small>{p.friends.length.toLocaleString()} Friend{p.friends.length === 1 ? "" : "s"} · {r.rank} · {fl ? `🚩 ${fl.name}${fl.founded ? "" : " (rising)"}${stanceOf(w, p) ? ` · ${stanceOf(w, p) === "war" ? "⚔️ war" : "🕊 peace"}` : ""}` : "no flag: trades, chats and docks, never at war"}{conn ? ` · docked with ${me.name}` : ""}</small>
         {canChat(p) && PC.peaceful(w, p) && <button type="button" role="menuitem" onClick={() => { setIslandPop(null); setMenu("market"); }}>🧺 Trade with {p.name}</button>}
         {!conn && next.length > 0 && <button type="button" role="menuitem" className="rf-frame-primary" onClick={() => dockNextTo(p)}>⚓ Dock {me.name} here · {DOCKING_FEE} RF</button>}
         {!conn && hostileBorder(w, me, p) && <small>⚔️ {p.name} is {villageOf(w, p)?.name}'s war island: dock next to one of its peace islands instead.</small>}
@@ -1207,7 +1207,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
           <span>Your earned loot <b>{fmt(earned)}</b></span>
           <button type="button" className="rf-frame-primary" disabled={!earned} onClick={() => act(() => { const n = WR.claim(bk, e); say(`Claimed ${fmt(n)} RF of loot to #${friendId}'s wallet (simulated). It's yours now: never at risk.`); })}>Claim to #{String(friendId)}'s wallet</button></div>
         {villageError && <p role="alert" className="docks-note">{villageError}</p>}
-        {!v ? <p className="docks-note">Your islands fly no founded flag yet. Plant or join one in 🚩 Flags to go to war.</p> : (() => {
+        {!v ? <p className="docks-note">Your islands fly no flag, so they can't go to war or raid, and nobody can raid them: an island in no flag trades, chats, docks, buys and sells (🧺 Market). To fight, join or found a flag in 🚩 Flags and set an island there to ⚔️ war.</p> : (() => {
           const tier = WR.tierOf(w, v), shield = WR.shielded(v), ready = WR.readiness(w, bk, v), ships = WR.shipsOf(bk, v), rs = WR.readyShips(bk, v);
           return <>
           <h3><i className="docks-pennant" style={{ background: v.color }} />{v.name} · {WR.tierName(tier)}</h3>
