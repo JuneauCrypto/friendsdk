@@ -459,6 +459,16 @@ contract DocksTest is Test {
         assertEq(reg.dockedCount(), 3);
     }
 
+    function testFlagPricesFollowTheBondingCurve() public {
+        // the test deployment's first flag costs 1,000,000; the curve is relative to flagBase
+        assertEq(vil.flagPrice(0), vil.flagBase());
+        assertGt(vil.flagPrice(1), vil.flagPrice(0));
+        uint256 soft = vil.flagPrice(vil.SOFT_CAP());
+        assertApproxEqRel(soft, vil.flagBase() * 45, 0.01e18, "flag #2,000 costs about 45 x the first");
+        assertApproxEqRel(vil.flagPrice(vil.SOFT_CAP() + 100), soft * 2, 0.01e18, "then it doubles every 100 flags");
+        assertEq(vil.flagPrice(7) % 1 ether, 0, "whole RF");
+    }
+
     function testLevelsStackAndJoinByStairs() public {
         _place(alice, 1, 0, 0);
         _place(bob, 10, 0, 0);
@@ -1024,13 +1034,13 @@ contract DocksTest is Test {
         vm.prank(dave);
         plotOf[dave] = reg.create("");
         _friend(600, dave);
-        rf.mint(dave, 1_001_000 ether);
+        rf.mint(dave, 1_010_000 ether);
         vm.startPrank(dave);
         rf.approve(address(reg), type(uint256).max);
         rf.approve(address(vil), type(uint256).max);
         reg.arrange(plotOf[dave], _one(600), _i(0), _i(0));
         reg.dock(plotOf[dave], 3, 0);
-        uint256 w = vil.plant(plotOf[dave], "Other Flag", 0, 0, TARGET);
+        uint256 w = vil.plant(plotOf[dave], "Other Flag", 0, 0, vil.flagPrice(vil.villageCount()));
         vil.found(w);
         vm.stopPrank();
         rf.mint(carol, 100 ether);
@@ -1065,7 +1075,7 @@ contract DocksTest is Test {
         rf.approve(address(vil), type(uint256).max);
         reg.arrange(plotOf[dave], _one(600), _i(0), _i(0));
         reg.dock(plotOf[dave], 3, 0);
-        uint256 w = vil.plant(plotOf[dave], "Other Flag", 0, 0, TARGET);
+        uint256 w = vil.plant(plotOf[dave], "Other Flag", 0, 0, vil.flagPrice(vil.villageCount()));
         vil.found(w);
         vm.stopPrank();
         vm.prank(alice);

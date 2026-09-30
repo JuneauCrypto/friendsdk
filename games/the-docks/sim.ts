@@ -92,12 +92,13 @@ export function buildSimulation(w: World, ff: FF.FlagFriends, book: WR.WarBook, 
       isles.push({ p: island(`sim-f${fi}-z${d.z}-${r}-${c}`, nameFrom(f.words), f.x + c, f.y + r, big ? 60 + Math.floor(rnd() * 60) : 3 + Math.floor(rnd() * 7), false, d.z), edge: false });
     rebuild(w);
     const seat = isles.find(i => !i.edge)!.p, pl = seat.friends[0];
-    const v = newVillage(w, seat, f.name, { x: (pl.x + pl.m.cw / 2) * CELL, y: (pl.y + pl.m.ch / 2) * CELL }, VX.FLAG_TARGET, Date.now() - VX.DAY);
+    const target = VX.flagPrice(w);                                                // the bonding curve at the time it was planted
+    const v = newVillage(w, seat, f.name, { x: (pl.x + pl.m.cw / 2) * CELL, y: (pl.y + pl.m.ch / 2) * CELL }, target, Date.now() - VX.DAY);
     v.color = f.color;
     const founders = isles.slice(0, 6 + Math.floor(rnd() * 6)).map(i => i.p);
-    let left = VX.FLAG_TARGET;
+    let left = target;
     founders.forEach((p, k) => { const amt = k === founders.length - 1 ? left : Math.round(left * (0.2 + rnd() * 0.3) / 1000) * 1000; v.lockers.set(p.name, amt); left -= amt; });
-    v.locked = VX.FLAG_TARGET;
+    v.locked = target;
     VX.found(w, v);
     v.foundedAt = Date.now() - (20 + Math.floor(rnd() * 60)) * VX.DAY;               // founded weeks ago: past its shield
     if (v.enrollVote) { v.enrollVote.ends = Date.now() - 1; VX.settle(v, v.enrollVote); }

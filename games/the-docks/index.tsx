@@ -99,7 +99,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     claimScope: "anyDocked" as Scope, claimPool: "100000", claimEach: "500", claimPrice: "5" });
   const [launchError, setLaunchError] = useState("");
   const [flagName, setFlagName] = useState(""), [villageError, setVillageError] = useState("");
-  const [firstLock, setFirstLock] = useState("100000"), [lockAmt, setLockAmt] = useState<Record<string, string>>({});
+  const [firstLock, setFirstLock] = useState("5000"), [lockAmt, setLockAmt] = useState<Record<string, string>>({});
   const [burnPct, setBurnPct] = useState("25"), [buildKind, setBuildKind] = useState(1);
   const asked = useRef<Set<string>>(new Set());                  // sample islands already asked to join your flag
   // On chain (simulated in this preview): islands created on chain and their last saved layouts.
@@ -691,8 +691,8 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     const market = w.plots.find(p => p.id === "s4" && p.friends.length), rooftop = w.plots.find(p => p.id === "s2" && p.friends.length);
     const keep = w.plots.find(p => p.id === "s3" && p.friends.length);
     if (market) {
-      const v = newVillage(w, market, "Market Town", at(market), VX.FLAG_TARGET, Date.now() - VX.DAY);
-      v.lockers.set(market.name, 700_000); v.lockers.set(rooftop?.name ?? "Rooftop Pair", 300_000); v.locked = VX.FLAG_TARGET;
+      const target = VX.flagPrice(w), v = newVillage(w, market, "Market Town", at(market), target, Date.now() - VX.DAY);
+      v.lockers.set(market.name, Math.round(target * 0.7)); v.lockers.set(rooftop?.name ?? "Rooftop Pair", target - Math.round(target * 0.7)); v.locked = target;
       VX.found(w, v); if (rooftop) VX.bring(w, v, rooftop, "war");   // Market Cluster at peace in the middle, Rooftop Pair its war border
       v.foundedAt -= 10 * VX.DAY; if (v.enrollVote) { v.enrollVote.ends = Date.now() - 1; VX.settle(v, v.enrollVote); }   // founded 10 days ago, kept open
       WR.onFounded(book.current, v); FF.onFounded(flagFriends.current, v); WR.fund(book.current, { ...econ.current, rf: Infinity }, v, 50_000);
@@ -700,14 +700,14 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     }
     const reed = w.plots.find(p => p.id === "s1" && p.friends.length);
     if (reed) {   // a small flag: a fair first target
-      const v = newVillage(w, reed, "Reed Harbor", at(reed), 200_000, Date.now() - VX.DAY);
-      v.lockers.set(reed.name, 200_000); v.locked = 200_000;
+      const t = VX.flagPrice(w), v = newVillage(w, reed, "Reed Harbor", at(reed), t, Date.now() - VX.DAY);
+      v.lockers.set(reed.name, t); v.locked = t;
       VX.found(w, v); v.foundedAt -= 30 * VX.DAY; if (v.enrollVote) { v.enrollVote.ends = Date.now() - 1; VX.settle(v, v.enrollVote); }
       WR.onFounded(book.current, v); FF.onFounded(flagFriends.current, v); WR.fund(book.current, { ...econ.current, rf: Infinity }, v, 5_000);
     }
     if (keep) {
-      const v = newVillage(w, keep, "Crystal Hollow", at(keep), VX.FLAG_TARGET, Date.now() + 12 * VX.DAY);
-      v.lockers.set(keep.name, 350_000); v.locked = 350_000; w.version++; FF.spawn(flagFriends.current, v);
+      const v = newVillage(w, keep, "Crystal Hollow", at(keep), VX.flagPrice(w), Date.now() + 12 * VX.DAY);
+      const t = Math.round(v.target * 0.35); v.lockers.set(keep.name, t); v.locked = t; w.version++; FF.spawn(flagFriends.current, v);
     }
   }
   const act = (f: () => void) => { setVillageError(""); try { f(); bump(); } catch (e) { setVillageError(errText(e)); } };
@@ -817,7 +817,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       for (const v of w.villages) {
         if (VX.rising(v) && Math.random() < 0.35 && samples.length) {
           const who = samples[Math.floor(Math.random() * samples.length)].name;
-          const n = VX.lock(w, null, v, Math.min(v.target - v.locked, 20_000 + Math.floor(Math.random() * 60) * 1000), who);
+          const n = VX.lock(w, null, v, Math.min(v.target - v.locked, Math.max(VX.MIN_LOCK, Math.round(v.target * (0.02 + Math.random() * 0.06)))), who);
           if (v.seat.mine) msg = `${who} (sample) locked ${fmt(n)} RF into ${v.name}'s flag · ${VX.pct(v)}%.`;
         }
         VX.accrueFees(v);
@@ -1049,7 +1049,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
       return <div className="docks-quick" role="menu" aria-label={`${p.name} options`} style={{ left, top, maxHeight: `calc(100% - ${Math.round(top) + 72}px)`, overflowY: "auto" }}>
         <strong>{p.name}</strong>
         <small>{zOf(p.berth) ? `${levelName(zOf(p.berth))} · ` : ""}{p.friends.length.toLocaleString()} Friend{p.friends.length === 1 ? "" : "s"} · {r.rank} · {fl ? `🚩 ${fl.name}${fl.founded ? "" : " (rising)"}${stanceOf(w, p) ? ` · ${stanceOf(w, p) === "war" ? "⚔️ war" : "🕊 peace"}` : ""}` : "no flag: trades, chats and docks, never at war"}{conn ? ` · docked with ${me.name}` : ""}</small>
-        {canChat(p) && PC.peaceful(w, p) && <button type="button" role="menuitem" onClick={() => { setIslandPop(null); setMenu("market"); }}>🧺 Trade with {p.name}</button>}
+        {canChat(p) && PC.peaceful(w, p) && villageOf(w, p) && <button type="button" role="menuitem" onClick={() => { setIslandPop(null); setMarketAt(villageOf(w, p)!.id); setMenu("market"); }}>🧺 Trade with {p.name}</button>}
         {!conn && next.some(b => zOf(b) === zOf(p.berth)) && <button type="button" role="menuitem" className="rf-frame-primary" onClick={() => dockNextTo(p)}>⚓ Dock {me.name} beside it · {DOCKING_FEE} RF</button>}
         {!conn && next.some(b => zOf(b) > zOf(p.berth)) && <button type="button" role="menuitem" onClick={() => dockNextTo(p, "above")}>⬆ Dock on the deck above · {DOCKING_FEE} RF</button>}
         {!conn && next.some(b => zOf(b) < zOf(p.berth)) && <button type="button" role="menuitem" onClick={() => dockNextTo(p, "below")}>⬇ Dock on the deck below · {DOCKING_FEE} RF</button>}
@@ -1214,7 +1214,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
             <option value="">their real level</option>{[0, 1, 2, 3, 4, 5].map(n => <option key={n} value={n}>Lv {n} ({LK.LOOK_NAMES[n]})</option>)}</select></label>
           {lookOverride !== null && <p className="docks-note">Previewing looks only: levels, walls' defense and everything else stay real.</p>}
         </div>
-        <p>Plant a flag and raise it together. Anyone can lock RF into it until it reaches its target; then it's founded. Targets follow a bonding curve: the next flag needs {fmt(VX.flagPrice(w))} RF ({fmt(VX.FLAG_BASE)} RF × {VX.FLAG_CURVE} per flag already up, at most {fmt(VX.FLAG_TARGET)}), so early flags are cheap and joining makes more sense later. Locked RF never comes back once it's founded (no rug): half becomes permanent RF/ETH liquidity whose trading fees buy RF (half back into the pool, half shared as allowances), half each founder's allowance to build flag items on their island. Everyone who locked holds a soulbound founder mark. Not full in {VX.FLAG_DAYS} days? Everyone takes their RF back. Once founded, each wallet brings up to two islands, one at war and one at peace: a founder's first is free, the other enrolls ({fmt(VX.ENROLL_PRICE)} RF: half liquidity, half the owner's allowance). Each island joins at ⚔️ war (fights, boards ships, forms the border: outsiders can't dock straight against it) or at 🕊 peace (makes goods, trades; outsiders dock next to it). Best layout: war islands around the edge, peace in the middle. Every Friend votes; founders' votes are multiplied. Population unlocks skins (100, 1,000, 10,000, 100,000 Friends, then every 100,000 more): bigger walls and better defenses for every island in the flag. Founders are the flag's 👑 OGs: up to 1,000 of its Friends carry an OG mark, shared by what each founder locked. Every flag gets its own generated flag Friend when it's planted: it levels up from part of the founding RF, part of every enrollment and its own revenue (half the flag's trade tax), and boosts the flag's peace output and war defense.</p>
+        <p>Plant a flag and raise it together. Anyone can lock RF into it until it reaches its target; then it's founded. Targets follow a bonding curve built for {VX.FLAG_SOFT_CAP.toLocaleString()} flags: the next flag needs {fmt(VX.flagPrice(w))} RF. The first cost {fmt(VX.FLAG_BASE)} RF and each one after costs a little more, about {fmt(VX.flagPriceAt(VX.FLAG_SOFT_CAP))} RF (≈ $500 at today's RF price) by flag #{VX.FLAG_SOFT_CAP.toLocaleString()}; after that the price doubles every 100 flags, so joining an existing flag becomes the way in. Locked RF never comes back once it's founded (no rug): half becomes permanent RF/ETH liquidity whose trading fees buy RF (half back into the pool, half shared as allowances), half each founder's allowance to build flag items on their island. Everyone who locked holds a soulbound founder mark. Not full in {VX.FLAG_DAYS} days? Everyone takes their RF back. Once founded, each wallet brings up to two islands, one at war and one at peace: a founder's first is free, the other enrolls ({fmt(VX.ENROLL_PRICE)} RF: half liquidity, half the owner's allowance). Each island joins at ⚔️ war (fights, boards ships, forms the border: outsiders can't dock straight against it) or at 🕊 peace (makes goods, trades; outsiders dock next to it). Best layout: war islands around the edge, peace in the middle. Every Friend votes; founders' votes are multiplied. Population unlocks skins (100, 1,000, 10,000, 100,000 Friends, then every 100,000 more): bigger walls and better defenses for every island in the flag. Founders are the flag's 👑 OGs: up to 1,000 of its Friends carry an OG mark, shared by what each founder locked. Every flag gets its own generated flag Friend when it's planted: it levels up from part of the founding RF, part of every enrollment and its own revenue (half the flag's trade tax), and boosts the flag's peace output and war defense.</p>
         <div className="docks-rf"><span>Your RF <b>{fmt(econ.current.rf)}</b><span className="docks-sim">SIMULATED</span></span><span>Into pools <b>{fmt(econ.current.pooled)}</b></span>
           <button type="button" onClick={() => { econ.current.rf += 250_000; bump(); }}>＋250k preview RF</button></div>
         {(() => { const mv = mine.map(p => villageOf(w, p) ?? risingFlagOf(w, p)).find(Boolean);
@@ -1376,10 +1376,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <details><summary>War rules (all settings, tunable)</summary>
           <p className="docks-note">Shield {WR.WAR.SHIELD_DAYS} days after founding · loot vault starts with {WR.WAR.LOOT_FROM_FOUNDING_BPS / 100}% of the flag's RF and gets {WR.WAR.LOOT_FROM_FEES_BPS / 100}% of every harvest of its AMM fees; anyone can add to it · bounty {WR.WAR.DOCKS_BOUNTY_BPS / 100}% of the Docks rewards reserve per win (double in a declared war) · {WR.WAR.TO_FIGHTERS_BPS / 100}% of loot to the fighters by level, the rest to the winner's vault · loss per battle {WR.WAR.TIER_NAMES.map((n, t) => `${n} ${WR.lossBps(t) / 100}%`).join(", ")} · home advantage {WR.WAR.HOME_ADVANTAGE * 100}% · every island aboard duels a defender within one island tier ({WR.WAR.ISLAND_TIERS.map((m, t) => `tier ${t + 1} ${fmt(m)}+`).join(", ")}); no match, it sits out · a sunk ship comes back after {WR.WAR.SHIP_REGEN_HOURS} h · raid cooldown {WR.WAR.RAID_COOLDOWN_HOURS} h per target outside a war · war lasts {WR.WAR.WAR_DAYS} days · {WR.WAR.INTRO_DINGHIES} free dinghies per new flag · flag tiers by battle power: {WR.WAR.TIERS.map((m, t) => `${WR.WAR.TIER_NAMES[t]} ${fmt(m)}+`).join(", ")} (tier skins later). Island level = rank (reward weight) + log₂(Friends); strength = level × √Friends. On chain, each round is one Dice roll.</p></details>
       </div>; })() : menu === "market" ? (() => { const mk = market.current, e = econ.current, inv = PC.invOf(mk, VX.YOU), mineP = myPlots(w);
-        const peaceMine = mineP.filter(p => PC.peaceful(w, p)), sellFrom = peaceMine.includes(isl) ? isl : peaceMine[0];
+        const peaceMine = mineP.filter(p => PC.peaceful(w, p) && villageOf(w, p)), sellFrom = peaceMine.includes(isl) ? isl : peaceMine[0];
         const own = w.items.filter(it => it.owner === VX.YOU && !mk.listings.some(l => l.item === it));
         return <div className="docks-war">
-        <p>Peace land makes goods and trades them: build 🌾 Farms, 🎣 Fisheries, 🔨 Workshops, 🧵 Looms and 🏺 Kilns on a peace island (or any island in no flag), collect what they make, and sell it, or your own items, at your price. You can buy from islands docked or bridged to yours and from your flag-mates; war islands don't trade. A sale from a flag's peace island pays {PC.PEACE.TRADE_TAX_BPS / 100}% tax to that flag's treasury; islands in no flag trade tax-free.</p>
+        <p>Markets are only on flags. Grow and mine goods with 🌾 Farms, 🎣 Fisheries, 🔨 Workshops, 🧵 Looms and 🏺 Kilns on your flag's market (peace) island, collect what they make, and sell it, or your own items, at your price, all in RF. Buyers are your flag-mates and anyone who docks at your flag's harbor to explore its market; war islands don't trade. Every sale pays {PC.PEACE.TRADE_TAX_BPS / 100}% tax to the flag (half its treasury, half its flag Friend). On your own you can dock at any flag's harbor and buy; to sell, join (or plant) a flag.</p>
         <div className="docks-rf"><span>Your RF <b>{fmt(e.rf)}</b><span className="docks-sim">SIMULATED</span></span>{PC.GOODS.map((g, i) => <span key={i}>{g.icon} {g.name} <b>{inv[i]}</b></span>)}</div>
         {villageError && <p role="alert" className="docks-note">{villageError}</p>}
         {(() => { const fv = w.villages.find(v => v.id === marketAt && v.founded); if (!fv) return null;
@@ -1400,7 +1400,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
             <span className="docks-row tight">{any && <button type="button" onClick={() => act(() => { const got = PC.collect(w, mk, p); say(`Collected from ${p.name} (simulated): ${got.map((n, i) => n ? `${n} ${PC.GOODS[i].name}` : "").filter(Boolean).join(", ") || "nothing yet"}.`); })}>Collect</button>}
               {any && <button type="button" title="Preview only" onClick={() => { mk.lastCollect.set(p, Date.now() - 12 * VX.HOUR); bump(); }}>⏩ 12 h</button>}</span></div>; })}
         <h4>🏷 Sell {sellFrom ? `from ${sellFrom.name}` : ""}</h4>
-        {!sellFrom ? <p className="docks-note">All your islands are at war: make one peace to trade.</p> : <div className="docks-row tight">
+        {!sellFrom ? <p className="docks-note">To sell, you need a market (peace) island in a flag: join or plant one in 🚩 Flags.</p> : <div className="docks-row tight">
           <select aria-label="What to sell" value={sellWhat} onChange={e2 => setSellWhat(e2.target.value)}>
             {PC.GOODS.map((g, i) => <option key={`g${i}`} value={`g${i}`}>{g.icon} {g.name} ({inv[i]})</option>)}
             {own.map(it => <option key={`i${it.id}`} value={`i${it.id}`}>{VX.CATALOG[it.kind].icon} {VX.CATALOG[it.kind].name} (your item)</option>)}</select>
@@ -1472,7 +1472,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         <li><strong>Bridges:</strong> can't dock next to an island? Build a bridge to it: a {DOCKING_FEE} RF docking fee, like docking. It lasts until either island moves. Connected islands can be walked onto (a toll to the owner may come later).</li>
         <li><strong>Visit:</strong> for now only islands under a flag can be walked onto: every island of your flag, and, just to explore, a flag's islands your island is docked next to or bridged to.</li>
         <li><strong>Control any Friend:</strong> tap (or click) one of your Friends on its land or walking in a line: <em>Control</em> it (taken out of a line, it breaks off), <em>Break off crew</em> (it and those behind it follow it), <em>Call</em> it, <em>Send home</em>, <em>Pick</em>, make it the island's <em>captain</em> (the Friend you pick when you connect becomes captain; saved on chain once, you board as it every time) or <em>mayor</em> (a second Friend that stays home and greets visitors), or <em>Name</em> it (a public name, saved on chain). 👥 Crew → <em>Change Friend</em>, <em>Call all</em> to the primary leader, <em>Make primary leader</em>, <em>Walk solo</em>, <em>All go home</em>.</li>
-        <li><strong>Flags:</strong> 🚩 Flags → plant a flag where your lead stands and lock RF. Anyone can lock more until it hits {fmt(VX.FLAG_TARGET)} RF; then it's founded: half permanent RF/ETH liquidity whose trading fees buy RF (half back into the pool, half shared), half the founders' allowances for building. Lockers hold soulbound founder marks. Everyone brings one island: founders free, others enroll ({fmt(VX.ENROLL_PRICE)} RF, open the first {VX.ENROLL_WINDOW_DAYS} days, then as voted). Every Friend is a vote, founders' multiplied by 1 + their share of the pool; vote on the pool share and enrollment. Spend your allowance on items for your flagged island (build timers, boost with RF); leaving takes a removal request and an epoch (~21 days), and the flag's items on your island are raffled to those who stayed. Not full in {VX.FLAG_DAYS} days? Refunds. Launch tokens to your flag.</li>
+        <li><strong>Flags:</strong> 🚩 Flags → plant a flag where your lead stands and lock RF. Anyone can lock more until it hits its target (the next flag: {fmt(VX.flagPrice(w))} RF, on a bonding curve); then it's founded: half permanent RF/ETH liquidity whose trading fees buy RF (half back into the pool, half shared), half the founders' allowances for building. Lockers hold soulbound founder marks. Everyone brings one island: founders free, others enroll ({fmt(VX.ENROLL_PRICE)} RF, open the first {VX.ENROLL_WINDOW_DAYS} days, then as voted). Every Friend is a vote, founders' multiplied by 1 + their share of the pool; vote on the pool share and enrollment. Spend your allowance on items for your flagged island (build timers, boost with RF); leaving takes a removal request and an epoch (~21 days), and the flag's items on your island are raffled to those who stayed. Not full in {VX.FLAG_DAYS} days? Refunds. Launch tokens to your flag.</li>
         <li><strong>Tokens:</strong> launch a token for 1,000 RF, airdrop it into Friend wallets and open a claim pool; claims cost RF, into the pool.</li>
         <li><strong>Always on-chain:</strong> every Friend is its real on-chain artwork, loaded as you get near it. Re-checked every minute (or tap Check): new Friends join, upgrades update, sold or deactivated Friends leave.</li>
         <li>This preview doesn't save: reloading starts fresh. RF, saves, docking, bridges, launches and claims are simulated.</li>

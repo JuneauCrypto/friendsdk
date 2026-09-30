@@ -4,9 +4,10 @@
  *    flag) produces goods from its peace items: Farm → Grain, Fishery → Fish, Workshop → Tools,
  *    Loom → Cloth, Kiln → Pottery. A Market stall on the island adds MARKET_BOOST to its output.
  *    Goods pile up on the island until its owner collects them.
- *  - Market: sell goods (and your own items) from a peace island at your price. Buyers are
- *    islands docked next to it or bridged to it, its flag-mates, and anyone docked at the flag's
- *    harbor (next to any of its peace islands): that opens the flag's whole market. War islands don't trade.
+ *  - Market: markets are only on flags. Sell goods (and your own items) from your flag's peace
+ *    island (its market island) at your price. Buyers are its flag-mates, islands docked or
+ *    bridged next to it, and anyone docked at the flag's harbor (next to any of its peace
+ *    islands): that opens the flag's whole market. Islands on their own can buy, not sell. War islands don't trade.
  *    Islands in no flag trade with each other freely when connected.
  *  - Tax: a sale from a flag's peace island pays TRADE_TAX_BPS to that flag's treasury (its
  *    pool). A sale between islands in no flag pays none. */
@@ -80,8 +81,9 @@ export function collect(w: World, m: Market, p: Plot, who = YOU, now = Date.now(
 export function tradeProblem(w: World, buyer: Plot, from: Plot): string | null {
   if (!peaceful(w, from)) return `${from.name} is a war island: no trading.`;
   if (!peaceful(w, buyer)) return `${buyer.name} is a war island: trade from a peace island.`;
+  const f = villageOf(w, from); if (!f) return `${from.name} is in no flag: markets are only on flags.`;
   if (buyer === from || connected(w, buyer, from)) return null;
-  const f = villageOf(w, from); if (f && villageOf(w, buyer) === f) return null;
+  if (villageOf(w, buyer) === f) return null;
   // docked at a flag's harbor (next to any of its peace islands): its whole market is open to you
   if (f && f.members.some(m => peaceful(w, m) && connected(w, buyer, m))) return null;
   return f ? `Dock at ${f.name}'s harbor (next to any of its peace islands) to trade.` : `Dock next to ${from.name} (or bridge to it) to trade.`;
@@ -92,6 +94,7 @@ export const buyerFor = (w: World, mine: Plot[], from: Plot) => mine.find(p => !
 /** List goods (or one of your own items) for sale from one of your peace islands. */
 export function list(w: World, m: Market, from: Plot, what: { good: number } | { item: Item }, qty: number, price: number, who = YOU): Listing {
   if (!peaceful(w, from)) throw new Error(`${from.name} is a war island: sell from a peace island.`);
+  if (!villageOf(w, from)) throw new Error("Markets are only on flags: join (or plant) a flag and sell from your market (peace) island.");
   if (!(price > 0)) throw new Error("Set a price.");
   let good: number | null = null, item: Item | null = null;
   if ("good" in what) {
@@ -134,7 +137,7 @@ export function buy(w: World, m: Market, e: Economy | null, l: Listing, qty: num
 /** Sample islands post goods for sale from their peace land (simulated market makers). */
 export function sampleListings(w: World, m: Market, rand = Math.random) {
   for (const p of w.plots) {
-    if (p.mine || !p.friends.length || !peaceful(w, p) || m.listings.some(l => l.from === p)) continue;
+    if (p.mine || !p.friends.length || !peaceful(w, p) || !villageOf(w, p) || m.listings.some(l => l.from === p)) continue;
     const g = Math.floor(rand() * GOODS.length);
     m.listings.push({ id: m.seq++, seller: walletOf(p), from: p, good: g, item: null, qty: 5 + Math.floor(rand() * 20), price: Math.round(GOODS[g].base * (0.8 + rand() * 0.6)), at: Date.now() });
   }

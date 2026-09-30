@@ -27,7 +27,9 @@ interface IDocksVillageItems {
 /// @notice Villages on The Docks: raised together, then grown by their people.
 ///
 /// Flags. A holder plants a flag on a land cell of their docked island and locks the first RF.
-/// Anyone can lock more until it reaches `flagTarget` (e.g. 1,000,000 RF). Every locker gets a
+/// Anyone can lock more until it reaches its target, set when it's planted by a bonding curve
+/// (`flagPrice`): `flagBase` (e.g. 10,000 RF) growing gently for the first SOFT_CAP (2,000)
+/// flags, then doubling every 100 flags after that. Every locker gets a
 /// soulbound founder mark recording what they locked. Not full by the deadline: everyone can
 /// take their RF back. Full: `found` (anyone) sends it all to the village treasury: half
 /// becomes permanent liquidity, half the founders' allowances. Nothing can be withdrawn after.
@@ -104,6 +106,7 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
         uint64 enrollCap; // population max (0: none)
         uint64 enrollVote; // active enrollment-family proposal + 1
         uint64 population; // Friends on the village's islands
+        uint128 target; // RF to fill this flag (the bonding curve's price when it was planted)
     }
 
     /// @dev A Friend's tie to the village of the island it was last placed on.
@@ -176,7 +179,14 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
     IERC20 public immutable rf;
     DocksIslands public immutable islands;
     DocksFounderMarks public immutable marks;
-    uint256 public immutable flagTarget;
+    /// @notice Price of the first flag; the bonding curve starts here.
+    uint256 public immutable flagBase;
+    /// @notice Flags up to here get only gently more expensive (to #2,000 ≈ 45 × the first).
+    uint256 public constant SOFT_CAP = 2000;
+    uint256 private constant WAD = 1e18;
+    /// @dev Growth per flag before SOFT_CAP (45^(1/2000)) and after it (2^(1/100): doubles every 100).
+    uint256 private constant GROWTH_EARLY = 1_001_905_000_000_000_000;
+    uint256 private constant GROWTH_LATE = 1_006_955_550_000_000_000;
     uint256 public immutable flagDuration;
     uint256 public immutable minLock;
     uint256 public immutable startEnrollPrice;
@@ -202,14 +212,14 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
     constructor(
         IERC20 rf_,
         DocksIslands islands_,
-        uint256 flagTarget_,
+        uint256 flagBase_,
         uint256 flagDuration_,
         uint256 minLock_,
         uint256 enrollPrice_
     ) {
         rf = rf_;
         islands = islands_;
-        flagTarget = flagTarget_;
+        flagBase = flagBase_;
         flagDuration = flagDuration_;
         minLock = minLock_;
         startEnrollPrice = enrollPrice_;
@@ -242,9 +252,11 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
         (bool occupied,, bool hole) = islands.friendAt(islandId, x, y);
         if (!occupied || hole) revert NotOnLand();
 
+        uint256 target = flagPrice(villageCount);
         villageId = ++villageCount;
         Village storage v = _villages[villageId];
         v.name = name;
+        v.target = uint128(target);
         v.seatIsland = islandId;
         v.flagX = x;
         v.flagY = y;
@@ -266,7 +278,7 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
     function found(uint256 villageId) external nonReentrant {
         Village storage v = _villages[villageId];
         if (v.founded || v.seatIsland == 0) revert NotRising();
-        if (v.locked < flagTarget) revert NotFull();
+        if (v.locked < v.target) revert NotFull();
         v.founded = true;
         v.foundedAt = uint64(block.timestamp);
         v.pool = v.locked;
@@ -286,7 +298,7 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
     function refund(uint256 villageId) external nonReentrant returns (uint256 amount) {
         Village storage v = _villages[villageId];
         if (v.founded || v.seatIsland == 0) revert NotRising();
-        uint256 closes = v.deadline + (v.locked >= flagTarget ? FOUNDING_GRACE : 0);
+        uint256 closes = v.deadline + (v.locked >= v.target ? FOUNDING_GRACE : 0);
         if (block.timestamp < closes) revert StillOpen();
         amount = marks.burn(villageId, msg.sender);
         v.locked -= uint128(amount);
@@ -602,7 +614,30 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
     /// @notice Whether a flag is still taking RF.
     function rising(uint256 villageId) public view returns (bool) {
         Village storage v = _villages[villageId];
-        return v.seatIsland != 0 && !v.founded && block.timestamp < v.deadline && v.locked < flagTarget;
+        return v.seatIsland != 0 && !v.founded && block.timestamp < v.deadline && v.locked < v.target;
+    }
+
+    /// @notice RF to fill flag number `n` (0-based: `flagPrice(villageCount)` is the next one).
+    /// flagBase × 1.001905^n up to SOFT_CAP, then × 2^(1/100) per flag after it; whole RF.
+    function flagPrice(uint256 n) public view returns (uint256) {
+        uint256 early = n < SOFT_CAP ? n : SOFT_CAP;
+        uint256 price = flagBase * _pow(GROWTH_EARLY, early) / WAD;
+        if (n > SOFT_CAP) price = price * _pow(GROWTH_LATE, n - SOFT_CAP) / WAD;
+        return price / 1 ether * 1 ether;
+    }
+
+    /// @notice A flag's target (RF to fill it).
+    function targetOf(uint256 villageId) external view returns (uint256) {
+        return _villages[villageId].target;
+    }
+
+    function _pow(uint256 x, uint256 n) private pure returns (uint256 r) {
+        r = WAD;
+        while (n > 0) {
+            if (n & 1 == 1) r = r * x / WAD;
+            x = x * x / WAD;
+            n >>= 1;
+        }
     }
 
     /* ── internals ── */
@@ -610,7 +645,7 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
     function _lock(uint256 villageId, uint256 amount) private returns (uint256 taken) {
         if (!rising(villageId)) revert NotRising();
         Village storage v = _villages[villageId];
-        uint256 missing = flagTarget - v.locked;
+        uint256 missing = v.target - v.locked;
         taken = amount > missing ? missing : amount;
         if (taken < minLock && taken != missing) revert TooSmall();
         rf.safeTransferFrom(msg.sender, address(this), taken);
@@ -695,7 +730,7 @@ contract DocksVillages is IDocksPlacementGate, ReentrancyGuard {
         if (v == 0) return false;
         Village storage x = _villages[v];
         if (x.founded) return true;
-        return x.seatIsland == islandId && (rising(v) || x.locked >= flagTarget);
+        return x.seatIsland == islandId && (rising(v) || x.locked >= x.target);
     }
 
     function _onlyOwner(uint256 islandId) private view {

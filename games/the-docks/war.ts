@@ -40,7 +40,8 @@ export const WAR = {
   LOOT_FROM_FEES_BPS: 1_000,           // 10% of every harvest of the flag's AMM fees goes to the vault (DocksVillageTreasury.LOOT_BPS)
   DOCKS_BOUNTY_BPS: 100,               // 1% of the Docks rewards reserve per win
   TO_FIGHTERS_BPS: 5_000,              // half the loot to the islands that fought, half to the winner's vault
-  BASE_LOSS_BPS: 1_000,                // tier 1 loses 10% of its vault per lost battle; higher tiers less
+  BASE_LOSS_BPS: 200,                  // tier 1 loses 2% of its vault per lost raid: gentle to start
+  LOSS_STEP_BPS: 50,                   // each tier up risks a little more (+0.5%): 2%, 2.5%, 3%, 3.5%, 4%
   HOME_ADVANTAGE: 0.1,
   EMPTY_SEAT_STRENGTH: 0.5,            // a flag with no war islands defends with its peace islands at half strength
   RAID_COOLDOWN_HOURS: 24,             // between raids on the same flag (not during a declared war)
@@ -118,7 +119,8 @@ export function islandTier(w: World, p: Plot) { const x = islandPower(w, p); let
 export function tierOf(w: World, v: Village) { const p = flagPower(w, v); let t = 0; WAR.TIERS.forEach((min, i) => { if (p >= min) t = i; }); return t; }
 export const tierName = (t: number) => `Tier ${t + 1} · ${WAR.TIER_NAMES[t]}`;
 /** Share of the loser's vault taken per lost battle: gentler as tiers go up (10%, 6.7%, 5%, 4%, 3.3%). */
-export const lossBps = (tier: number) => Math.round(WAR.BASE_LOSS_BPS / (1 + 0.5 * tier));
+/** Share of a loser's vault at stake: gentle for small flags, a little more as they grow. */
+export const lossBps = (tier: number) => WAR.BASE_LOSS_BPS + WAR.LOSS_STEP_BPS * Math.max(0, tier);
 
 /** Battle readiness during the shield (a checklist; the shield ends on its own). */
 export function readiness(w: World, b: WarBook, v: Village) {

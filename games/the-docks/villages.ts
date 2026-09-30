@@ -1,6 +1,6 @@
 /* Villages — SIMULATED in this preview. Mirrors contracts/src/docks/DocksVillages.sol,
  * DocksVillageTreasury.sol, DocksItems.sol and DocksUniV3Liquidity.sol:
- *  - plant a flag and lock the first RF; anyone locks more until FLAG_TARGET (a setting); every
+ *  - plant a flag and lock the first RF; anyone locks more until its target (flagPrice: a bonding curve); every
  *    locker holds a soulbound founder mark; not full by the deadline → everyone gets RF back;
  *  - every RF that comes in: half permanent RF/ETH liquidity, half the payer's allowance (spent
  *    only on items for their flagged island; that RF goes to the liquidity too);
@@ -15,7 +15,6 @@
 import { addMember, CELL, type Stance, flagProblem, newVillage, villageOf, walletOf, type Item, type Plot, type Proposal, type ProposalKind, type Raffle, type Village, type World } from "./world.js";
 import { toPool, type Economy } from "./launch.js";
 
-export const FLAG_TARGET = 1_000_000;                 // RF to fill a flag (a contract setting)
 export const FLAG_DAYS = 30;                          // days a flag has to fill
 export const MIN_LOCK = 1_000;                        // smallest lock (unless it fills the flag)
 export const ENROLL_PRICE = 10_000;                   // RF to enroll an island (a contract setting)
@@ -50,14 +49,24 @@ export const CATALOG = [
   { name: "Loom", icon: "🧵", price: 15_000, build: 12 * HOUR },
   { name: "Kiln", icon: "🏺", price: 30_000, build: DAY },
 ];
-/** Flags get dearer as more are planted (a bonding curve): cheap to start early, joining makes
- *  more sense later. FLAG_BASE × FLAG_CURVE^(flags so far), capped at FLAG_TARGET. */
-export const FLAG_BASE = 100_000;
-export const FLAG_CURVE = 1.25;
-export function flagPrice(w: World) {
-  const n = w.villages.filter(v => v.founded || rising(v)).length;
-  return Math.min(FLAG_TARGET, Math.round(FLAG_BASE * Math.pow(FLAG_CURVE, n) / 1_000) * 1_000);
+/** Flags get dearer as more are planted (a bonding curve): 10,000 RF for the first, rising
+ *  gently to about 450,000 RF (≈ $500 at today's RF price) by flag #2,000, the number of flags
+ *  the Docks is built for; after that each flag costs 2^(1/100) × the one before, so the price
+ *  doubles every 100 flags and joining an existing flag becomes the way in. */
+export const FLAG_BASE = 10_000;                      // RF for the first flag (a contract setting: DocksVillages.flagBase)
+export const FLAG_SOFT_CAP = 2_000;                   // flags up to here stay affordable
+export const FLAG_GROWTH = 1.001905;                  // per flag up to FLAG_SOFT_CAP: flag #2,000 ≈ 45 × the first (≈ 450,000 RF)
+export const FLAG_GROWTH_LATE = Math.pow(2, 1 / 100); // after it: doubles every 100 flags
+/** RF to fill flag number n (0-based). Mirrors DocksVillages.flagPrice. */
+export function flagPriceAt(n: number) {
+  const early = Math.min(n, FLAG_SOFT_CAP), late = Math.max(0, n - FLAG_SOFT_CAP);
+  return Math.floor(FLAG_BASE * Math.pow(FLAG_GROWTH, early) * Math.pow(FLAG_GROWTH_LATE, late));
 }
+/** The next flag's target. */
+export function flagPrice(w: World) {
+  return flagPriceAt(w.villages.filter(v => !v.failed).length);
+}
+
 
 export const ENROLL_CHOICES = ["Keep open at the current price", "Open at a different price", "Close now", "Close at a population"];
 
