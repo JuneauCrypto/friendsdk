@@ -130,7 +130,11 @@ Docks every time (a seeded random, `sim.ts`):
   from a wooden palisade (Lv 1) to stone (Lv 2), a medieval citadel with towers and banners
   (Lv 3, like The Orange Citadel at 10,000+ Friends) and a glowing sci-fi fortress with a
   shield dome (Lv 4+). Gardens (with gardeners at work) grow more and more colourful with the
-  level. 🚩 Flags shows the ladder and can preview every flag at any level (looks only).
+  level. Inside a flag every island has its own shade of the flag's colour, and upgraded islands
+  shine a level brighter (★ on the label: a City or Capital by reward weight, and 2+ items
+  built). 🚩 Flags shows the ladder and can preview every flag at any level (looks only). The
+  tints and gardens are baked into each land's artwork once per look (cached), so big colourful
+  flags stay smooth.
 - **YOU marker.** The Friend you control always has a YOU ▼ over it; your Friends walking with
   you have a small ▾.
 - **Flags read as cities.** On the map every flag has walls by its population level (palisade,

@@ -125,6 +125,27 @@ try {
   await page.waitForTimeout(1200);
   await shot("start");
   const btn = name => game.getByRole("button", { name, exact: false }).first();
+  if (process.env.DOCKS_PERF) {
+    const f = page.frames().find(x => x.parentFrame());
+    await f.evaluate(() => { const w = window; w.__gaps = []; let last = performance.now(); const loop = t => { w.__gaps.push(t - last); last = t; requestAnimationFrame(loop); }; requestAnimationFrame(loop);
+      w.__long = 0; try { new PerformanceObserver(l => { for (const e of l.getEntries()) w.__long += e.duration; }).observe({ type: "longtask", buffered: true }); } catch {} });
+    const sample = async label => { const r = await f.evaluate(() => { const g = window.__gaps.splice(0); g.sort((a, b) => a - b); return { n: g.length, p50: g[g.length >> 1]?.toFixed(1), p95: g[Math.floor(g.length * .95)]?.toFixed(1), max: g.at(-1)?.toFixed(0), long: Math.round(window.__long), dom: document.querySelectorAll("*").length, lands: document.querySelectorAll("img.docks-land").length, items: document.querySelectorAll(".docks-item-mark").length, pend: document.querySelectorAll(".docks-pending").length }; }); console.log(label, JSON.stringify(r)); await f.evaluate(() => { window.__long = 0; }); };
+    await page.waitForTimeout(5000); await sample("idle-start");
+    await btn("Docks").click();
+    await game.locator(".docks-flagcard", { hasText: "Cashcat Cove" }).getByRole("button", { name: /Dock at harbor/ }).click();
+    await page.waitForTimeout(5000); await sample("docked");
+    for (const k of ["d", "s", "a", "w"]) { await page.keyboard.down(k); await page.waitForTimeout(1500); await page.keyboard.up(k); }
+    await sample("walking");
+    for (let i = 0; i < 3; i++) await game.getByRole("button", { name: "Zoom out" }).click();
+    await page.waitForTimeout(4000); await sample("zoomed-out");
+    await game.getByRole("button", { name: "Fit all islands" }).click();
+    await page.waitForTimeout(4000); await sample("fit-all");
+    await game.getByRole("button", { name: "Center on lead" }).click();
+    for (let i = 0; i < 3; i++) await game.getByRole("button", { name: "Zoom in" }).click();
+    await page.waitForTimeout(60000); await sample("idle-60s");
+    await shot("perf-end");
+    process.exit(0);
+  }
   if (process.env.DOCKS_CITY) {
     await btn("Docks").click();
     const card = game.locator(".docks-flagcard", { hasText: "Cashcat Cove" });
