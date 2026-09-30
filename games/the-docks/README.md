@@ -156,9 +156,8 @@ Docks every time (a seeded random, `sim.ts`):
   flag-mates' (picking by hand comes later). On chain: `DocksVillages.ogAllotment`, `OG_CAP`.
   OGs will get more later: an OG council to talk between flags about peace deals, mergers and
   large trades.
-- In the simulation, The Orange Citadel is past 1,000 Friends (Stone walls, 1,000 OG marks); the
-  other flags are at Palisade.
-- **Next: a 3D Docks for big flags,** with islands bridging above and below (see below).
+- In the simulation, The Orange Citadel is past 10,000 Friends (a level 3 Citadel, 1,000 OG
+  marks); the other flags are at Palisade (level 1).
 
 ## War and peace islands, and the peace economy (simulated)
 

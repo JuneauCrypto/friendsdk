@@ -86,7 +86,7 @@ export function GameFrame({ children, friends, selectedFriendId, onSelectFriend,
       {connection}
       {friendsLoading && <p role="status">Loading your Friends…</p>}
       {friendsError && <p role="alert">{friendsError}</p>}
-      <div className="rf-frame-friends">{friends.map((value, index) => <button type="button" key={value.id.toString()} aria-pressed={value.id === selectedFriendId} onClick={() => { onSelectFriend?.(value.id); setMenu(null); }}>
+      <div className={`rf-frame-friends${friends.some(value => value.kind === "owned") ? " ranked" : ""}`}>{friends.map((value, index) => <button type="button" key={value.id.toString()} aria-pressed={value.id === selectedFriendId} onClick={() => { onSelectFriend?.(value.id); setMenu(null); }}>
         {value.kind === "owned" && <span className="rf-frame-friend-art" aria-hidden="true">{value.image ? <img src={value.image} alt="" loading="lazy" /> : <span>#{value.id.toString()}</span>}</span>}
         <span className="rf-frame-friend-text"><strong>{value.label}</strong>
           <small>{value.kind === "sample" ? "Sample · no ownership claim" : [value.generation !== undefined ? `Gen ${value.generation}` : "Hardwired Generations",

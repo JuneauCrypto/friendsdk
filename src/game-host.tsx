@@ -104,7 +104,8 @@ function WalletViewport({ session, publicClient, selection, ...props }: Omit<Gam
   const friend = found && playable.some(value => value.id === found.id) ? found : null;
   const inactiveHidden = needActive && rankById ? ranked.length - playable.length : 0;
   useEffect(() => {
-    if (!friends.length) return;
+    // Only owned Friends are ranked and pictured; sample Friends (local previews) keep their order.
+    if (!friends.length || !friends.some(value => value.kind === "owned")) return;
     const controller = new AbortController(), source = friends;
     void (async () => {
       const list = await readFriendRanks(publicClient, source, { signal: controller.signal }).catch(() => null);
