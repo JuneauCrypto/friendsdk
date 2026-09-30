@@ -192,11 +192,12 @@ try {
     await page.waitForTimeout(1500); await shot("deck");
     const where = async () => (await game.locator(".docks-where strong").textContent()).trim();
     const before = await where();
-    const down = game.locator(".docks-stairs:not(.other-level)", { hasText: "⬇" }).first(), bb = await down.boundingBox();
-    const fb = await page.locator("iframe").boundingBox();
-    await page.mouse.click(bb.x + bb.width / 2, bb.y + bb.height);
-    await page.waitForTimeout(4000); await shot("deck-down");
-    console.log("stairs:", before, "->", await where(), fb ? "" : "");
+    const stairsBtn = game.getByRole("button", { name: /⬇ Stairs down to / });
+    const lower = (await stairsBtn.textContent()).replace(/⬇ Stairs down to /, "").trim();
+    await stairsBtn.click();
+    await game.locator(".docks-where strong", { hasText: lower }).waitFor();
+    await page.waitForTimeout(1500); await shot("deck-down");
+    console.log("stairs:", before, "->", await where());
     console.log("opaque lands", await game.locator(".docks-land:not(.other-level)").count(), "faded", await game.locator(".docks-land.other-level").count(), "stairs markers", await game.locator(".docks-stairs:not(.other-level)").count());
     console.log("ok city", errors); process.exit(0);
   }

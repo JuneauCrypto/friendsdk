@@ -621,6 +621,12 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     for (const m of unsaved) addToPlot(w, home() ?? mine[0], m);
     goTo(home()); setArranging(false); setSelected([]); bump(); say("Back to your saved islands.");
   }
+  /** Take the stairs to a stacked island: you (and your crew) arrive on its land. */
+  function takeStairs(to: Plot) {
+    const w = world.current!, pl = to.friends[0]; if (!pl) return;
+    const from = here ?? plotOf(w, lead), sp = spawnOn(w, pl); api.current?.teleport(sp.x, sp.y, sp.z); setHere(to);
+    say(`${zOf(to.berth) > zOf(from?.berth) ? "⬆ Up" : "⬇ Down"} the stairs to ${to.name} (${levelName(zOf(to.berth)).toLowerCase()}).`);
+  }
   function dockIsland(b: Berth) {
     const w = world.current!, p = island();
     if (!p.friends.length) { say("Deploy at least one Friend to this island before docking it."); return; }
@@ -629,7 +635,7 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
     econ.current.rf -= DOCKING_FEE; econ.current.docksFund += DOCKING_FEE;
     setMenu(null); setIslandPop(null); goTo(p); bump();
     const n = neighboursOf(w, p).filter(q => !q.mine), fl = n.map(q => villageOf(w, q)).find(Boolean);
-    say(`${p.name} docked${zOf(b) ? ` on the ${levelName(zOf(b)).toLowerCase()}` : ""}${neighboursOf(w, p).length ? ` next to ${neighboursOf(w, p).map(q => q.name).join(", ")}` : ""}: ${DOCKING_FEE} RF docking fee into The Docks fund (simulated). ${zOf(b) ? "Stairs join the levels" : "A boardwalk joins you"}: your Friends can walk across.${fl ? ` You're at ${fl.name}'s harbor: its whole market is open to you (🧺 Market).` : ""}${n.length ? " 💬 Chat is open with your new neighbours." : ""}`);
+    say(`${p.name} docked${zOf(b) ? ` on the ${levelName(zOf(b)).toLowerCase()}` : ""}${neighboursOf(w, p).length ? ` next to ${neighboursOf(w, p).map(q => q.name).join(", ")}` : ""}: ${DOCKING_FEE} RF docking fee into The Docks fund (simulated). ${zOf(b) ? "Stairs join the levels: tap the ⬆/⬇ Stairs button above the menu to go up or down" : "A boardwalk joins you: your Friends can walk across"}.${fl ? ` You're at ${fl.name}'s harbor: its whole market is open to you (🧺 Market).` : ""}${n.length ? " 💬 Chat is open with your new neighbours." : ""}`);
   }
   /** Tap another island → Dock: the first free loading zone right next to it. */
   /** Tap another island → Dock: the first free loading zone beside it (or, with `level`, straight above/below it). */
@@ -1005,7 +1011,10 @@ export default function TheDocks({ friendId, client, paused }: GameComponentProp
         : dirty ? <div className="docks-row tight docks-unsaved">
           <button type="button" className="docks-act" disabled={saving} onClick={() => void saveOnChain()}>{saving ? "Saving…" : `⛓ ${[...pending.plots].some(p => !nftOf(p)) ? "Save" : "Save"} · ${pending.moved.length.toLocaleString()} moved · ${fmt(pending.rf)} RF`}</button>
           {saved.size > 0 && <button type="button" onClick={discardChanges}>Undo</button>}</div>
-        : <span className="docks-hint">WASD / arrows or tap to walk · gangways (⇄) join docked islands</span>}
+        : <span className="docks-hint">WASD / arrows or tap to walk · boardwalks (⇄) join docked islands{w.stairs.length ? " · ⬆⬇ stairs join decks" : ""}</span>}
+      {(() => { // on an island stacked with another: one tap takes the stairs
+        const on = here ?? plotOf(w, lead), links = on ? w.stairs.filter(s => s.lower === on || s.upper === on).map(s => ({ up: s.lower === on, to: s.lower === on ? s.upper : s.lower })).filter(l => canEnter(w, l.to)) : [];
+        return links.length ? <div className="docks-row tight docks-stairs-bar">{links.map(l => <button type="button" key={l.to.id} onClick={() => takeStairs(l.to)}>{l.up ? "⬆ Stairs up to" : "⬇ Stairs down to"} {l.to.name}</button>)}</div> : null; })()}
       <div className="docks-nav">
         <button type="button" className="docks-arrange-btn" onClick={startArranging} disabled={uiBlocked}>✥<span>Arrange</span></button>
         <button type="button" onClick={() => setCrewBar(true)} disabled={uiBlocked}>👥<span>Crew</span></button>

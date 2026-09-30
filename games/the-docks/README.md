@@ -24,6 +24,14 @@ is a saved layout that belongs to the wallet that built it, and it can't be sold
   islands are joined by **stairs** on little piers off their sides. Your level is drawn solid,
   the others faded. On chain: `DocksIslands.dockAt(island, x, y, z)`, `levelOf`, `isLoadingZoneAt`;
   bridges stay on one level.
+- **A flag's land.** Inside a flag, the gaps between its islands on the same level are filled in
+  with land you can walk across: woodland at first (trees, bushes, fallen branches, rocks, dirt
+  roads), then fences and lamp posts, then hedges, flower beds, benches and cobbled roads, then
+  stone plazas with statues, fountains and banners, and at the top neon roads, holo trees and
+  light pylons. The boardwalks between its islands become its roads.
+- **Stairs made easy.** Standing on an island stacked above or below another, a **⬆ Stairs up
+  to …** / **⬇ Stairs down to …** button appears over the menu: one tap takes you (and your crew)
+  there. The stairs on the map still work too.
 - **Harbors.** Every flag keeps a harbor: free slips along its peace side (and the decks over
   its peace islands). **⚓ Dock at harbor** from its card in ⚓ Docks puts you there, and docking
   at any of its peace islands opens the flag's **whole market** to you (🧺 its market).

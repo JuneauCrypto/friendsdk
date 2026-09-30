@@ -70,6 +70,42 @@ export function spawnOn(w: World, pl: Placed) {
   return best;
 }
 
+/** What stands on a flag's open land at a spot, by the flag's level (null: nothing). Small flags
+ *  are woodland (trees, bushes, branches, rocks); then fences and lamp posts; then flower beds,
+ *  benches and hedges; then statues and fountains; then neon lamps and holo trees. */
+function decoFor(lv: number, r: number) {
+  const pick = (list: string[]) => list[r % list.length];
+  const roll = (r >> 5) % 100;
+  if (roll > [60, 66, 72, 78, 82, 85][Math.min(5, lv)]) return null;
+  if (lv <= 0) return pick(["tree", "tree", "pine", "bush", "branch", "rock", "tuft"]);
+  if (lv === 1) return pick(["tree", "pine", "tree", "bush", "fence", "branch", "rock", "lamp"]);
+  if (lv === 2) return pick(["tree", "pine", "hedge", "flowers", "lamp", "bench", "tree", "fence"]);
+  if (lv === 3) return pick(["tree", "hedge", "flowers", "lamp", "statue", "fountain", "banner", "pine"]);
+  return pick(["holotree", "neon", "holotree", "pylon", "flowers", "neon", "tree", "statue"]);
+}
+const SMALL_DECO = new Set(["bush", "tuft", "rock", "branch", "flowers", "fence", "bench"]);
+function Deco({ kind, color }: { kind: string; color: string }) {
+  switch (kind) {
+    case "tree": return <g><rect x={-1} y={-6} width={2} height={6} fill="#5b3a1e" /><circle cx={0} cy={-10} r={5.5} fill="#2f7d32" stroke="#000" strokeWidth={0.5} /><circle cx={-2} cy={-11.5} r={2} fill="#4caf50" /></g>;
+    case "pine": return <g><rect x={-0.8} y={-4} width={1.6} height={4} fill="#5b3a1e" /><path d="M0 -17L5 -4H-5Z" fill="#1b5e20" stroke="#000" strokeWidth={0.5} /></g>;
+    case "bush": return <g><ellipse cx={0} cy={-2.5} rx={4.5} ry={3} fill="#388e3c" stroke="#000" strokeWidth={0.4} /></g>;
+    case "branch": return <g><path d="M-5 -1L5 -3" stroke="#6d4c2f" strokeWidth={1.6} /><path d="M1 -2.2L3 -5" stroke="#6d4c2f" strokeWidth={1} /></g>;
+    case "rock": return <g><path d="M-4 0L-3 -3L1 -4L4 -1L3 0Z" fill="#9e9e9e" stroke="#000" strokeWidth={0.4} /></g>;
+    case "tuft": return <g><path d="M-2 0L-1 -3M0 0L0 -4M2 0L1 -3" stroke="#43a047" strokeWidth={0.8} /></g>;
+    case "fence": return <g stroke="#8d6e63" strokeWidth={1}><path d="M-6 0V-4M-2 -1V-5M2 -2V-6M6 -3V-7" /><path d="M-6 -3L6 -6" /></g>;
+    case "lamp": return <g><rect x={-0.6} y={-12} width={1.2} height={12} fill="#333" /><circle cx={0} cy={-12.5} r={1.8} fill="#ffe082" stroke="#000" strokeWidth={0.4} /></g>;
+    case "hedge": return <g><rect x={-6} y={-4} width={12} height={4} rx={1.5} fill="#2e7d32" stroke="#000" strokeWidth={0.4} /></g>;
+    case "flowers": return <g>{[-3, 0, 3].map((dx, i) => <circle key={i} cx={dx} cy={-1.5 - (i % 2)} r={1.3} fill={[color, "#ff5c8a", "#ffd23f"][i]} />)}</g>;
+    case "bench": return <g fill="#795548" stroke="#000" strokeWidth={0.3}><rect x={-4} y={-3} width={8} height={1.2} /><rect x={-4} y={-5} width={8} height={0.9} /><rect x={-3.5} y={-2} width={0.8} height={2} /><rect x={2.7} y={-2} width={0.8} height={2} /></g>;
+    case "statue": return <g><rect x={-3} y={-2.5} width={6} height={2.5} fill="#bdbdbd" stroke="#000" strokeWidth={0.4} /><rect x={-1.2} y={-9} width={2.4} height={6.5} fill="#e0e0e0" stroke="#000" strokeWidth={0.4} /><circle cx={0} cy={-10.5} r={1.6} fill="#e0e0e0" stroke="#000" strokeWidth={0.4} /></g>;
+    case "fountain": return <g><ellipse cx={0} cy={-1.5} rx={6} ry={2.5} fill="#90caf9" stroke="#000" strokeWidth={0.4} /><rect x={-0.8} y={-7} width={1.6} height={5} fill="#e0e0e0" /><circle cx={0} cy={-7.5} r={1.4} fill="#bbdefb" /></g>;
+    case "banner": return <g><rect x={-0.5} y={-14} width={1} height={14} fill="#333" /><path d="M0.5 -14h6v5l-3 -1.5l-3 1.5Z" fill={color} stroke="#000" strokeWidth={0.4} /></g>;
+    case "holotree": return <g className="deco-glow" style={{ ["--flag" as string]: color }}><rect x={-0.7} y={-6} width={1.4} height={6} fill="#263238" /><path d="M0 -18L6 -6H-6Z" fill={color} fillOpacity={0.35} stroke={color} strokeWidth={0.8} /></g>;
+    case "neon": return <g className="deco-glow" style={{ ["--flag" as string]: color }}><rect x={-0.6} y={-13} width={1.2} height={13} fill="#263238" /><rect x={-2.5} y={-15} width={5} height={2} fill={color} /></g>;
+    case "pylon": return <g className="deco-glow" style={{ ["--flag" as string]: color }}><path d="M-3 0L0 -16L3 0Z" fill="#1b1f24" stroke={color} strokeWidth={0.7} /><circle cx={0} cy={-16} r={1.6} fill="#fff" /></g>;
+  }
+  return null;
+}
 /** Screen offset of a ground point from the ground origin (artwork pixels). */
 const artOffset = (x: number, y: number) => { const s = groundScreen(x, y), o = groundScreen(0, 0); return { x: s.x - o.x, y: s.y - o.y }; };
 
@@ -101,6 +137,7 @@ export function DocksView(props: Props) {
   const player = useRef({ x: 0, y: 0, z: 0, facing: "down" as SpriteFacing, walking: false, target: null as null | { x: number; y: number } });
   const focus = useRef<{ x: number; y: number; z?: number } | null>(null);
   const [pz, setPz] = useState(0);                                   // the lead's level (other levels are drawn faded)
+  const groundLevel = (v: Village) => props.lookOverride ?? (v.founded ? SK.tierOfFlag(v) : 0);
   const keys = useRef(new Set<string>());
   const [vis, setVis] = useState({ x0: -160, y0: -160, x1: 160, y1: 160 });  // visible box, world tiles
   const state = useRef({ ...props, lastPlot: null as Plot | null, lastBlock: 0, visKey: "" });
@@ -392,7 +429,9 @@ export function DocksView(props: Props) {
   visRef.current = simple ? [] : visible;
   useEffect(() => { if (!simple) props.onVisible(visible.map(v => v.pl)); }, [visible, simple]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const boards = useMemo(() => visible.map(v => diamond(v.x, v.y, v.x + T(v.pl.m.cw), v.y + T(v.pl.m.ch), v.z)).join(""), [visible]);
+  // dark boards under each land (not in a flag's land: its ground shows through instead)
+  const onGround = useMemo(() => { const s = new Set<Plot>(); for (const g of world.grounds) for (const p of g.village.members) if (plotZ(p) === g.z) s.add(p); return s; }, [world, version]); // eslint-disable-line react-hooks/exhaustive-deps
+  const boards = useMemo(() => visible.filter(v => !onGround.has(v.plot)).map(v => diamond(v.x, v.y, v.x + T(v.pl.m.cw), v.y + T(v.pl.m.ch), v.z)).join(""), [visible, onGround]);
   const holes = useMemo(() => {
     const out: { key: string; d: string; x: number; y: number; id: bigint }[] = [];
     for (const plot of world.plots) {
@@ -414,12 +453,37 @@ export function DocksView(props: Props) {
       if (tileAt(world, x + 0.5, y + 0.5, z)?.plot) continue;         // island ground takes precedence
       (kind === "bridge" ? br : g).push(diamond(x, y, x + 1, y + 1, z));
     }
+    const roads = new Map<number, string[]>();                      // inside a flag's land boardwalks are its roads, by level
     for (const r of world.decks) {                                  // boardwalk rectangles
       const sh = LEVEL_TILES * r.z; if (r.x1 + sh < vis.x0 || r.x0 + sh > vis.x1 || r.y1 + sh < vis.y0 || r.y0 + sh > vis.y1) continue;
-      g.push(diamond(r.x0, r.y0, r.x1, r.y1, r.z));
+      const cx = (r.x0 + r.x1) / 2, cy = (r.y0 + r.y1) / 2, gr = world.grounds.find(q => q.z === r.z && cx >= q.box.x0 && cx < q.box.x1 && cy >= q.box.y0 && cy < q.box.y1);
+      if (gr) { const lv = Math.min(4, groundLevel(gr.village)); (roads.get(lv) ?? roads.set(lv, []).get(lv)!).push(diamond(r.x0, r.y0, r.x1, r.y1, r.z)); }
+      else g.push(diamond(r.x0, r.y0, r.x1, r.y1, r.z));
     }
-    return { gangway: g.join(""), bridge: br.join("") };
+    return { gangway: g.join(""), bridge: br.join(""), roads: [...roads].map(([lv, d]) => ({ lv, d: d.join("") })) };
   }, [world, version, vis]); // eslint-disable-line react-hooks/exhaustive-deps
+  // a flag's land between its islands: terrain, and trees, rocks, lamps, statues… by its level
+  // (drawn as transformed boxes, not SVG paths: big flat areas composite far faster)
+  const grounds = useMemo(() => world.grounds.map((g, i) => { const o = toScreen(g.box.x0, g.box.y0, g.z), u = groundScreen(1, 0), v = groundScreen(0, 1), z0 = groundScreen(0, 0);
+    return { key: `${g.village.id}|${g.z}|${i}`, lv: groundLevel(g.village), z: g.z, color: g.village.color, left: o.x, top: o.y, w: g.box.x1 - g.box.x0, h: g.box.y1 - g.box.y0,
+      m: `matrix(${u.x - z0.x}, ${u.y - z0.y}, ${v.x - z0.x}, ${v.y - z0.y}, 0, 0)` }; }), [world, version, props.lookOverride]); // eslint-disable-line react-hooks/exhaustive-deps
+  type Deco = { key: string; x: number; y: number; kind: string; z: number; depth: number; color: string };
+  const decos = useMemo(() => {
+    const far = props.zoom < 0.6, out: Deco[] = [], STEP = far ? 10 : 5, CAP = far ? 220 : 450;   // zoomed out: fewer, bigger things
+    for (const g of world.grounds) {
+      const lv = groundLevel(g.village), sh = LEVEL_TILES * g.z, b = g.box;
+      if (b.x1 + sh < vis.x0 || b.x0 + sh > vis.x1 || b.y1 + sh < vis.y0 || b.y0 + sh > vis.y1) continue;
+      const x0 = Math.max(b.x0, Math.floor((vis.x0 - sh) / STEP) * STEP), x1 = Math.min(b.x1, vis.x1 - sh), y0 = Math.max(b.y0, Math.floor((vis.y0 - sh) / STEP) * STEP), y1 = Math.min(b.y1, vis.y1 - sh);
+      for (let x = x0; x < x1; x += STEP) for (let y = y0; y < y1; y += STEP) {
+        const hsh = hash(`${x},${y},${g.z}`), jx = x + (hsh % 5), jy = y + ((hsh >> 3) % 5);
+        const t = tileAt(world, jx + 0.5, jy + 0.5, g.z); if (!t || t.plot || t.walkway !== "ground") continue;   // only open land, not islands or roads
+        const kind = decoFor(lv, hsh >> 6); if (!kind || (far && SMALL_DECO.has(kind))) continue;
+        out.push({ key: `${x},${y},${g.z}`, x: jx + 0.5, y: jy + 0.5, kind, z: g.z, depth: jx + jy, color: g.village.color });
+        if (out.length > CAP) return out;
+      }
+    }
+    return out;
+  }, [world, version, vis, props.lookOverride, props.zoom < 0.6]); // eslint-disable-line react-hooks/exhaustive-deps
   // what's on screen, in screen px (markers, labels and gates off screen aren't drawn)
   const scr = useMemo(() => { const c = [toScreen(vis.x0, vis.y0), toScreen(vis.x1, vis.y0), toScreen(vis.x0, vis.y1), toScreen(vis.x1, vis.y1)];
     return { x0: Math.min(...c.map(p => p.x)) - 120, x1: Math.max(...c.map(p => p.x)) + 120, y0: Math.min(...c.map(p => p.y)) - 120, y1: Math.max(...c.map(p => p.y)) + 120 }; }, [vis]);
@@ -499,8 +563,9 @@ export function DocksView(props: Props) {
           <path d={c.ground} className="yard" /><path d={c.back} className="wall back" /><path d={c.backCrest} className="crest" />
           {c.dome && <path d={c.dome} className="dome" />}</g>)}
       </svg>
+      {grounds.map(g => <div key={g.key} className={`docks-ground l${Math.min(5, g.lv)}${g.z !== pz ? " other-level" : ""}`} style={{ left: g.left, top: g.top, width: g.w, height: g.h, transform: g.m, zIndex: 4, ["--flag" as string]: g.color }} />)}
       <svg className="docks-seams" width="1" height="1" style={{ zIndex: 5 }}>
-        <path d={walkways.gangway} className="gangway" /><path d={walkways.bridge} className="bridge" /><path d={boards} className="pier" />
+        <path d={walkways.gangway} className="gangway" /><path d={walkways.bridge} className="bridge" />{walkways.roads.map(r => <path key={r.lv} d={r.d} className={`road l${r.lv}`} />)}<path d={boards} className="pier" />
         {holes.map(h => <path key={h.key} d={h.d} className="hole" />)}</svg>
       {holes.map(h => <span key={h.key} className="docks-hole-tag" style={{ left: h.x, top: h.y, zIndex: 9 }}>hole · #{String(h.id)}</span>)}
       {!simple && visible.map(({ plot, pl, x, y, z }, i) => {
@@ -517,6 +582,12 @@ export function DocksView(props: Props) {
         return <img key={`${plot.id}-${pl.m.id}`} className={`docks-land ${plot.berth ? "" : "adrift"}${z !== pz ? " other-level" : ""}`} src={src} alt="" draggable={false}
           style={{ left: o.x - f.anchor.x, top: o.y - f.anchor.y, zIndex: 10 + i }} />;
       })}
+      {!simple && (() => { // trees, lamps, statues… in a flag's land, in depth order with the lands
+        const keys = visible.map(v => v.z * 1e7 + v.x + v.y + T(v.pl.m.cw + v.pl.m.ch) / 2);
+        return decos.map(d => { const k = d.z * 1e7 + d.depth; let lo = 0, hi = keys.length; while (lo < hi) { const m = (lo + hi) >> 1; if (keys[m] < k) lo = m + 1; else hi = m; }
+          const c = toScreen(d.x, d.y, d.z);
+          return <svg key={d.key} className={`docks-deco${d.z !== pz ? " other-level" : ""}`} width="1" height="1" style={{ left: c.x, top: c.y, zIndex: 10 + lo }} aria-hidden="true"><Deco kind={d.kind} color={d.color} /></svg>; });
+      })()}
       <svg className="docks-seams" width="1" height="1" style={{ zIndex: 500 }}>
         {myVisible.map(({ pl, x, y, z }) => <path key={String(pl.m.id)} d={diamond(x, y, x + T(pl.m.cw), y + T(pl.m.ch), z)}
           className={selSet.has(pl) ? "selected-outline" : "other-outline"} />)}

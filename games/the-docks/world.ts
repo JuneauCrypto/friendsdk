@@ -80,6 +80,8 @@ export type World = {
   decks: WalkRect[];                                               // boardwalk rectangles (between close neighbours, piers)
   deckGrid: Map<number, WalkRect[]>;                               // the same by 32-tile bucket
   lifts: Map<number, Lift>;                                        // stairs between levels, keyed tk(x, y, z)
+  stairs: { lower: Plot; upper: Plot }[];                          // stacked islands joined by stairs
+  grounds: { village: Village; z: number; box: Box }[];            // a flag's land between its islands, per level (walkable)
   grid: Map<number, Plot[]>;                                       // islands by 32-tile bucket (for tileAt)
   blocks: { plots: Plot[]; box: Box }[];                           // islands joined by neighbouring berths
   villages: Village[];
@@ -132,7 +134,7 @@ export const plotOf = (w: World, id: bigint) => w.plots.find(p => p.friends.some
 /* ── building the world ── */
 
 export function emptyWorld(): World {
-  return { plots: [], visits: new Map(), version: 0, bridges: [], occ: new Map(), holeOcc: new Map(), berths: new Map(), origin: new Map(), box: new Map(), cols: [], rows: [], walk: new Map(), decks: [], deckGrid: new Map(), lifts: new Map(), grid: new Map(), blocks: [], villages: [], items: [], bonds: new Map(), cooldown: new Map(), genesis: Date.now() };
+  return { plots: [], visits: new Map(), version: 0, bridges: [], occ: new Map(), holeOcc: new Map(), berths: new Map(), origin: new Map(), box: new Map(), cols: [], rows: [], walk: new Map(), decks: [], deckGrid: new Map(), lifts: new Map(), stairs: [], grounds: [], grid: new Map(), blocks: [], villages: [], items: [], bonds: new Map(), cooldown: new Map(), genesis: Date.now() };
 }
 
 export function rebuild(w: World) {
@@ -261,7 +263,7 @@ function layout(w: World) {
   }
   // walkways: a boardwalk between neighbours on a level (across their whole shared side),
   // stairs between levels, bridges wherever built
-  w.walk = new Map(); w.lifts = new Map(); w.decks = []; w.deckGrid = new Map();
+  w.walk = new Map(); w.lifts = new Map(); w.stairs = []; w.decks = []; w.deckGrid = new Map();
   const deck = (x0: number, y0: number, x1: number, y1: number, z: number) => {
     if (x1 <= x0 || y1 <= y0) return;
     const r: WalkRect = { x0, y0, x1, y1, z }; w.decks.push(r);
@@ -285,6 +287,7 @@ function layout(w: World) {
     }
     const up = w.berths.get(bk({ x: p.berth!.x, y: p.berth!.y, z: z + 1 }));
     if (up) {
+      w.stairs.push({ lower: p, upper: up });
       // Stairs sit on little piers just off the islands' sides (never blocked by buildings):
       // up from the lower island's left side, down from the upper island's right side. Each
       // arrives on a pier beside the other island, a step below its own stairs.
@@ -299,6 +302,7 @@ function layout(w: World) {
       }
     }
   }
+  refreshGrounds(w);
   for (const br of w.bridges) {
     const a = centre(br.a), b = centre(br.b), len = Math.hypot(b.x - a.x, b.y - a.y), z = zOf(br.a.berth);
     for (let t = 0; t <= len; t += 0.5) {
@@ -310,6 +314,17 @@ function layout(w: World) {
   }
 }
 const BUCKET = 32;
+/** A founded flag's islands on one level share their land: the gaps between them are filled in
+ *  (trees, roads, and more with every level), and it can be walked across. */
+export function refreshGrounds(w: World) {
+  w.grounds = [];
+  for (const v of w.villages) if (v.founded && !v.failed) {
+    const byZ = new Map<number, Box>();
+    for (const p of v.members) { const b = w.box.get(p); if (!b || !p.berth) continue; const z = zOf(p.berth), g = byZ.get(z);
+      byZ.set(z, g ? { x0: Math.min(g.x0, b.x0), y0: Math.min(g.y0, b.y0), x1: Math.max(g.x1, b.x1), y1: Math.max(g.y1, b.y1) } : { ...b }); }
+    for (const [z, box] of byZ) if (v.members.filter(p => zOf(p.berth) === z).length > 1) w.grounds.push({ village: v, z, box: { x0: box.x0 - 1, y0: box.y0 - 1, x1: box.x1 + 1, y1: box.y1 + 1 } });
+  }
+}
 
 /** Sample neighbours float at their berths; my islands start floating free until docked. */
 export function createWorld(neighbours: Plot[], mineToo: Plot[]): World {
@@ -515,7 +530,7 @@ export function joinProblem(w: World, v: Village, p: Plot): string | null {
 }
 export function addMember(w: World, v: Village, p: Plot, stance: Stance = "peace") {
   const why = joinProblem(w, v, p); if (why) throw new Error(why);
-  v.members.push(p); v.stance.set(p, stance); w.version++;
+  v.members.push(p); v.stance.set(p, stance); refreshGrounds(w); w.version++;
 }
 export function flagTile(w: World, v: Village) {
   const o = w.origin.get(v.seat); return o ? { x: o.x + v.flag.x, y: o.y + v.flag.y } : null;
@@ -523,7 +538,7 @@ export function flagTile(w: World, v: Village) {
 
 /* ── walking & access (world tiles) ── */
 
-export type TileInfo = { plot: Plot | null; placed: Placed | null; blocked: boolean; walkway?: "gangway" | "bridge"; lift?: Lift };
+export type TileInfo = { plot: Plot | null; placed: Placed | null; blocked: boolean; walkway?: "gangway" | "bridge" | "ground"; lift?: Lift };
 function islandTile(w: World, p: Plot, x: number, y: number): TileInfo | null {
   const o = w.origin.get(p); if (!o) return null;
   const lx = x - o.x, ly = y - o.y, pl = w.occ.get(p)?.get(ck(Math.floor(lx / CELL), Math.floor(ly / CELL)));
@@ -541,7 +556,8 @@ export function tileAt(w: World, x: number, y: number, z = 0): TileInfo | undefi
     const b = w.box.get(p)!; if (tx < b.x0 || tx >= b.x1 || ty < b.y0 || ty >= b.y1) continue;
     const t = islandTile(w, p, tx, ty); if (t) return lift ? { ...t, blocked: false, lift } : t;
   }
-  const k = w.walk.get(tk(tx, ty, z)) ?? ((w.deckGrid.get(ck(Math.floor(tx / BUCKET), Math.floor(ty / BUCKET))) ?? []).some(r => r.z === z && tx >= r.x0 && tx < r.x1 && ty >= r.y0 && ty < r.y1) ? "gangway" as const : undefined);
+  const k = w.walk.get(tk(tx, ty, z)) ?? ((w.deckGrid.get(ck(Math.floor(tx / BUCKET), Math.floor(ty / BUCKET))) ?? []).some(r => r.z === z && tx >= r.x0 && tx < r.x1 && ty >= r.y0 && ty < r.y1) ? "gangway" as const
+    : w.grounds.some(g => g.z === z && tx >= g.box.x0 && tx < g.box.x1 && ty >= g.box.y0 && ty < g.box.y1) ? "ground" as const : undefined);
   return lift ? { plot: null, placed: null, blocked: false, walkway: "gangway", lift } : k ? { plot: null, placed: null, blocked: false, walkway: k } : undefined;
 }
 /** Walking onto an island: your own; any island docked next to or bridged to one of yours (for
